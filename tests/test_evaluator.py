@@ -11,7 +11,14 @@ import ast
 
 import pytest
 
-from djaudit.evaluator import MAX_SIZE, Budget, Evaluator, Scope, evaluate
+from djaudit.evaluator import (
+    MAX_SIZE,
+    Budget,
+    Evaluator,
+    Scope,
+    collect_imports,
+    evaluate,
+)
 from djaudit.values import Value
 
 
@@ -257,3 +264,119 @@ class TestUnsupported:
             except SyntaxError:
                 continue
             assert isinstance(evaluate(node), Value)
+
+
+def module_scope(source: str, names: dict[str, Value] | None = None) -> Scope:
+    """Build a scope from module source, so imports are recognised as written."""
+    tree = ast.parse(source)
+    return Scope(names=names or {}, imports=collect_imports(tree))
+
+
+class TestImportTracking:
+    def test_plain_import(self) -> None:
+        scope = module_scope("import os")
+        node = ast.parse("os.environ", mode="eval").body
+        assert scope.origin(node) == "os.environ"
+
+    def test_from_import(self) -> None:
+        scope = module_scope("from os import environ")
+        node = ast.parse("environ.get", mode="eval").body
+        assert scope.origin(node) == "os.environ.get"
+
+    def test_aliased_import(self) -> None:
+        scope = module_scope("import os.path as p")
+        node = ast.parse("p.join", mode="eval").body
+        assert scope.origin(node) == "os.path.join"
+
+    def test_an_unimported_name_has_no_origin(self) -> None:
+        # Otherwise a local variable called `environ` would be mistaken for
+        # os.environ and silently change a rule's answer.
+        scope = module_scope("x = 1")
+        node = ast.parse("environ.get", mode="eval").body
+        assert scope.origin(node) is None
+
+
+class TestEnvironmentAccess:
+    def test_getenv_with_a_default_resolves_to_the_default(self) -> None:
+        # The default is what a fresh deployment gets, which is exactly the
+        # case worth warning about.
+        scope = module_scope("import os")
+        result = value_of("os.getenv('DEBUG', 'True')", scope)
+        assert result.is_literal
+        assert result.literal == "True"
+        assert result.env_dependent
+
+    def test_environ_get_with_a_default(self) -> None:
+        scope = module_scope("import os")
+        result = value_of("os.environ.get('ALLOWED_HOSTS', 'localhost')", scope)
+        assert result.literal == "localhost"
+        assert result.env_dependent
+
+    def test_keyword_default(self) -> None:
+        # The form healthchecks uses: os.getenv(s, default=default)
+        scope = module_scope("import os")
+        result = value_of("os.getenv('DEBUG', default='True')", scope)
+        assert result.literal == "True"
+        assert result.env_dependent
+
+    def test_from_os_import_environ(self) -> None:
+        scope = module_scope("from os import environ")
+        result = value_of("environ.get('DEBUG', 'True')", scope)
+        assert result.literal == "True"
+
+    def test_from_os_import_getenv(self) -> None:
+        scope = module_scope("from os import getenv")
+        result = value_of("getenv('DEBUG', 'True')", scope)
+        assert result.literal == "True"
+
+    def test_getenv_without_a_default_resolves_to_none(self) -> None:
+        # os.getenv returns None when unset. That is a value, not the absence
+        # of one, and a rule asking "is SECRET_KEY unset" needs it.
+        scope = module_scope("import os")
+        result = value_of("os.getenv('SECRET_KEY')", scope)
+        assert result.is_literal
+        assert result.literal is None
+        assert result.env_dependent
+
+    def test_environ_get_without_a_default_resolves_to_none(self) -> None:
+        scope = module_scope("import os")
+        result = value_of("os.environ.get('SECRET_KEY')", scope)
+        assert result.literal is None
+        assert result.env_dependent
+
+    def test_direct_subscript_has_no_default(self) -> None:
+        # os.environ["DEBUG"] raises KeyError when unset, so unlike .get there
+        # genuinely is no value -- only a dependency to record.
+        scope = module_scope("import os")
+        result = value_of("os.environ['SECRET_KEY']", scope)
+        assert result.is_unknown
+        assert result.env_dependent
+
+    def test_taint_survives_being_used(self) -> None:
+        scope = module_scope("import os")
+        result = value_of("os.getenv('HOST', 'localhost') + '/api'", scope)
+        assert result.literal == "localhost/api"
+        assert result.env_dependent
+
+    def test_an_unresolvable_default_is_unknown(self) -> None:
+        scope = module_scope("import os")
+        assert value_of("os.getenv('X', mystery())", scope).is_unknown
+
+    def test_a_local_variable_named_environ_is_not_the_environment(self) -> None:
+        scope = module_scope("x = 1", names={"environ": Value.of({"A": "b"})})
+        result = value_of("environ.get('A', 'fallback')", scope)
+        assert not result.env_dependent
+
+
+class TestSubscript:
+    def test_indexing_a_resolved_container(self) -> None:
+        scope = Scope(names={"DATABASES": Value.of({"default": {"NAME": "app"}})})
+        assert literal("DATABASES['default']", scope) == {"NAME": "app"}
+
+    def test_list_index(self) -> None:
+        scope = Scope(names={"HOSTS": Value.of(["a", "b"])})
+        assert literal("HOSTS[0]", scope) == "a"
+
+    def test_a_missing_key_is_unknown_not_a_crash(self) -> None:
+        scope = Scope(names={"D": Value.of({"a": 1})})
+        assert value_of("D['nope']", scope).is_unknown

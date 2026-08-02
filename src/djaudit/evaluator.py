@@ -73,14 +73,46 @@ class Scope:
 
     ``names`` holds already-evaluated bindings. ``functions`` holds local
     definitions the evaluator may follow, which is what lets a project's own
-    ``envbool``-style helper resolve.
+    ``envbool``-style helper resolve. ``imports`` maps a local name to the
+    dotted path it came from, so ``from os import environ`` and ``import os``
+    are recognised as the same thing rather than needing two patterns each.
     """
 
     names: dict[str, Value] = field(default_factory=dict)
     functions: dict[str, ast.FunctionDef] = field(default_factory=dict)
+    imports: dict[str, str] = field(default_factory=dict)
 
     def child(self, names: dict[str, Value]) -> Scope:
-        return Scope(names={**self.names, **names}, functions=self.functions)
+        return Scope(names={**self.names, **names}, functions=self.functions, imports=self.imports)
+
+    def origin(self, node: ast.expr) -> str | None:
+        """Dotted path an expression refers to, following imports.
+
+        ``os.environ.get`` and a module that did ``from os import environ``
+        both resolve to ``os.environ.get``. Returns None for anything that is
+        not a plain attribute chain rooted in a known import.
+        """
+        if isinstance(node, ast.Name):
+            return self.imports.get(node.id)
+        if isinstance(node, ast.Attribute):
+            base = self.origin(node.value)
+            return f"{base}.{node.attr}" if base else None
+        return None
+
+
+def collect_imports(module: ast.Module) -> dict[str, str]:
+    """Map every locally bound import name to its dotted origin."""
+    imports: dict[str, str] = {}
+    for node in ast.walk(module):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports[alias.asname or alias.name.split(".")[0]] = (
+                    alias.name if alias.asname else alias.name.split(".")[0]
+                )
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                imports[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return imports
 
 
 class Evaluator:
@@ -317,9 +349,60 @@ class Evaluator:
         except Exception:  # target code: any failure means 'we cannot tell'
             return Value.unknown("operation failed")
 
+    # -- environment --------------------------------------------------------
+
+    def _eval_Subscript(self, node: ast.Subscript, depth: int) -> Value:  # noqa: N802
+        if self.scope.origin(node.value) in _ENVIRON_PATHS:
+            # os.environ["DEBUG"] with no default. The deployment we care about
+            # is the one where nobody set it, and there it raises KeyError --
+            # so there is no value to reason about, only a dependency to record.
+            return Value.unknown("environment variable with no default", env_dependent=True)
+
+        container = self._eval(node.value, depth)
+        index = self._eval(node.slice, depth)
+        if not container.is_literal or not index.is_literal:
+            return Value.unknown("unresolvable subscript")
+        try:
+            result = container.literal[index.literal]
+        except Exception:  # target code: any failure means 'we cannot tell'
+            return Value.unknown("subscript failed")
+        return Value.of(result, env_dependent=container.env_dependent or index.env_dependent)
+
+    def _environment_lookup(self, node: ast.Call, depth: int) -> Value:
+        """Resolve an environment read to its default.
+
+        Deliberately the default rather than UNKNOWN. `os.environ.get("DEBUG",
+        "True")` is concretely "True" on any machine where nobody set the
+        variable, which is exactly the deployment worth warning about; treating
+        it as unknowable would silence every rule on the case that matters.
+
+        The env_dependent taint carries the caveat, so rules report it at lower
+        confidence rather than as fact.
+        """
+        default: Value | None = None
+        if len(node.args) > 1:
+            default = self._eval(node.args[1], depth)
+        for keyword in node.keywords:
+            if keyword.arg == "default":
+                default = self._eval(keyword.value, depth)
+
+        if default is None:
+            # `os.getenv("X")` and `os.environ.get("X")` return None when unset.
+            # None is the default, not the absence of one -- and a rule asking
+            # "is SECRET_KEY unset" needs that answer, not a shrug. Twenty-five
+            # settings in healthchecks alone take this form.
+            return Value.of(None, env_dependent=True)
+        if not default.is_literal:
+            return Value.unknown("unresolvable environment default", env_dependent=True)
+        return Value.of(default.literal, env_dependent=True)
+
     # -- calls --------------------------------------------------------------
 
     def _eval_Call(self, node: ast.Call, depth: int) -> Value:  # noqa: N802
+        path = self.scope.origin(node.func)
+        if path in _ENVIRON_GET_PATHS:
+            return self._environment_lookup(node, depth)
+
         if isinstance(node.func, ast.Attribute):
             return self._eval_method_call(node, node.func, depth)
         if isinstance(node.func, ast.Name) and node.func.id in _SAFE_BUILTINS:
@@ -365,6 +448,12 @@ class Evaluator:
         tainted = tainted or any(v.env_dependent for v in kwargs.values())
         return Value.of(result, env_dependent=tainted)
 
+
+_ENVIRON_PATHS = frozenset({"os.environ", "environ"})
+"""Dotted paths denoting the process environment mapping itself."""
+
+_ENVIRON_GET_PATHS = frozenset({"os.environ.get", "environ.get", "os.getenv", "getenv"})
+"""Reads of a single environment variable that accept a default."""
 
 _BINARY_OPS: dict[type, Any] = {
     ast.Add: lambda a, b: a + b,
