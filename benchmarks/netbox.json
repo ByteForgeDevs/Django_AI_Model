@@ -17,6 +17,16 @@
       "reviewer": "Zambagarrah"
     },
     {
+      "fingerprint": "a1ef84b11c682b77",
+      "rule_id": "DJS-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 100,
+      "note": "CSRF_COOKIE_SECURE at settings.py:100. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
       "fingerprint": "745b70a3b644900f",
       "rule_id": "DJS-006",
       "verdict": "accepted_risk",

@@ -37,6 +37,16 @@
       "reviewer": "Zambagarrah"
     },
     {
+      "fingerprint": "ab3fdeee85888849",
+      "rule_id": "DJS-010",
+      "verdict": "true_positive",
+      "file": "hc/settings.py",
+      "line": 1,
+      "note": "Same gap as DJS-009 and same absence of any knob: CSRF_COOKIE_SECURE is never assigned and cannot be set from the environment. Medium rather than high because reading a CSRF token is a step towards forging a request rather than an immediate account takeover, but the fix is one line and there is no argument on the other side.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
       "fingerprint": "1d24d2cef11f4856",
       "rule_id": "DJS-006",
       "verdict": "accepted_risk",

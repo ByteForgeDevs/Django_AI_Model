@@ -1,6 +1,6 @@
-"""DJS-006 and DJS-009 -- redirect to HTTPS, and the session cookie.
+"""DJS-006, DJS-009, DJS-010 -- transport and cookie flags.
 
-Both are "must be True, ships False", so the shared FlagRule does the work
+All three are "must be True, ships False", so the shared FlagRule does the work
 and these tests are mostly about the two things that are not shared: that an
 unassigned setting is still reported, and that the confidence differs where the
 confidence should differ.
@@ -19,12 +19,17 @@ SECURE = "\n".join(
     [
         "SECURE_SSL_REDIRECT = True",
         "SESSION_COOKIE_SECURE = True",
+        "CSRF_COOKIE_SECURE = True",
     ]
 )
 MARKERS = "INSTALLED_APPS = []\nDEBUG = False\nDATABASES = {}\nSECRET_KEY = 'x'\n"
 
-FLAGS = ["SECURE_SSL_REDIRECT", "SESSION_COOKIE_SECURE"]
-RULES = {"SECURE_SSL_REDIRECT": "DJS-006", "SESSION_COOKIE_SECURE": "DJS-009"}
+FLAGS = ["SECURE_SSL_REDIRECT", "SESSION_COOKIE_SECURE", "CSRF_COOKIE_SECURE"]
+RULES = {
+    "SECURE_SSL_REDIRECT": "DJS-006",
+    "SESSION_COOKIE_SECURE": "DJS-009",
+    "CSRF_COOKIE_SECURE": "DJS-010",
+}
 
 
 def build(tmp_path: Path, body: str) -> Path:
@@ -66,7 +71,7 @@ class TestDetection:
 
     @pytest.mark.parametrize("flag", FLAGS)
     def test_a_flag_that_is_never_set_is_reported(self, tmp_path, flag):
-        """Django ships both off, so silence is the insecure state."""
+        """Django ships all three off, so silence is the insecure state."""
         root = build(tmp_path, "")
         (finding,) = audit(root, RULES[flag])
         assert "never set" in finding.message
@@ -105,6 +110,14 @@ class TestConfidenceReflectsWhatWeCanKnow:
         root = build(tmp_path, "")
         (finding,) = audit(root, "DJS-009")
         assert finding.confidence is Confidence.FIRM
+
+    def test_the_session_cookie_outranks_the_csrf_cookie(self, tmp_path):
+        """One is a session to steal; the other needs a second flaw to use."""
+        root = build(tmp_path, "SESSION_COOKIE_SECURE = False\nCSRF_COOKIE_SECURE = False\n")
+        (session,) = audit(root, "DJS-009")
+        (csrf,) = audit(root, "DJS-010")
+        assert session.severity is Severity.HIGH
+        assert csrf.severity is Severity.MEDIUM
 
 
 class TestControls:

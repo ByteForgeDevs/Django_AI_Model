@@ -620,6 +620,17 @@ than after twenty-six of them disagree, is cheaper.
   `true_positive`, the first one in the benchmark. NetBox exposes it as a
   documented operator knob and stays `accepted_risk`.
 - **1.5.5** — `DJS-010` `CSRF_COOKIE_SECURE` disabled.
+
+  **Done.** Mechanically identical to `DJS-009` — same `certain` ceiling, same
+  reasoning about what a proxy cannot change — and deliberately a step lower in
+  severity. Reading a CSRF token is not itself an attack; it is the first half of
+  one, and the attacker still needs a way to make the victim's browser send the
+  forged request. `medium` rather than `high` keeps that distinction visible in a
+  sorted report, which matters more than it sounds: a family of rules that all
+  shout equally loudly is a family nobody reads.
+
+  Both targets behave exactly as they did for `DJS-009` and both stay
+  `accepted_risk`; precision is unchanged at 100%.
 - **1.5.6** — `DJS-011` `SESSION_COOKIE_HTTPONLY` disabled.
 - **1.5.7** — `DJS-012` `SECURE_PROXY_SSL_HEADER` trusting a client-controllable header.
 

@@ -103,3 +103,42 @@ class SessionCookieNotSecure(FlagRule):
             "https://cwe.mitre.org/data/definitions/614.html",
         ),
     )
+
+
+@register
+class CsrfCookieNotSecure(FlagRule):
+    """``CSRF_COOKIE_SECURE`` is off, so the CSRF token travels over HTTP."""
+
+    setting = "CSRF_COOKIE_SECURE"
+    ceiling = Confidence.CERTAIN
+
+    consequence = (
+        "the browser will send the CSRF token over plain HTTP, where it can be read "
+        "and then used to forge a request the user never made"
+    )
+
+    meta = RuleMeta(
+        id="DJS-010",
+        title="CSRF cookie is not marked Secure",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "The CSRF token is only useful to an attacker who can also make the "
+            "victim's browser issue a request, which is why this ranks below the "
+            "session cookie rather than beside it. But the two normally travel "
+            "together, so a cookie exposed on plain HTTP usually means both were, and "
+            "the token is what stands between a stolen session and a state-changing "
+            "request being accepted."
+        ),
+        remediation=(
+            "Set CSRF_COOKIE_SECURE = True alongside SESSION_COOKIE_SECURE. They "
+            "protect the two halves of the same exchange and there is no sensible "
+            "configuration that wants one without the other."
+        ),
+        references=(
+            _HTTPS_CHECKLIST,
+            "https://docs.djangoproject.com/en/stable/ref/settings/#csrf-cookie-secure",
+        ),
+    )
