@@ -632,6 +632,18 @@ than after twenty-six of them disagree, is cheaper.
   Both targets behave exactly as they did for `DJS-009` and both stay
   `accepted_risk`; precision is unchanged at 100%.
 - **1.5.6** — `DJS-011` `SESSION_COOKIE_HTTPONLY` disabled.
+
+  **Done.** The one rule of the four where doing nothing is the right answer:
+  Django ships `SESSION_COOKIE_HTTPONLY` as `True`, so this fires only when a
+  project has gone out of its way to turn it off. That makes it silent on both
+  benchmark targets and on both fixtures, and it is the only rule in this step
+  that added no triage entries at all.
+
+  It is worth having anyway, and worth having as `certain`. Turning it off is
+  never incidental — it means some JavaScript wanted to read the session cookie
+  — and it converts any cross-site scripting flaw anywhere on the origin into
+  full session theft. A rule that only speaks when someone made a deliberate
+  choice is exactly the kind that keeps a report readable.
 - **1.5.7** — `DJS-012` `SECURE_PROXY_SSL_HEADER` trusting a client-controllable header.
 
 ### Step 1.6 — Host, origin, and framing rules
@@ -1046,7 +1058,7 @@ conversation.
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
-| 1 | Settings and deployment hardening | 10 | 55 | In progress — Steps 1.0–1.3 done |
+| 1 | Settings and deployment hardening | 10 | 55 | In progress — Steps 1.0–1.4 done, 1.5 underway (1.5.1, 1.5.4–1.5.6) |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |

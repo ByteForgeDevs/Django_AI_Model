@@ -142,3 +142,42 @@ class CsrfCookieNotSecure(FlagRule):
             "https://docs.djangoproject.com/en/stable/ref/settings/#csrf-cookie-secure",
         ),
     )
+
+
+@register
+class SessionCookieNotHttpOnly(FlagRule):
+    """``SESSION_COOKIE_HTTPONLY`` is off, so scripts can read the session cookie."""
+
+    setting = "SESSION_COOKIE_HTTPONLY"
+    ceiling = Confidence.CERTAIN
+
+    consequence = (
+        "JavaScript running on the page can read the session cookie, which turns any "
+        "cross-site scripting flaw into a stolen session"
+    )
+
+    meta = RuleMeta(
+        id="DJS-011",
+        title="session cookie is readable by JavaScript",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "HttpOnly is what decides whether an XSS flaw costs you one user's page or "
+            "that user's whole session. Django sets it on by default, so a project "
+            "reaching this rule turned it off on purpose -- usually so a frontend "
+            "could read the cookie, which means the exposure is deliberate but the "
+            "consequence is often not."
+        ),
+        remediation=(
+            "Set SESSION_COOKIE_HTTPONLY = True, which is Django's default. If a "
+            "script genuinely needs to know whether the user is signed in, send that "
+            "in the page or from an endpoint rather than by making the session cookie "
+            "readable."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/settings/#session-cookie-httponly",
+            "https://owasp.org/www-community/HttpOnly",
+        ),
+    )

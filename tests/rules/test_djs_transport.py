@@ -1,6 +1,6 @@
-"""DJS-006, DJS-009, DJS-010 -- transport and cookie flags.
+"""DJS-006, DJS-009, DJS-010, DJS-011 -- transport and cookie flags.
 
-All three are "must be True, ships False", so the shared FlagRule does the work
+All four are "must be True, ships False", so the shared FlagRule does the work
 and these tests are mostly about the two things that are not shared: that an
 unassigned setting is still reported, and that the confidence differs where the
 confidence should differ.
@@ -20,6 +20,7 @@ SECURE = "\n".join(
         "SECURE_SSL_REDIRECT = True",
         "SESSION_COOKIE_SECURE = True",
         "CSRF_COOKIE_SECURE = True",
+        "SESSION_COOKIE_HTTPONLY = True",
     ]
 )
 MARKERS = "INSTALLED_APPS = []\nDEBUG = False\nDATABASES = {}\nSECRET_KEY = 'x'\n"
@@ -29,6 +30,7 @@ RULES = {
     "SECURE_SSL_REDIRECT": "DJS-006",
     "SESSION_COOKIE_SECURE": "DJS-009",
     "CSRF_COOKIE_SECURE": "DJS-010",
+    "SESSION_COOKIE_HTTPONLY": "DJS-011",
 }
 
 
@@ -118,6 +120,18 @@ class TestConfidenceReflectsWhatWeCanKnow:
         (csrf,) = audit(root, "DJS-010")
         assert session.severity is Severity.HIGH
         assert csrf.severity is Severity.MEDIUM
+
+
+class TestHttpOnly:
+    def test_djangos_default_is_secure_so_silence_is_correct(self, tmp_path):
+        """The only rule of the four where doing nothing is the right answer."""
+        root = build(tmp_path, "")
+        assert not audit(root, "DJS-011")
+
+    def test_turning_it_off_is_reported(self, tmp_path):
+        root = build(tmp_path, "SESSION_COOKIE_HTTPONLY = False\n")
+        (finding,) = audit(root, "DJS-011")
+        assert finding.confidence is Confidence.CERTAIN
 
 
 class TestControls:
