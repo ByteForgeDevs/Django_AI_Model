@@ -1,0 +1,9 @@
+{
+  "triage_version": 1,
+  "fingerprint_version": "djaudit/v1",
+  "target": "netbox",
+  "repo": "https://github.com/netbox-community/netbox",
+  "sha": "4877d1167f4e20c0507bc902ee4c708e20f92e36",
+  "max_false_positive_rate": 0.1,
+  "findings": []
+}

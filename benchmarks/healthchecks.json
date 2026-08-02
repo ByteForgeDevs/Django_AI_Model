@@ -1,0 +1,9 @@
+{
+  "triage_version": 1,
+  "fingerprint_version": "djaudit/v1",
+  "target": "healthchecks",
+  "repo": "https://github.com/healthchecks/healthchecks",
+  "sha": "5086d282ea33831e8c86eb9d0802dc2602c66ef7",
+  "max_false_positive_rate": 0.1,
+  "findings": []
+}

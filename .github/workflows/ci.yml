@@ -100,18 +100,20 @@ jobs:
           git clone --quiet https://github.com/${{ matrix.target.repo }}.git target
           git -C target checkout --quiet ${{ matrix.target.sha }}
 
-      # These repositories are mature and well audited, so essentially anything
-      # we report is a false positive. That makes them a precision benchmark and
-      # a crash-resistance test, not a recall benchmark -- recall is what the
-      # planted-defect fixtures measure.
-      - name: audit and require zero findings
+      # These repositories are mature and well audited, so they measure
+      # precision and crash-resistance, not recall -- we cannot know what they
+      # contain that we missed. Recall is what the planted-defect fixtures
+      # measure. Every finding carries a recorded verdict in benchmarks/, so
+      # the gate tracks a false-positive rate instead of asserting zero.
+      - name: precision gate
         run: |
           uv run djaudit run target \
             --format json \
             --output report.json \
             --min-severity info \
             --min-confidence tentative
-          uv run python scripts/check_precision.py report.json
+          uv run djaudit benchmark target \
+            --triage benchmarks/${{ matrix.target.name }}.json
 
       - name: upload report
         if: always()
