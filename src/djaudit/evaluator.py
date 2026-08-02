@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from djaudit.values import Value
@@ -396,6 +396,149 @@ class Evaluator:
             return Value.unknown("unresolvable environment default", env_dependent=True)
         return Value.of(default.literal, env_dependent=True)
 
+    # -- conditionals -------------------------------------------------------
+
+    def _eval_IfExp(self, node: ast.IfExp, depth: int) -> Value:  # noqa: N802
+        test = self._eval(node.test, depth)
+        if test.is_literal:
+            taken = node.body if test.literal else node.orelse
+            # The test being environment-dependent taints the outcome even
+            # though the branch itself may be a plain literal: which branch we
+            # took is the part that depended on the environment.
+            return _taint(self._eval(taken, depth), test.env_dependent)
+        return Value.conditional([self._eval(node.body, depth), self._eval(node.orelse, depth)])
+
+    def _eval_BoolOp(self, node: ast.BoolOp, depth: int) -> Value:  # noqa: N802
+        """``and``/``or``, which in Python yield an operand rather than a bool."""
+        is_and = isinstance(node.op, ast.And)
+        outcomes: list[Value] = []
+        # An operand that short-circuits away still decided the outcome, so its
+        # taint has to survive being discarded.
+        tainted = False
+
+        for index, operand_node in enumerate(node.values):
+            operand = self._eval(operand_node, depth)
+            tainted |= operand.env_dependent
+            last = index == len(node.values) - 1
+
+            if not operand.is_literal:
+                # Cannot tell whether evaluation short-circuits here, so every
+                # remaining operand stays possible.
+                outcomes.append(operand)
+                outcomes.extend(self._eval(rest, depth) for rest in node.values[index + 1 :])
+                return _taint(Value.conditional(outcomes), tainted)
+
+            short_circuits = (not operand.literal) if is_and else bool(operand.literal)
+            if short_circuits or last:
+                outcomes.append(operand)
+                return _taint(Value.conditional(outcomes), tainted)
+
+        return Value.unknown("empty boolean expression")
+
+    def _eval_Compare(self, node: ast.Compare, depth: int) -> Value:  # noqa: N802
+        operands = [self._eval(node.left, depth)]
+        operands.extend(self._eval_all(list(node.comparators), depth))
+        if not all(operand.is_literal for operand in operands):
+            return Value.unknown("unresolvable comparison operand")
+
+        tainted = any(operand.env_dependent for operand in operands)
+        literals = [operand.literal for operand in operands]
+
+        result = True
+        for index, op in enumerate(node.ops):
+            comparison = _COMPARE_OPS.get(type(op))
+            if comparison is None:
+                return Value.unknown(f"unsupported comparison: {type(op).__name__}")
+            try:
+                if not comparison(literals[index], literals[index + 1]):
+                    result = False
+                    break
+            except Exception:  # target code: any failure means 'we cannot tell'
+                return Value.unknown("comparison failed")
+
+        return Value.of(result, env_dependent=tainted)
+
+    # -- comprehensions -----------------------------------------------------
+
+    def _eval_ListComp(self, node: ast.ListComp, depth: int) -> Value:  # noqa: N802
+        return self._comprehension(node.generators, node.elt, None, list, depth)
+
+    def _eval_SetComp(self, node: ast.SetComp, depth: int) -> Value:  # noqa: N802
+        return self._comprehension(node.generators, node.elt, None, set, depth)
+
+    def _eval_GeneratorExp(self, node: ast.GeneratorExp, depth: int) -> Value:  # noqa: N802
+        # A generator is lazy, but every consumer we model materialises it.
+        return self._comprehension(node.generators, node.elt, None, list, depth)
+
+    def _eval_DictComp(self, node: ast.DictComp, depth: int) -> Value:  # noqa: N802
+        return self._comprehension(node.generators, node.key, node.value, dict, depth)
+
+    def _comprehension(
+        self,
+        generators: list[ast.comprehension],
+        element: ast.expr,
+        value_node: ast.expr | None,
+        build: Any,
+        depth: int,
+    ) -> Value:
+        if len(generators) != 1:
+            return Value.unknown("nested comprehension")
+
+        generator = generators[0]
+        if generator.is_async or not isinstance(generator.target, ast.Name):
+            return Value.unknown("unsupported comprehension target")
+
+        iterable = self._eval(generator.iter, depth)
+        if not iterable.is_literal or not isinstance(
+            iterable.literal, list | tuple | set | dict | str
+        ):
+            return Value.unknown("unresolvable comprehension source")
+
+        items = list(iterable.literal)
+        if len(items) > MAX_SIZE:
+            return Value.unknown("comprehension source too large")
+
+        outer = self.scope
+        collected: list[Any] = []
+        tainted = iterable.env_dependent
+        try:
+            for item in items:
+                self.scope = outer.child({generator.target.id: Value.of(item)})
+
+                keep = True
+                for condition in generator.ifs:
+                    test = self._eval(condition, depth)
+                    if not test.is_literal:
+                        return Value.unknown("unresolvable comprehension filter")
+                    tainted |= test.env_dependent
+                    if not test.literal:
+                        keep = False
+                        break
+                if not keep:
+                    continue
+
+                evaluated = self._eval(element, depth)
+                if not evaluated.is_literal:
+                    return Value.unknown("unresolvable comprehension element")
+                tainted |= evaluated.env_dependent
+
+                if value_node is None:
+                    collected.append(evaluated.literal)
+                    continue
+
+                mapped = self._eval(value_node, depth)
+                if not mapped.is_literal:
+                    return Value.unknown("unresolvable comprehension value")
+                tainted |= mapped.env_dependent
+                collected.append((evaluated.literal, mapped.literal))
+        finally:
+            self.scope = outer
+
+        try:
+            return Value.of(build(collected), env_dependent=tainted)
+        except TypeError:
+            return Value.unknown("comprehension produced unhashable items")
+
     # -- calls --------------------------------------------------------------
 
     def _eval_Call(self, node: ast.Call, depth: int) -> Value:  # noqa: N802
@@ -448,6 +591,26 @@ class Evaluator:
         tainted = tainted or any(v.env_dependent for v in kwargs.values())
         return Value.of(result, env_dependent=tainted)
 
+
+def _taint(value: Value, tainted: bool) -> Value:
+    """Mark ``value`` environment-dependent without disturbing its kind."""
+    if not tainted or value.env_dependent:
+        return value
+    return replace(value, env_dependent=True)
+
+
+_COMPARE_OPS: dict[type, Any] = {
+    ast.Eq: lambda a, b: a == b,
+    ast.NotEq: lambda a, b: a != b,
+    ast.Lt: lambda a, b: a < b,
+    ast.LtE: lambda a, b: a <= b,
+    ast.Gt: lambda a, b: a > b,
+    ast.GtE: lambda a, b: a >= b,
+    ast.In: lambda a, b: a in b,
+    ast.NotIn: lambda a, b: a not in b,
+    ast.Is: lambda a, b: a is b,
+    ast.IsNot: lambda a, b: a is not b,
+}
 
 _ENVIRON_PATHS = frozenset({"os.environ", "environ"})
 """Dotted paths denoting the process environment mapping itself."""

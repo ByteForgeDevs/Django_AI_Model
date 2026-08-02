@@ -380,3 +380,130 @@ class TestSubscript:
     def test_a_missing_key_is_unknown_not_a_crash(self) -> None:
         scope = Scope(names={"D": Value.of({"a": 1})})
         assert value_of("D['nope']", scope).is_unknown
+
+
+class TestConditionalExpressions:
+    def test_a_resolvable_test_takes_one_branch(self) -> None:
+        assert literal("'a' if True else 'b'") == "a"
+
+    def test_an_unresolvable_test_keeps_both_branches(self) -> None:
+        result = value_of("'a' if MYSTERY else 'b'")
+        assert result.is_conditional
+        assert set(result.possible()) == {"a", "b"}
+
+    def test_an_environment_dependent_test_taints_the_outcome(self) -> None:
+        # Which branch we took depended on the environment, even though the
+        # branch itself is a plain literal.
+        scope = module_scope("import os")
+        result = value_of("True if os.getenv('DEBUG') else False", scope)
+        assert result.env_dependent
+
+    def test_agreeing_branches_collapse(self) -> None:
+        result = value_of("True if MYSTERY else True")
+        assert result.is_literal
+        assert result.literal is True
+
+
+class TestBooleanOperators:
+    def test_or_returns_the_first_truthy_operand(self) -> None:
+        assert literal("'' or 'fallback'") == "fallback"
+
+    def test_or_short_circuits(self) -> None:
+        assert literal("'set' or 'fallback'") == "set"
+
+    def test_and_returns_the_first_falsy_operand(self) -> None:
+        assert literal("'' and 'unused'") == ""
+
+    def test_and_returns_the_last_operand_when_all_truthy(self) -> None:
+        assert literal("'a' and 'b'") == "b"
+
+    def test_environment_fallback_idiom(self) -> None:
+        # `os.getenv("X") or "default"` is everywhere in real settings.
+        scope = module_scope("import os")
+        result = value_of("os.getenv('SECRET_KEY') or 'insecure-default'", scope)
+        assert result.literal == "insecure-default"
+        assert result.env_dependent
+
+    def test_an_unresolvable_operand_keeps_every_possibility(self) -> None:
+        result = value_of("MYSTERY or 'fallback'")
+        assert result.is_conditional
+        assert "fallback" in result.possible()
+
+    def test_could_be_is_honest_about_a_partly_unknown_or(self) -> None:
+        assert value_of("MYSTERY or 'fallback'").could_be("anything")
+
+
+class TestComparisons:
+    def test_equality(self) -> None:
+        assert literal("'a' == 'a'") is True
+
+    def test_inequality(self) -> None:
+        assert literal("1 != 2") is True
+
+    def test_membership(self) -> None:
+        assert literal("'*' in ['*', 'localhost']") is True
+
+    def test_chained(self) -> None:
+        assert literal("1 < 2 < 3") is True
+
+    def test_chained_short_circuits_to_false(self) -> None:
+        assert literal("1 < 5 < 3") is False
+
+    def test_identity(self) -> None:
+        assert literal("None is None") is True
+
+    def test_the_envbool_idiom(self) -> None:
+        # The comparison at the heart of the healthchecks helper.
+        scope = module_scope("import os")
+        result = value_of("os.getenv('DEBUG', 'True') == 'True'", scope)
+        assert result.literal is True
+        assert result.env_dependent
+
+    def test_an_unresolvable_operand_is_unknown(self) -> None:
+        assert value_of("MYSTERY == 'a'").is_unknown
+
+    def test_a_failing_comparison_is_unknown_not_a_crash(self) -> None:
+        assert value_of("1 < 'a'").is_unknown
+
+
+class TestComprehensions:
+    def test_list_comprehension(self) -> None:
+        scope = Scope(names={"HOSTS": Value.of(["A", "B"])})
+        assert literal("[h.lower() for h in HOSTS]", scope) == ["a", "b"]
+
+    def test_filter(self) -> None:
+        scope = Scope(names={"HOSTS": Value.of(["a", "", "b"])})
+        assert literal("[h for h in HOSTS if h]", scope) == ["a", "b"]
+
+    def test_dict_comprehension(self) -> None:
+        scope = Scope(names={"KEYS": Value.of(["a", "b"])})
+        assert literal("{k: k.upper() for k in KEYS}", scope) == {"a": "A", "b": "B"}
+
+    def test_set_comprehension(self) -> None:
+        scope = Scope(names={"X": Value.of([1, 2, 2])})
+        assert literal("{i for i in X}", scope) == {1, 2}
+
+    def test_over_a_split_string(self) -> None:
+        # ALLOWED_HOSTS = [h.strip() for h in os.getenv("HOSTS", "a,b").split(",")]
+        scope = module_scope("import os")
+        assert literal("[h.strip() for h in os.getenv('HOSTS', 'a, b').split(',')]", scope) == [
+            "a",
+            "b",
+        ]
+
+    def test_taint_propagates_from_the_source(self) -> None:
+        scope = module_scope("import os")
+        result = value_of("[h for h in os.getenv('HOSTS', 'a').split(',')]", scope)
+        assert result.env_dependent
+
+    def test_an_unresolvable_source_is_unknown(self) -> None:
+        assert value_of("[h for h in MYSTERY]").is_unknown
+
+    def test_the_loop_variable_does_not_leak(self) -> None:
+        scope = Scope(names={"X": Value.of([1, 2])})
+        value_of("[i for i in X]", scope)
+        assert "i" not in scope.names
+
+    def test_nested_comprehension_is_unknown_not_wrong(self) -> None:
+        scope = Scope(names={"X": Value.of([[1], [2]])})
+        assert value_of("[i for row in X for i in row]", scope).is_unknown
