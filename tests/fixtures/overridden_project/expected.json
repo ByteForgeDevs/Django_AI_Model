@@ -1,0 +1,22 @@
+{
+  "description": "The normal split-settings pattern: base enables DEBUG, production unconditionally disables it. The base finding must survive but be downgraded to low/tentative so it stays below default CI gates. Development is a control case.",
+  "expected": [
+    {
+      "rule_id": "DJS-001",
+      "file": "config/settings/base.py",
+      "line": 13,
+      "severity": "low",
+      "confidence": "tentative"
+    }
+  ],
+  "must_not_report": [
+    {
+      "rule_id": "DJS-001",
+      "file": "config/settings/development.py"
+    },
+    {
+      "rule_id": "DJS-001",
+      "file": "config/settings/production.py"
+    }
+  ]
+}

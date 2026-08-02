@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+uv.lock
+# Eval targets are cloned at a pinned SHA, never vendored.
+.eval-targets/
+*.sarif

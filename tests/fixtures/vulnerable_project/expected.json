@@ -1,0 +1,25 @@
+{
+  "description": "Split settings with DEBUG left on. Production is a real critical finding; base is a real high finding because nothing overrides it; development is a control case that must never be reported.",
+  "expected": [
+    {
+      "rule_id": "DJS-001",
+      "file": "config/settings/production.py",
+      "line": 9,
+      "severity": "critical",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJS-001",
+      "file": "config/settings/base.py",
+      "line": 13,
+      "severity": "high",
+      "confidence": "firm"
+    }
+  ],
+  "must_not_report": [
+    {
+      "rule_id": "DJS-001",
+      "file": "config/settings/development.py"
+    }
+  ]
+}
