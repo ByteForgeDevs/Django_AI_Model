@@ -630,6 +630,36 @@ than after twenty-six of them disagree, is cheaper.
   a new rule needed the shared fixture to set whatever setting the test had
   picked as its example of "unset". It now builds its own project.
 - **1.5.3** — `DJS-008` `SECURE_HSTS_INCLUDE_SUBDOMAINS` disabled while HSTS is on.
+
+  **Done.** The first rule whose answer depends on a *different* setting, so
+  `InsecureDefaultRule` gained an `applies()` hook. Off is the correct value
+  for this flag while HSTS is switched off — there is no policy to extend — so
+  a rule that fired regardless would be telling people to change a setting that
+  does nothing. An unresolvable duration counts as off for the same reason:
+  guessing costs noise on every project that reads it from the environment.
+
+  NetBox is the control that proves this, and it is a real one rather than a
+  contrived fixture: it sets `SECURE_HSTS_INCLUDE_SUBDOMAINS = False` at
+  settings.py:202 *and* `SECURE_HSTS_SECONDS = 0` at 204. A naive rule reports
+  it; this one is silent, and both targets stayed at their existing finding
+  counts when it was added.
+
+  Recall therefore needed a planted defect, so `vulnerable_project` now carries
+  an HSTS ramp that was started and never finished — one hour with
+  includeSubDomains still off. That single change exercises `DJS-007`'s
+  unfinished-ramp branch and `DJS-008` together, which is the only state in
+  which `DJS-008` has anything to say.
+
+  Adding it surfaced the one-defect-one-finding rule in a new guise: `DJS-007`
+  fired twice, once at production's real value and once at the base for never
+  mentioning it. The base check now returns early when every production heir
+  *assigns* the setting, not only when every heir assigns it safely — each heir
+  is judged on the value it actually sets, so blaming the base for staying
+  silent reports one missing setting twice.
+
+  Also derived the fixture line numbers in `tests/test_evaluation.py` instead of
+  pinning them. Planting this defect shifted `DEBUG = True` down six lines and
+  broke three tests that had nothing to do with it.
 - **1.5.4** — `DJS-009` `SESSION_COOKIE_SECURE` disabled.
 
   **Done.** The first rule where we can say `certain` and mean it. Nothing in

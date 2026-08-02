@@ -440,9 +440,20 @@ class InsecureDefaultRule(SettingsRule):
     def consequence_for(self, resolved: ResolvedSetting) -> str:
         return self.consequence
 
+    def applies(self, ctx: ProjectContext, group: SettingGroup) -> bool:
+        """Whether the setting is worth having an opinion about here at all.
+
+        Some of these only matter once something else is switched on, and a
+        rule that fires regardless is telling people to fix a value that has no
+        effect. Overridden by the rules that have such a precondition.
+        """
+        return True
+
     def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
         resolved = group.setting
         if not self.insecure(resolved.value):
+            return
+        if not self.applies(ctx, group):
             return
         if resolved.origin is Origin.UNRESOLVED:
             # Nothing was learned, so there is nothing to say. Reporting every
@@ -453,11 +464,18 @@ class InsecureDefaultRule(SettingsRule):
         ceiling: Confidence | None = None
         caveats: tuple[str, ...] = ()
         corrected = self.overridden(group.module, lambda rs: not self.insecure(rs.value))
-        if corrected and resolved.is_default:
-            # The base never mentions the setting and every environment raises
+        if resolved.is_default and self.overridden(
+            group.module, lambda rs: rs.is_assigned or not self.insecure(rs.value)
+        ):
+            # The base never mentions the setting and every environment decides
             # it. There is no wrong value here to fix -- this is simply where
             # the setting does not live -- which is different from a base that
             # writes an insecure value down and gets overridden anyway.
+            #
+            # Note this covers heirs that decide it *badly* as well as heirs
+            # that decide it well. Each heir is judged on the value it actually
+            # assigns, so also blaming the base for staying silent would report
+            # one missing setting twice.
             return
 
         if corrected:

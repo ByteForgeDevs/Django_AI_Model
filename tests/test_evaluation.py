@@ -29,15 +29,34 @@ class TestRegressionGate:
         assert report.recall == 1.0
 
 
+def line_of(project, relpath: str, needle: str) -> int:
+    """The line a planted defect actually sits on, rather than a pinned number.
+
+    These tests are about the evaluator, not about the fixture's layout, and
+    hardcoded line numbers meant every planted defect added to the fixture
+    broke three tests that had nothing to do with it.
+    """
+    for number, line in enumerate((project / relpath).read_text().splitlines(), 1):
+        if needle in line:
+            return number
+    raise AssertionError(f"{needle!r} is not in {relpath}")
+
+
+PRODUCTION = "config/settings/production.py"
+BASE = "config/settings/base.py"
+
+
 class TestScoring:
     def test_a_missed_expectation_is_a_false_negative(self, tmp_path, vulnerable_project):
+        debug_line = line_of(vulnerable_project, PRODUCTION, "DEBUG = True")
+        base_debug_line = line_of(vulnerable_project, BASE, "DEBUG = True")
         manifest = tmp_path / "expected.json"
         manifest.write_text(
             json.dumps(
                 {
                     "expected": [
-                        {"rule_id": "DJS-001", "file": "config/settings/production.py", "line": 9},
-                        {"rule_id": "DJS-001", "file": "config/settings/base.py", "line": 18},
+                        {"rule_id": "DJS-001", "file": PRODUCTION, "line": debug_line},
+                        {"rule_id": "DJS-001", "file": BASE, "line": base_debug_line},
                         {"rule_id": "DJP-001", "file": "app/models.py", "line": 1},
                     ]
                 }
@@ -51,14 +70,11 @@ class TestScoring:
         assert any("MISSED DJP-001" in line for line in report.failures())
 
     def test_an_unlisted_finding_is_a_false_positive(self, tmp_path, vulnerable_project):
+        debug_line = line_of(vulnerable_project, PRODUCTION, "DEBUG = True")
         manifest = tmp_path / "expected.json"
         manifest.write_text(
             json.dumps(
-                {
-                    "expected": [
-                        {"rule_id": "DJS-001", "file": "config/settings/production.py", "line": 9}
-                    ]
-                }
+                {"expected": [{"rule_id": "DJS-001", "file": PRODUCTION, "line": debug_line}]}
             )
         )
         report = evaluate(vulnerable_project, manifest, include=ONLY_DEBUG)
@@ -72,6 +88,8 @@ class TestScoring:
         self, tmp_path, vulnerable_project
     ):
         """Grading drift is the failure mode a location-only check would miss."""
+        debug_line = line_of(vulnerable_project, PRODUCTION, "DEBUG = True")
+        base_debug_line = line_of(vulnerable_project, BASE, "DEBUG = True")
         manifest = tmp_path / "expected.json"
         manifest.write_text(
             json.dumps(
@@ -79,11 +97,11 @@ class TestScoring:
                     "expected": [
                         {
                             "rule_id": "DJS-001",
-                            "file": "config/settings/production.py",
-                            "line": 9,
+                            "file": PRODUCTION,
+                            "line": debug_line,
                             "severity": "low",
                         },
-                        {"rule_id": "DJS-001", "file": "config/settings/base.py", "line": 18},
+                        {"rule_id": "DJS-001", "file": BASE, "line": base_debug_line},
                     ]
                 }
             )

@@ -56,6 +56,14 @@
     {
       "rule_id": "DJS-007",
       "file": "config/settings/base.py"
+    },
+    {
+      "rule_id": "DJS-008",
+      "file": "config/settings/production.py"
+    },
+    {
+      "rule_id": "DJS-008",
+      "file": "config/settings/base.py"
     }
   ]
 }

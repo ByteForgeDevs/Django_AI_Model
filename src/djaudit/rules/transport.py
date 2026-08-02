@@ -10,9 +10,16 @@ where that difference is recorded.
 
 from __future__ import annotations
 
+from djaudit.context import ProjectContext
 from djaudit.models import Confidence, Family, Severity, Tier
 from djaudit.registry import RuleMeta, register
-from djaudit.rules._base import FlagRule, InsecureDefaultRule, could_be_under
+from djaudit.rules._base import (
+    FlagRule,
+    InsecureDefaultRule,
+    SettingGroup,
+    could_be_off,
+    could_be_under,
+)
 from djaudit.settings import ResolvedSetting
 from djaudit.values import Value
 
@@ -269,5 +276,68 @@ class HstsNotEnforced(InsecureDefaultRule):
             _HTTPS_CHECKLIST,
             _HSTS_DOCS,
             "https://docs.djangoproject.com/en/stable/ref/settings/#secure-hsts-seconds",
+        ),
+    )
+
+
+@register
+class HstsSubdomainsExcluded(InsecureDefaultRule):
+    """``SECURE_HSTS_INCLUDE_SUBDOMAINS`` is off while HSTS is switched on."""
+
+    setting = "SECURE_HSTS_INCLUDE_SUBDOMAINS"
+    ceiling = Confidence.FIRM
+    corrected_as = "sets it to True"
+
+    consequence = (
+        "the HTTPS-only policy stops at the bare hostname and every subdomain is still "
+        "reachable over plain HTTP, which is enough for an attacker to serve a page from "
+        "one and set a cookie that the parent domain will accept"
+    )
+
+    def insecure(self, value: Value) -> bool:
+        return could_be_off(value)
+
+    def applies(self, ctx: ProjectContext, group: SettingGroup) -> bool:
+        """Only once HSTS is definitely on.
+
+        Off is the correct value while ``SECURE_HSTS_SECONDS`` is 0 -- there is
+        no policy to extend -- so firing then would be telling people to change
+        a setting that does nothing. An unresolvable duration is treated as off
+        for the same reason: we would be guessing, and the guess costs noise on
+        every project that reads the duration from its environment.
+        """
+        view = self.views.get(group.module.dotted)
+        if view is None:
+            return False
+        return not could_be_under(view.get("SECURE_HSTS_SECONDS").value, 1)
+
+    meta = RuleMeta(
+        id="DJS-008",
+        title="HSTS does not cover subdomains",
+        family=Family.DJS,
+        severity=Severity.LOW,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "HSTS without includeSubDomains protects the hostname it was served from and "
+            "nothing else. An attacker who can reach any subdomain over plain HTTP -- a "
+            "forgotten staging box, a wildcard DNS record, a CNAME to a service that "
+            "lapsed -- can serve content there and set a cookie scoped to the parent "
+            "domain, which the application will then accept. Low severity because "
+            "excluding subdomains is sometimes a deliberate and correct choice, and "
+            "because it only matters at all once HSTS is switched on."
+        ),
+        remediation=(
+            "Set SECURE_HSTS_INCLUDE_SUBDOMAINS = True once every subdomain is served "
+            "over HTTPS. Confirm that first: the directive is as sticky as the max-age it "
+            "rides on, so a subdomain that cannot do HTTPS becomes unreachable for the "
+            "full window and cannot be rescued early. If some subdomain genuinely cannot "
+            "be moved, leaving this off is a defensible choice -- suppress the finding "
+            "with a comment saying which one and why."
+        ),
+        references=(
+            _HTTPS_CHECKLIST,
+            _HSTS_DOCS,
+            "https://docs.djangoproject.com/en/stable/ref/settings/#secure-hsts-include-subdomains",
         ),
     )
