@@ -2,7 +2,7 @@
 
 import json
 
-from djaudit import engine
+from djaudit import engine, registry
 from djaudit.fingerprint import FINGERPRINT_VERSION
 from djaudit.models import Confidence, Severity
 from djaudit.reporters import json_reporter, sarif
@@ -34,6 +34,29 @@ class TestRuleDescriptors:
         run_data = sarif.build(run(vulnerable_project))["runs"][0]
         ids = [r["id"] for r in run_data["tool"]["driver"]["rules"]]
         assert ids == sorted(set(ids))
+
+    def test_descriptor_uses_rule_defaults_not_a_downgraded_instance(self, overridden_project):
+        """A descriptor describes the rule, not one occurrence of it.
+
+        The overridden project reports DJS-001 downgraded to low/tentative,
+        because production disables DEBUG. Deriving the descriptor from that
+        finding would publish DJS-001 to GitHub as a low-severity rule for
+        every repository, so the descriptor must come from RuleMeta.
+        """
+        result = run(overridden_project)
+        finding = next(f for f in result.findings if f.rule_id == "DJS-001")
+        assert finding.severity is Severity.LOW
+
+        rule = sarif.build(result)["runs"][0]["tool"]["driver"]["rules"][0]
+        meta = registry.get("DJS-001").meta
+        assert rule["defaultConfiguration"]["level"] == "error"
+        assert float(rule["properties"]["security-severity"]) == meta.severity.security_severity
+
+    def test_per_finding_severity_still_surfaces_on_the_result(self, overridden_project):
+        """Grading is not lost by the change above -- it lives on the result."""
+        result = run(overridden_project)
+        sarif_result = sarif.build(result)["runs"][0]["results"][0]
+        assert sarif_result["level"] == "note"
 
     def test_result_indices_point_at_the_right_descriptor(self, vulnerable_project):
         run_data = sarif.build(run(vulnerable_project))["runs"][0]
@@ -101,6 +124,47 @@ class TestInvocations:
 
         assert invocation["executionSuccessful"] is False
         assert "boom" in invocation["toolExecutionNotifications"][0]["message"]["text"]
+
+    def test_associated_rule_resolves_to_a_real_descriptor(self, vulnerable_project):
+        """A dangling reportingDescriptorReference is invalid SARIF.
+
+        A rule that crashes before emitting anything has no finding, so it
+        would not appear in tool.driver.rules -- leaving associatedRule
+        pointing at a descriptor that does not exist. Consumers may reject the
+        whole file, which would take the real findings down with it.
+        """
+        result = run(vulnerable_project)
+        result.rule_errors["DJP-001"] = "RuntimeError: boom"
+        assert not any(f.rule_id == "DJP-001" for f in result.findings)
+
+        run_data = sarif.build(result)["runs"][0]
+        rules = run_data["tool"]["driver"]["rules"]
+        notification = run_data["invocations"][0]["toolExecutionNotifications"][0]
+        associated = notification["associatedRule"]
+
+        assert associated["id"] in {r["id"] for r in rules}
+        assert rules[associated["index"]]["id"] == associated["id"]
+
+    def test_result_indices_survive_a_crashed_rule_being_added(self, vulnerable_project):
+        """Adding crash descriptors must not shift results onto the wrong rule."""
+        result = run(vulnerable_project)
+        result.rule_errors["DJA-001"] = "RuntimeError: boom"
+
+        run_data = sarif.build(result)["runs"][0]
+        rules = run_data["tool"]["driver"]["rules"]
+        for sarif_result in run_data["results"]:
+            assert rules[sarif_result["ruleIndex"]]["id"] == sarif_result["ruleId"]
+
+    def test_unregistered_crashed_rule_still_gets_a_descriptor(self, vulnerable_project):
+        """External adapters in Phase 5 will report ids we never registered."""
+        result = run(vulnerable_project)
+        result.rule_errors["ZZZ-999"] = "RuntimeError: boom"
+
+        run_data = sarif.build(result)["runs"][0]
+        rules = run_data["tool"]["driver"]["rules"]
+        notification = run_data["invocations"][0]["toolExecutionNotifications"][0]
+
+        assert rules[notification["associatedRule"]["index"]]["id"] == "ZZZ-999"
 
 
 class TestJsonReporter:
