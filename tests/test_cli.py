@@ -1,12 +1,14 @@
 """CLI contract: exit codes and output routing are what CI depends on."""
 
 import json
+from dataclasses import replace
 
 import pytest
 from typer.testing import CliRunner
 
 from djaudit.baseline import Baseline
 from djaudit.cli import EXIT_ERROR, EXIT_FINDINGS, EXIT_OK, app
+from djaudit.triage import Triage, Verdict
 
 runner = CliRunner()
 
@@ -134,3 +136,84 @@ class TestOtherCommands:
         result = runner.invoke(app, ["eval", str(vulnerable_project), "--manifest", str(manifest)])
         assert result.exit_code == EXIT_FINDINGS
         assert "UNEXPECTED" in result.output
+
+
+class TestBenchmarkCommand:
+    """The precision gate's CLI surface. CI reads only the exit code."""
+
+    def seed(self, tmp_path, entries=(), rate=0.10):
+        path = tmp_path / "triage.json"
+        Triage(target="fixture", entries=tuple(entries), max_false_positive_rate=rate).save(path)
+        return path
+
+    def test_untriaged_findings_exit_one(self, vulnerable_project, tmp_path):
+        path = self.seed(tmp_path)
+        result = runner.invoke(app, ["benchmark", str(vulnerable_project), "--triage", str(path)])
+        assert result.exit_code == EXIT_FINDINGS
+        assert "untriaged" in result.output
+
+    def test_a_missing_triage_file_is_a_tool_error(self, vulnerable_project, tmp_path):
+        result = runner.invoke(
+            app, ["benchmark", str(vulnerable_project), "--triage", str(tmp_path / "nope.json")]
+        )
+        assert result.exit_code == EXIT_ERROR
+
+    def test_a_bad_project_path_is_a_tool_error(self, tmp_path):
+        path = self.seed(tmp_path)
+        result = runner.invoke(app, ["benchmark", str(tmp_path / "nope"), "--triage", str(path)])
+        assert result.exit_code == EXIT_ERROR
+
+    def test_update_seeds_untriaged_findings_as_false_positive(self, vulnerable_project, tmp_path):
+        # Unreviewed entries must never count in our favour.
+        path = self.seed(tmp_path)
+        result = runner.invoke(
+            app, ["benchmark", str(vulnerable_project), "--triage", str(path), "--update"]
+        )
+        assert result.exit_code == EXIT_FINDINGS
+
+        written = Triage.load(path)
+        assert len(written) == 2
+        assert {e.verdict for e in written.entries} == {Verdict.FALSE_POSITIVE}
+
+    def test_update_never_overwrites_an_existing_verdict(self, vulnerable_project, tmp_path):
+        path = self.seed(tmp_path)
+        runner.invoke(
+            app, ["benchmark", str(vulnerable_project), "--triage", str(path), "--update"]
+        )
+
+        reviewed = Triage.load(path)
+        first = reviewed.entries[0]
+        reviewed.save(path)
+        Triage(
+            target="fixture",
+            entries=(
+                replace(first, verdict=Verdict.TRUE_POSITIVE, note="checked"),
+                *reviewed.entries[1:],
+            ),
+        ).save(path)
+
+        runner.invoke(
+            app, ["benchmark", str(vulnerable_project), "--triage", str(path), "--update"]
+        )
+
+        after = Triage.load(path).by_fingerprint[first.fingerprint]
+        assert after.verdict is Verdict.TRUE_POSITIVE
+        assert after.note == "checked"
+
+    def test_a_fully_triaged_project_exits_zero(self, vulnerable_project, tmp_path):
+        path = self.seed(tmp_path)
+        runner.invoke(
+            app, ["benchmark", str(vulnerable_project), "--triage", str(path), "--update"]
+        )
+
+        seeded = Triage.load(path)
+        Triage(
+            target="fixture",
+            entries=tuple(
+                replace(e, verdict=Verdict.TRUE_POSITIVE, note="planted") for e in seeded.entries
+            ),
+        ).save(path)
+
+        result = runner.invoke(app, ["benchmark", str(vulnerable_project), "--triage", str(path)])
+        assert result.exit_code == EXIT_OK
+        assert "precision 100.0%" in result.output

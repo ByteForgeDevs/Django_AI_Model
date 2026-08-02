@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
@@ -25,6 +25,9 @@ from djaudit.baseline import Baseline, BaselineError
 from djaudit.models import Confidence, Family, Severity
 from djaudit.registry import all_rules
 from djaudit.reporters import OutputFormat, json_reporter, sarif, terminal
+
+if TYPE_CHECKING:
+    from djaudit.benchmark import BenchmarkReport
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -233,6 +236,118 @@ def evaluate_command(
     if not report.passed:
         raise typer.Exit(EXIT_FINDINGS)
     console.print("[green]evaluation passed[/green]")
+
+
+@app.command()
+def benchmark(
+    project: Annotated[
+        Path,
+        typer.Argument(help="Checkout of a real-world Django project to audit."),
+    ],
+    triage_file: Annotated[
+        Path,
+        typer.Option("--triage", "-t", help="Triage file holding recorded verdicts."),
+    ],
+    update: Annotated[
+        bool,
+        typer.Option(
+            "--update",
+            help="Add untriaged findings to the triage file for review, then exit non-zero.",
+        ),
+    ] = False,
+) -> None:
+    """Measure precision against a real project with recorded verdicts.
+
+    Mature open-source projects measure precision and crash-resistance, not
+    recall: we cannot know what they contain that we missed. Recall is the
+    planted-defect fixtures' job.
+
+    Fails when a finding is untriaged, when a family exceeds its false-positive
+    budget, when a known-real finding stops firing, or when a rule crashes.
+    """
+    from djaudit.benchmark import run_benchmark  # noqa: PLC0415 - keeps `run` fast
+    from djaudit.triage import Triage, TriageEntry, TriageError, Verdict  # noqa: PLC0415
+
+    if not project.is_dir():
+        _fail(f"not a directory: {project}")
+
+    try:
+        report = run_benchmark(project, triage_file)
+    except TriageError as exc:
+        _fail(str(exc))
+        return
+
+    console = Console()
+    _print_benchmark(console, report)
+
+    if update and report.untriaged:
+        # Seeded as false_positive so an unreviewed entry can never silently
+        # count in our favour. A human flips the ones we got right.
+        triage = Triage.load(triage_file)
+        triage.with_entries(
+            TriageEntry.from_finding(f, Verdict.FALSE_POSITIVE, note="TODO: review")
+            for f in report.untriaged
+        ).save(triage_file)
+        console.print(
+            f"[yellow]wrote {len(report.untriaged)} entries to {triage_file} "
+            f"as false_positive — review each before committing[/yellow]"
+        )
+
+    if not report.ok:
+        raise typer.Exit(EXIT_FINDINGS)
+    console.print(f"[green]{report.summary()}[/green]")
+
+
+def _print_benchmark(console: Console, report: BenchmarkReport) -> None:
+    for rule_id, message in sorted(report.rule_errors.items()):
+        console.print(f"[red]rule crashed[/red] {rule_id}: {message}")
+
+    for finding in report.untriaged:
+        console.print(
+            f"[yellow]untriaged[/yellow] {finding.rule_id} "
+            f"{finding.location.file}:{finding.location.line} "
+            f"[dim]{finding.fingerprint}[/dim]"
+        )
+
+    for entry in report.regressed:
+        console.print(
+            f"[red]regressed[/red] {entry.rule_id} {entry.file}:{entry.line} "
+            f"[dim]judged {entry.verdict.value}, no longer reported[/dim]"
+        )
+
+    for entry in report.resolved:
+        console.print(
+            f"[green]resolved[/green] {entry.rule_id} {entry.file}:{entry.line} "
+            f"[dim]known false positive, no longer reported[/dim]"
+        )
+
+    if report.scores:
+        table = Table(title=f"{report.target} precision", header_style="bold")
+        table.add_column("family")
+        table.add_column("reported", justify="right")
+        table.add_column("tp", justify="right")
+        table.add_column("fp", justify="right")
+        table.add_column("accepted", justify="right")
+        table.add_column("fp rate", justify="right")
+        for score in report.scores:
+            over = score.false_positive_rate > report.max_false_positive_rate
+            table.add_row(
+                score.family,
+                str(score.reported),
+                str(score.true_positives),
+                str(score.false_positives),
+                str(score.accepted_risks),
+                f"[red]{score.false_positive_rate:.1%}[/red]"
+                if over
+                else f"{score.false_positive_rate:.1%}",
+            )
+        console.print(table)
+
+    for score in report.over_budget:
+        console.print(
+            f"[red]over budget[/red] {score.family} false-positive rate "
+            f"{score.false_positive_rate:.1%} exceeds {report.max_false_positive_rate:.1%}"
+        )
 
 
 @app.command()
