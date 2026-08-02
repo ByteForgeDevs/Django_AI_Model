@@ -236,8 +236,7 @@ def build(result: RunResult) -> dict[str, Any]:
     ordered_rule_ids = sorted(set(first_by_rule) | set(result.rule_errors))
     index_of = {rule_id: i for i, rule_id in enumerate(ordered_rule_ids)}
     descriptors = [
-        _descriptor(_rule_info(rule_id, first_by_rule.get(rule_id)))
-        for rule_id in ordered_rule_ids
+        _descriptor(_rule_info(rule_id, first_by_rule.get(rule_id))) for rule_id in ordered_rule_ids
     ]
 
     return {

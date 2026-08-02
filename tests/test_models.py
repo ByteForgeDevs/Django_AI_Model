@@ -74,9 +74,7 @@ class TestSerialisation:
         assert payload["confidence"] == "firm"
         assert payload["family"] == "DJS"
         assert payload["tier"] == "static"
-        assert payload["evidence"] == [
-            {"kind": "sql", "content": "SELECT 1", "source": "psql"}
-        ]
+        assert payload["evidence"] == [{"kind": "sql", "content": "SELECT 1", "source": "psql"}]
         assert payload["references"] == ["https://example.test"]
 
     def test_with_fingerprint_does_not_mutate_the_original(self):

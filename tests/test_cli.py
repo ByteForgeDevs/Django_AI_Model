@@ -21,9 +21,7 @@ class TestExitCodes:
         assert result.exit_code == EXIT_OK
 
     def test_findings_below_fail_on_still_exit_zero(self, vulnerable_project):
-        result = runner.invoke(
-            app, ["run", str(vulnerable_project), "--ignore", "DJS-001"]
-        )
+        result = runner.invoke(app, ["run", str(vulnerable_project), "--ignore", "DJS-001"])
         assert result.exit_code == EXIT_OK
 
     def test_a_bad_path_is_a_tool_error_not_a_finding(self, tmp_path):
@@ -39,25 +37,19 @@ class TestExitCodes:
     def test_an_unreadable_baseline_is_a_tool_error(self, vulnerable_project, tmp_path):
         bad = tmp_path / "baseline.json"
         bad.write_text("{nope")
-        result = runner.invoke(
-            app, ["run", str(vulnerable_project), "--baseline", str(bad)]
-        )
+        result = runner.invoke(app, ["run", str(vulnerable_project), "--baseline", str(bad)])
         assert result.exit_code == EXIT_ERROR
 
 
 class TestOutputFormats:
     def test_json_output_is_parseable(self, vulnerable_project, tmp_path):
         out = tmp_path / "out.json"
-        runner.invoke(
-            app, ["run", str(vulnerable_project), "-f", "json", "-o", str(out)]
-        )
+        runner.invoke(app, ["run", str(vulnerable_project), "-f", "json", "-o", str(out)])
         assert len(json.loads(out.read_text())["findings"]) == 2
 
     def test_sarif_output_is_parseable(self, vulnerable_project, tmp_path):
         out = tmp_path / "out.sarif"
-        runner.invoke(
-            app, ["run", str(vulnerable_project), "-f", "sarif", "-o", str(out)]
-        )
+        runner.invoke(app, ["run", str(vulnerable_project), "-f", "sarif", "-o", str(out)])
         assert json.loads(out.read_text())["version"] == "2.1.0"
 
     @pytest.mark.parametrize("fmt", ["terminal", "json", "sarif"])
@@ -69,9 +61,7 @@ class TestOutputFormats:
         checkout for one format out of three.
         """
         out = tmp_path / "reports" / "nested" / f"out.{fmt}"
-        result = runner.invoke(
-            app, ["run", str(vulnerable_project), "-f", fmt, "-o", str(out)]
-        )
+        result = runner.invoke(app, ["run", str(vulnerable_project), "-f", fmt, "-o", str(out)])
         assert result.exit_code in {EXIT_OK, EXIT_FINDINGS}, result.output
         assert out.is_file()
         assert out.read_text().strip()
@@ -98,9 +88,7 @@ class TestBaselineWorkflow:
         )
         assert written.exit_code == EXIT_OK
 
-        second = runner.invoke(
-            app, ["run", str(vulnerable_project), "--baseline", str(baseline)]
-        )
+        second = runner.invoke(app, ["run", str(vulnerable_project), "--baseline", str(baseline)])
         assert second.exit_code == EXIT_OK
         assert "No findings" in second.output
 
@@ -109,17 +97,13 @@ class TestBaselineWorkflow:
     ):
         """Otherwise lowering a threshold later resurfaces old findings as 'new'."""
         baseline = tmp_path / "baseline.json"
-        runner.invoke(
-            app, ["run", str(overridden_project), "--write-baseline", str(baseline)]
-        )
+        runner.invoke(app, ["run", str(overridden_project), "--write-baseline", str(baseline)])
         assert len(Baseline.load(baseline)) == 1
 
 
 class TestRuleSelection:
     def test_select_restricts_to_named_rules(self, vulnerable_project):
-        result = runner.invoke(
-            app, ["run", str(vulnerable_project), "--select", "DJS-001"]
-        )
+        result = runner.invoke(app, ["run", str(vulnerable_project), "--select", "DJS-001"])
         assert "DJS-001" in result.output
 
     def test_family_filter_can_silence_everything(self, vulnerable_project):
@@ -147,8 +131,6 @@ class TestOtherCommands:
     def test_eval_fails_loudly_on_a_regression(self, vulnerable_project, tmp_path):
         manifest = tmp_path / "expected.json"
         manifest.write_text(json.dumps({"expected": []}))
-        result = runner.invoke(
-            app, ["eval", str(vulnerable_project), "--manifest", str(manifest)]
-        )
+        result = runner.invoke(app, ["eval", str(vulnerable_project), "--manifest", str(manifest)])
         assert result.exit_code == EXIT_FINDINGS
         assert "UNEXPECTED" in result.output

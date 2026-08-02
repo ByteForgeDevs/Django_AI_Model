@@ -142,9 +142,7 @@ def run(
     raise typer.Exit(EXIT_OK)
 
 
-def _emit(
-    result: engine.RunResult, output_format: OutputFormat, output: Path | None
-) -> None:
+def _emit(result: engine.RunResult, output_format: OutputFormat, output: Path | None) -> None:
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
 

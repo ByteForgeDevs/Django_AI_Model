@@ -27,6 +27,12 @@ jobs:
       - name: ruff
         run: uv run ruff check .
 
+      # Checked separately from `ruff check`, which does not police formatting.
+      # Without this the tree drifts out of format silently and the first person
+      # to run `ruff format` sweeps unrelated files into their diff.
+      - name: ruff format
+        run: uv run ruff format --check .
+
       - name: mypy
         run: uv run mypy
 

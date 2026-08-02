@@ -45,9 +45,7 @@ class RunResult:
         return counts
 
 
-def _passes_threshold(
-    finding: Finding, min_severity: Severity, min_confidence: Confidence
-) -> bool:
+def _passes_threshold(finding: Finding, min_severity: Severity, min_confidence: Confidence) -> bool:
     return (
         finding.severity.rank >= min_severity.rank
         and finding.confidence.rank >= min_confidence.rank

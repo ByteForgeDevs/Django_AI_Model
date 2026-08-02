@@ -41,7 +41,10 @@ packages = ["src/djaudit"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["tests/fixtures"]
+# Fixtures are deliberately broken Django code -- linting them defeats the point.
+# Docs contain illustrative snippets whose alignment carries meaning, and ruff
+# formats fenced Python blocks inside markdown.
+extend-exclude = ["tests/fixtures", "docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ANN", "PTH", "C4", "TID", "PL"]

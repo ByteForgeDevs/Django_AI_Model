@@ -89,9 +89,7 @@ class TestScoring:
         assert len(report.misgraded) == 1
         assert any("MISGRADED" in line for line in report.failures())
 
-    def test_control_case_hits_are_reported_as_false_positives(
-        self, tmp_path, vulnerable_project
-    ):
+    def test_control_case_hits_are_reported_as_false_positives(self, tmp_path, vulnerable_project):
         manifest = tmp_path / "expected.json"
         manifest.write_text(
             json.dumps(

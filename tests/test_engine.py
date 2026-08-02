@@ -70,9 +70,7 @@ class TestSelection:
         assert result.findings == []
 
     def test_ignoring_a_rule_silences_it(self, vulnerable_project):
-        result = engine.run(
-            vulnerable_project, exclude={"DJS-001"}, min_severity=Severity.INFO
-        )
+        result = engine.run(vulnerable_project, exclude={"DJS-001"}, min_severity=Severity.INFO)
         assert result.findings == []
 
     def test_live_tier_rules_are_skipped_without_a_live_context(self, vulnerable_project):
@@ -111,9 +109,7 @@ class TestBaselineIntegration:
         first = engine.run(vulnerable_project, min_severity=Severity.INFO)
         baseline = Baseline.from_findings(first.findings)
 
-        second = engine.run(
-            vulnerable_project, min_severity=Severity.INFO, baseline=baseline
-        )
+        second = engine.run(vulnerable_project, min_severity=Severity.INFO, baseline=baseline)
 
         assert second.findings == []
         assert second.suppressed_baseline == 2
@@ -122,9 +118,7 @@ class TestBaselineIntegration:
         first = engine.run(vulnerable_project, min_severity=Severity.INFO)
         partial = Baseline.from_findings(first.findings[:1])
 
-        second = engine.run(
-            vulnerable_project, min_severity=Severity.INFO, baseline=partial
-        )
+        second = engine.run(vulnerable_project, min_severity=Severity.INFO, baseline=partial)
 
         assert len(second.findings) == 1
         assert second.suppressed_baseline == 1
@@ -151,9 +145,7 @@ class TestRuleIsolation:
         """One odd construct in a large codebase must not cost every other rule."""
         from djaudit.registry import all_rules
 
-        monkeypatch.setattr(
-            engine, "select", lambda **kwargs: [ExplodingRule, *all_rules()]
-        )
+        monkeypatch.setattr(engine, "select", lambda **kwargs: [ExplodingRule, *all_rules()])
 
         result = engine.run(vulnerable_project, min_severity=Severity.INFO)
 
