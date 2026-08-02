@@ -340,7 +340,6 @@ rules, backed by a settings resolver that can see through the environment
 variable indirection every production Django project uses.
 
 **Entry criteria.** Phase 0 merged to `main`.
-
 **Exit criteria.** Real, triaged findings on both benchmark repositories; false
 positive rate measured and below 10% for the family; recall gate covering every
 new rule.
@@ -366,6 +365,18 @@ give us twenty subtly different implementations of settings inheritance.
 So Phase 1 front-loads two pieces of infrastructure — a partial evaluator and a
 settings resolver — and only then writes rules. Steps 1.1 to 1.3 are the phase's
 real engineering; steps 1.4 to 1.9 are comparatively mechanical.
+
+### Step 1.0 — Phase 0 review follow-ups
+
+Three correctness defects raised by code review on the Phase 0 pull request.
+Folded into this phase rather than a separate hotfix branch because all three
+are small, verified, and block nothing — but each is a genuine bug, and two of
+them fail in the direction of silently hiding findings, which is the failure
+mode this project cares about most.
+
+- **1.0.1** — `# djaudit: ignore[]` acted as a blanket suppression, because an empty code set was conflated with "no code list given". A mistyped bracket pair silently hid every rule on that line. Empty brackets now suppress nothing.
+- **1.0.2** — SARIF `associatedRule` referenced rule IDs absent from `tool.driver.rules` when a rule crashed without producing findings, leaving a dangling reference some consumers reject. Descriptors are now built from `RuleMeta` and cover crashed rules too.
+- **1.0.3** — `--output` with `--format terminal` did not create missing parent directories, unlike JSON and SARIF, so `-o reports/out.txt` failed on a fresh checkout.
 
 ### Step 1.1 — Rebuild the precision benchmark
 
@@ -826,15 +837,15 @@ conversation.
 
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
-| 0 | Engine skeleton | 10 | 28 | **Complete** |
-| 1 | Settings and deployment hardening | 9 | 50 | Not started |
+| 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
+| 1 | Settings and deployment hardening | 10 | 53 | In progress |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
 | 5 | Portability and external adapters | 4 | 20 | Not started |
 | 6 | LLM layer | 5 | 17 | Not started |
 | 7 | Distribution | 3 | 10 | Not started |
-| | **Total** | **50** | **225** | |
+| | **Total** | **51** | **228** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3.
