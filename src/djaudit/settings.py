@@ -191,14 +191,16 @@ def _visit_if(
     visit: Callable[[list[ast.stmt], bool], Iterator[_Operation]],
     scope: Scope,
 ) -> Iterator[_Operation]:
-    """Take the branch that runs, or both when we cannot tell which does."""
+    """Take the branch that runs, or both when we cannot prove which does."""
     test = Evaluator(scope).evaluate(stmt.test)
 
-    if test.is_literal:
-        taken = stmt.body if test.literal else stmt.orelse
-        # An environment-dependent test means the branch is not guaranteed even
-        # though we resolved it, so anything inside stays conditional.
-        yield from visit(taken, conditional or test.env_dependent)
+    # Prune only when the guard can never go the other way. Resolving a test to
+    # False for *our* environment says nothing about the deployment's, so an
+    # environment-dependent guard keeps both branches even though we have a
+    # value for it -- discarding one here would be permanent, and it is the
+    # branch a misconfigured deployment takes.
+    if test.is_literal and not test.env_dependent:
+        yield from visit(stmt.body if test.literal else stmt.orelse, conditional)
         return
 
     yield from visit(stmt.body, True)
@@ -278,6 +280,10 @@ def resolve_settings(ctx: ProjectContext, module: SettingsModule) -> SettingsVie
             value = _apply(operation, scope)
             if value is None:
                 continue
+            if operation.conditional:
+                # The assignment may not run, so the earlier value survives as
+                # an alternative rather than being replaced by this one.
+                value = _either(scope.names.get(operation.name), value)
             scope.names[operation.name] = value
             if operation.name.isupper():
                 definitions.setdefault(operation.name, []).append(
@@ -313,6 +319,13 @@ def _resolved(name: str, definitions: list[Definition]) -> ResolvedSetting:
         origin=origin,
         definitions=tuple(definitions),
     )
+
+
+def _either(previous: Value | None, value: Value) -> Value:
+    """Combine a value with the one a conditional assignment might not replace."""
+    if previous is None:
+        return value
+    return Value.conditional([previous, value])
 
 
 def _apply(operation: _Operation, scope: Scope) -> Value | None:

@@ -179,10 +179,25 @@ class TestExpressionsAcrossModules:
         assert resolved.origin is Origin.UNRESOLVED
         assert resolved.value.is_unknown
 
-    def test_a_resolvable_guard_takes_only_the_branch_that_runs(self, tmp_path: Path) -> None:
-        # os.getenv("CI") is None when unset, so the branch does not execute.
-        # Applying it anyway would report DEBUG as on for every project using
-        # this entirely correct idiom.
+    def test_a_provable_guard_takes_only_the_branch_that_runs(self, tmp_path: Path) -> None:
+        # Nothing outside the source can change this test, so the other branch
+        # is genuinely dead and keeping it would only invent possibilities.
+        ctx = project(
+            tmp_path,
+            {
+                "conf/__init__.py": "",
+                "conf/settings.py": (
+                    "SECRET_KEY = 'x'\nINSTALLED_APPS = []\nDEBUG = False\n"
+                    "if False:\n    DEBUG = True\n"
+                ),
+            },
+        )
+        assert view(ctx, "conf.settings").get("DEBUG").value.literal is False
+
+    def test_an_environment_guard_keeps_both_branches(self, tmp_path: Path) -> None:
+        # os.getenv("CI") is None here, but it is not None in CI. Resolving the
+        # test for our environment does not tell us the deployment's, and this
+        # is exactly the shape that turns DEBUG on in production.
         ctx = project(
             tmp_path,
             {
@@ -193,7 +208,10 @@ class TestExpressionsAcrossModules:
                 ),
             },
         )
-        assert view(ctx, "conf.settings").get("DEBUG").value.literal is False
+        resolved = view(ctx, "conf.settings").get("DEBUG")
+        assert resolved.could_be(True)
+        assert resolved.could_be(False)
+        assert not resolved.is_always(True)
 
     def test_an_unresolvable_guard_marks_the_assignment_conditional(self, tmp_path: Path) -> None:
         ctx = project(
@@ -208,7 +226,8 @@ class TestExpressionsAcrossModules:
         )
         resolved = view(ctx, "conf.settings").get("DEBUG")
         assert resolved.conditional
-        assert resolved.value.literal is True
+        assert resolved.could_be(True)
+        assert resolved.could_be(False)
 
     def test_a_taken_branch_guarded_by_the_environment_stays_conditional(
         self, tmp_path: Path
@@ -371,7 +390,8 @@ class TestListMutation:
             ),
         )
         resolved = view(ctx, "conf.settings").get("INSTALLED_APPS")
-        assert "debug_toolbar" in resolved.value.literal
+        assert resolved.could_be(["a", "debug_toolbar"])
+        assert resolved.could_be(["a"])
         assert resolved.conditional
 
     def test_mutation_across_the_inheritance_chain(self, tmp_path: Path) -> None:
