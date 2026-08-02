@@ -179,7 +179,10 @@ class TestExpressionsAcrossModules:
         assert resolved.origin is Origin.UNRESOLVED
         assert resolved.value.is_unknown
 
-    def test_a_conditional_assignment_is_marked(self, tmp_path: Path) -> None:
+    def test_a_resolvable_guard_takes_only_the_branch_that_runs(self, tmp_path: Path) -> None:
+        # os.getenv("CI") is None when unset, so the branch does not execute.
+        # Applying it anyway would report DEBUG as on for every project using
+        # this entirely correct idiom.
         ctx = project(
             tmp_path,
             {
@@ -190,9 +193,52 @@ class TestExpressionsAcrossModules:
                 ),
             },
         )
+        assert view(ctx, "conf.settings").get("DEBUG").value.literal is False
+
+    def test_an_unresolvable_guard_marks_the_assignment_conditional(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            {
+                "conf/__init__.py": "",
+                "conf/settings.py": (
+                    "SECRET_KEY = 'x'\nINSTALLED_APPS = []\nDEBUG = False\n"
+                    "if mystery():\n    DEBUG = True\n"
+                ),
+            },
+        )
         resolved = view(ctx, "conf.settings").get("DEBUG")
         assert resolved.conditional
         assert resolved.value.literal is True
+
+    def test_a_taken_branch_guarded_by_the_environment_stays_conditional(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = project(
+            tmp_path,
+            {
+                "conf/__init__.py": "",
+                "conf/settings.py": (
+                    "import os\nSECRET_KEY = 'x'\nINSTALLED_APPS = []\n"
+                    "if os.getenv('MODE', 'dev') == 'dev':\n    DEBUG = True\n"
+                ),
+            },
+        )
+        resolved = view(ctx, "conf.settings").get("DEBUG")
+        assert resolved.value.literal is True
+        assert resolved.conditional
+
+    def test_an_else_branch_is_taken_when_the_test_is_false(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            {
+                "conf/__init__.py": "",
+                "conf/settings.py": (
+                    "SECRET_KEY = 'x'\nINSTALLED_APPS = []\n"
+                    "if False:\n    DEBUG = True\nelse:\n    DEBUG = False\n"
+                ),
+            },
+        )
+        assert view(ctx, "conf.settings").get("DEBUG").value.literal is False
 
     def test_an_unassigned_setting_is_absent(self, overridden_project: Path) -> None:
         # A name Django holds no default for. SECURE_SSL_REDIRECT would now
@@ -231,3 +277,152 @@ class TestResolveOneModule:
         ctx = build_context(tmp_path)
         module = SettingsModule(path=broken, dotted="broken", role=SettingsRole.UNKNOWN)
         assert resolve_settings(ctx, module).settings == {}
+
+
+def settings_source(body: str) -> dict[str, str]:
+    return {
+        "conf/__init__.py": "",
+        "conf/settings.py": f"SECRET_KEY = 'x'\nROOT_URLCONF = 'urls'\n{body}",
+    }
+
+
+class TestListMutation:
+    """INSTALLED_APPS and MIDDLEWARE are assembled, not declared."""
+
+    def test_augmented_assignment(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path, settings_source("INSTALLED_APPS = ['a']\nINSTALLED_APPS += ['b']\n")
+        )
+        assert view(ctx, "conf.settings").get("INSTALLED_APPS").value.literal == ["a", "b"]
+
+    def test_append(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            settings_source("MIDDLEWARE = ['a']\nMIDDLEWARE.append('b')\nINSTALLED_APPS = []\n"),
+        )
+        assert view(ctx, "conf.settings").get("MIDDLEWARE").value.literal == ["a", "b"]
+
+    def test_insert_respects_position(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            settings_source("MIDDLEWARE = ['b']\nMIDDLEWARE.insert(0, 'a')\nINSTALLED_APPS = []\n"),
+        )
+        assert view(ctx, "conf.settings").get("MIDDLEWARE").value.literal == ["a", "b"]
+
+    def test_extend(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            settings_source("INSTALLED_APPS = ['a']\nINSTALLED_APPS.extend(['b', 'c'])\n"),
+        )
+        assert view(ctx, "conf.settings").get("INSTALLED_APPS").value.literal == ["a", "b", "c"]
+
+    def test_remove(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            settings_source("INSTALLED_APPS = ['a', 'debug_toolbar']\n"),
+        )
+        assert "debug_toolbar" in view(ctx, "conf.settings").get("INSTALLED_APPS").value.literal
+
+    def test_remove_applies(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            settings_source(
+                "INSTALLED_APPS = ['a', 'debug_toolbar']\nINSTALLED_APPS.remove('debug_toolbar')\n"
+            ),
+        )
+        assert view(ctx, "conf.settings").get("INSTALLED_APPS").value.literal == ["a"]
+
+    def test_starred_reassembly(self, tmp_path: Path) -> None:
+        # NetBox's `MIDDLEWARE = ["x", *MIDDLEWARE]` pattern.
+        ctx = project(
+            tmp_path,
+            settings_source(
+                "MIDDLEWARE = ['b']\nMIDDLEWARE = ['a', *MIDDLEWARE]\nINSTALLED_APPS = []\n"
+            ),
+        )
+        assert view(ctx, "conf.settings").get("MIDDLEWARE").value.literal == ["a", "b"]
+
+    def test_a_guarded_mutation_that_cannot_run_is_not_applied(self, tmp_path: Path) -> None:
+        # The precise NetBox shape: debug tooling behind `if DEBUG:`.
+        ctx = project(
+            tmp_path,
+            settings_source(
+                "DEBUG = False\nINSTALLED_APPS = ['a']\n"
+                "if DEBUG:\n    INSTALLED_APPS += ['debug_toolbar']\n"
+            ),
+        )
+        assert view(ctx, "conf.settings").get("INSTALLED_APPS").value.literal == ["a"]
+
+    def test_a_guarded_mutation_that_does_run_is_applied(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            settings_source(
+                "DEBUG = True\nINSTALLED_APPS = ['a']\n"
+                "if DEBUG:\n    INSTALLED_APPS += ['debug_toolbar']\n"
+            ),
+        )
+        assert "debug_toolbar" in view(ctx, "conf.settings").get("INSTALLED_APPS").value.literal
+
+    def test_an_unresolvable_guard_applies_the_mutation_conditionally(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            settings_source(
+                "INSTALLED_APPS = ['a']\nif mystery():\n    INSTALLED_APPS += ['debug_toolbar']\n"
+            ),
+        )
+        resolved = view(ctx, "conf.settings").get("INSTALLED_APPS")
+        assert "debug_toolbar" in resolved.value.literal
+        assert resolved.conditional
+
+    def test_mutation_across_the_inheritance_chain(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            {
+                "conf/__init__.py": "",
+                "conf/base.py": "SECRET_KEY = 'x'\nINSTALLED_APPS = ['a']\nROOT_URLCONF = 'u'\n",
+                "conf/prod.py": "from .base import *\nINSTALLED_APPS += ['b']\n",
+            },
+        )
+        assert view(ctx, "conf.prod").get("INSTALLED_APPS").value.literal == ["a", "b"]
+
+    def test_mutation_of_an_unresolved_list_is_unknown(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            settings_source("INSTALLED_APPS = mystery()\nINSTALLED_APPS.append('a')\n"),
+        )
+        assert view(ctx, "conf.settings").get("INSTALLED_APPS").value.is_unknown
+
+    def test_mutation_before_any_assignment_is_ignored(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            settings_source("MIDDLEWARE.append('a')\nINSTALLED_APPS = []\n"),
+        )
+        assert "MIDDLEWARE" not in view(ctx, "conf.settings")
+
+    def test_removing_a_missing_entry_does_not_crash(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            settings_source("INSTALLED_APPS = ['a']\nINSTALLED_APPS.remove('nope')\n"),
+        )
+        assert view(ctx, "conf.settings").get("INSTALLED_APPS").value.is_unknown
+
+    def test_the_mutation_appears_in_the_provenance_chain(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            settings_source("INSTALLED_APPS = ['a']\nINSTALLED_APPS += ['b']\n"),
+        )
+        resolved = view(ctx, "conf.settings").get("INSTALLED_APPS")
+        assert len(resolved.definitions) == 2
+
+    def test_incompatible_augmented_assignment_is_unknown(self, tmp_path: Path) -> None:
+        ctx = project(tmp_path, settings_source("INSTALLED_APPS = ['a']\nINSTALLED_APPS += 5\n"))
+        assert view(ctx, "conf.settings").get("INSTALLED_APPS").value.is_unknown
+
+    def test_taint_survives_a_mutation(self, tmp_path: Path) -> None:
+        ctx = project(
+            tmp_path,
+            settings_source(
+                "import os\nINSTALLED_APPS = [os.getenv('APP', 'a')]\nINSTALLED_APPS += ['b']\n"
+            ),
+        )
+        assert view(ctx, "conf.settings").get("INSTALLED_APPS").value.env_dependent

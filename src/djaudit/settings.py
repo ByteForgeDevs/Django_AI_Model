@@ -13,6 +13,7 @@ were overridden.
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -141,52 +142,66 @@ class _Operation:
     args: tuple[ast.expr, ...] = ()
 
 
-def _operations(tree: ast.Module) -> list[_Operation]:
+def _operations(tree: ast.Module, scope: Scope) -> Iterator[_Operation]:
     """Assignments and in-place mutations of module-level names, in order.
 
-    Settings modules build ``INSTALLED_APPS`` and ``MIDDLEWARE`` incrementally,
-    so reading only ``Assign`` nodes sees the wrong list.
+    Branches are evaluated as the walk proceeds rather than all being taken.
+    NetBox guards its debug toolbar with ``if DEBUG:``, so a walk that enters
+    every branch reports the debug toolbar as installed in production -- a
+    false positive on the exact repository we use to measure false positives.
     """
-    found: list[_Operation] = []
 
-    def visit(body: list[ast.stmt], conditional: bool) -> None:
+    def visit(body: list[ast.stmt], conditional: bool) -> Iterator[_Operation]:
         for stmt in body:
             if isinstance(stmt, ast.Assign):
                 for target in stmt.targets:
                     if isinstance(target, ast.Name):
-                        found.append(_Operation(target.id, stmt, conditional, value=stmt.value))
+                        yield _Operation(target.id, stmt, conditional, value=stmt.value)
             elif isinstance(stmt, ast.AnnAssign):
                 if isinstance(stmt.target, ast.Name) and stmt.value is not None:
-                    found.append(_Operation(stmt.target.id, stmt, conditional, value=stmt.value))
+                    yield _Operation(stmt.target.id, stmt, conditional, value=stmt.value)
             elif isinstance(stmt, ast.AugAssign):
                 if isinstance(stmt.target, ast.Name):
-                    found.append(
-                        _Operation(
-                            stmt.target.id,
-                            stmt,
-                            conditional,
-                            value=stmt.value,
-                            augmented=True,
-                        )
+                    yield _Operation(
+                        stmt.target.id, stmt, conditional, value=stmt.value, augmented=True
                     )
             elif isinstance(stmt, ast.Expr):
                 mutation = _mutation(stmt, conditional)
                 if mutation is not None:
-                    found.append(mutation)
+                    yield mutation
             elif isinstance(stmt, ast.If):
-                visit(stmt.body, True)
-                visit(stmt.orelse, True)
+                yield from _visit_if(stmt, conditional, visit, scope)
             elif isinstance(stmt, ast.Try):
-                visit(stmt.body, True)
+                # An exception may fire at any point, so nothing here is certain.
+                yield from visit(stmt.body, True)
                 for handler in stmt.handlers:
-                    visit(handler.body, True)
-                visit(stmt.orelse, True)
-                visit(stmt.finalbody, conditional)
+                    yield from visit(handler.body, True)
+                yield from visit(stmt.orelse, True)
+                yield from visit(stmt.finalbody, conditional)
             elif isinstance(stmt, ast.With):
-                visit(stmt.body, conditional)
+                yield from visit(stmt.body, conditional)
 
-    visit(tree.body, False)
-    return found
+    yield from visit(tree.body, False)
+
+
+def _visit_if(
+    stmt: ast.If,
+    conditional: bool,
+    visit: Callable[[list[ast.stmt], bool], Iterator[_Operation]],
+    scope: Scope,
+) -> Iterator[_Operation]:
+    """Take the branch that runs, or both when we cannot tell which does."""
+    test = Evaluator(scope).evaluate(stmt.test)
+
+    if test.is_literal:
+        taken = stmt.body if test.literal else stmt.orelse
+        # An environment-dependent test means the branch is not guaranteed even
+        # though we resolved it, so anything inside stays conditional.
+        yield from visit(taken, conditional or test.env_dependent)
+        return
+
+    yield from visit(stmt.body, True)
+    yield from visit(stmt.orelse, True)
 
 
 def _mutation(stmt: ast.Expr, conditional: bool) -> _Operation | None:
@@ -258,7 +273,7 @@ def resolve_settings(ctx: ProjectContext, module: SettingsModule) -> SettingsVie
         scope.env_objects.update(collect_env_objects(tree, scope.imports))
 
         dotted = dotted_path(ctx.root, path)
-        for operation in _operations(tree):
+        for operation in _operations(tree, scope):
             value = _apply(operation, scope)
             if value is None:
                 continue
