@@ -425,6 +425,27 @@ being guessed.
 - **1.3.5** — Confidence policy: a single, documented mapping from resolution quality to `Confidence`, applied uniformly by all rules.
 - **1.3.6** — Migrate `DJS-001` onto the resolver; delete its bespoke override logic. *Done when:* existing tests pass unchanged and DJS-001 now fires on env-var-defaulted DEBUG at `tentative`.
 
+*Step 1.3 done.* The resolver covers 93% of Healthchecks' settings and 67% of
+NetBox's, and grades them 16/77/14 and 27/103/72 across
+certain/firm/tentative — the bulk at `firm`, which is the default gate, and
+`tentative` reserved for values that genuinely cannot be determined.
+
+Two amendments, both from measuring rather than reasoning:
+
+- **1.3.4 as written pruned too hard.** Taking only the branch whose guard
+  resolves is right for `if False:` and wrong for `if os.getenv("DEBUG"):` —
+  resolving a guard for our environment says nothing about the deployment's,
+  and the discarded branch is the one a misconfigured deployment takes.
+  Pruning now requires the guard to be provable from source alone, and a
+  conditional assignment merges with the value it might not replace. Precision
+  is protected by grading the result `tentative`, not by deleting it.
+- **1.3.6's "existing tests pass unchanged" did not hold, and should not
+  have.** One test changed: a base module enabling DEBUG whose production
+  module only conditionally disables it now reports production as well. The
+  old rule matched a literal `DEBUG = True` statement and there is none in
+  that file, so it missed a module that really can deploy with DEBUG on.
+  Detecting it is the reason for the migration.
+
 ### Step 1.4 — Secret management rules
 
 - **1.4.1** — `DJS-002` hardcoded `SECRET_KEY` literal.
@@ -854,7 +875,7 @@ conversation.
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
-| 1 | Settings and deployment hardening | 10 | 54 | In progress — Steps 1.0, 1.1, 1.2 done |
+| 1 | Settings and deployment hardening | 10 | 54 | In progress — Steps 1.0–1.3 done |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
