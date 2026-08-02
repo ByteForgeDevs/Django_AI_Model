@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from typer.testing import CliRunner
 
 from djaudit.baseline import Baseline
@@ -59,12 +60,26 @@ class TestOutputFormats:
         )
         assert json.loads(out.read_text())["version"] == "2.1.0"
 
-    def test_output_parent_directories_are_created(self, vulnerable_project, tmp_path):
-        out = tmp_path / "reports" / "nested" / "out.sarif"
-        runner.invoke(
-            app, ["run", str(vulnerable_project), "-f", "sarif", "-o", str(out)]
+    @pytest.mark.parametrize("fmt", ["terminal", "json", "sarif"])
+    def test_output_parent_directories_are_created(self, vulnerable_project, tmp_path, fmt):
+        """Every format must behave the same here.
+
+        Terminal previously opened the file directly while JSON and SARIF
+        created parents first, so `-o reports/out.txt` failed on a fresh
+        checkout for one format out of three.
+        """
+        out = tmp_path / "reports" / "nested" / f"out.{fmt}"
+        result = runner.invoke(
+            app, ["run", str(vulnerable_project), "-f", fmt, "-o", str(out)]
         )
+        assert result.exit_code in {EXIT_OK, EXIT_FINDINGS}, result.output
         assert out.is_file()
+        assert out.read_text().strip()
+
+    def test_terminal_file_output_names_the_rule(self, vulnerable_project, tmp_path):
+        out = tmp_path / "reports" / "out.txt"
+        runner.invoke(app, ["run", str(vulnerable_project), "-f", "terminal", "-o", str(out)])
+        assert "DJS-001" in out.read_text()
 
     def test_terminal_output_names_the_rule_and_location(self, vulnerable_project):
         result = runner.invoke(app, ["run", str(vulnerable_project)])

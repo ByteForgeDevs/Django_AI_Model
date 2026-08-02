@@ -145,17 +145,22 @@ def run(
 def _emit(
     result: engine.RunResult, output_format: OutputFormat, output: Path | None
 ) -> None:
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+
     if output_format is OutputFormat.TERMINAL:
-        console = Console(file=output.open("w", encoding="utf-8") if output else sys.stdout)
-        terminal.report(result, console)
-        if output:
-            console.file.close()
+        if output is None:
+            terminal.report(result, Console(file=sys.stdout))
+            return
+        # Context-managed so a reporter crash cannot leave a half-written,
+        # unflushed report on disk that a CI step would then try to read.
+        with output.open("w", encoding="utf-8") as handle:
+            terminal.report(result, Console(file=handle))
         return
 
     renderer = json_reporter.render if output_format is OutputFormat.JSON else sarif.render
     text = renderer(result)
     if output:
-        output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text, encoding="utf-8")
     else:
         sys.stdout.write(text)
