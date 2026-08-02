@@ -126,9 +126,9 @@ class TestViewFallback:
         from djaudit.settings import resolve_all
 
         ctx = build_context(overridden_project)
-        resolved = resolve_all(ctx)["config.settings.production"].get("SECURE_SSL_REDIRECT")
+        resolved = resolve_all(ctx)["config.settings.production"].get("SECURE_HSTS_SECONDS")
         assert resolved.origin is Origin.DJANGO_DEFAULT
-        assert resolved.value.literal is False
+        assert resolved.value.literal == 0
         assert resolved.definition is None
 
     def test_an_explicit_assignment_still_wins(self, overridden_project) -> None:

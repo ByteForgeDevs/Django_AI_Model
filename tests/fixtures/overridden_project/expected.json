@@ -1,5 +1,5 @@
 {
-  "description": "The normal split-settings pattern: base enables DEBUG, production unconditionally disables it. The base finding must survive but be downgraded to low/tentative so it stays below default CI gates. Development is a control case. base.py carries the throwaway key startproject generates, which DJS-003 claims for being guessable; DJS-002 must stay quiet on it rather than report the same line for the lesser reason. It is reported once for the base and production pair that share it.",
+  "description": "The normal split-settings pattern: base enables DEBUG, production unconditionally disables it. The base finding must survive but be downgraded to low/tentative so it stays below default CI gates. Development is a control case. base.py carries the throwaway key startproject generates, which DJS-003 claims for being guessable; DJS-002 must stay quiet on it rather than report the same line for the lesser reason. It is reported once for the base and production pair that share it. production.py also sets SECURE_SSL_REDIRECT, which Django ships off: that rule fires on a project that never mentions them, so this is the control proving that setting them is enough to stop it.",
   "expected": [
     {
       "rule_id": "DJS-001",
@@ -24,6 +24,14 @@
     {
       "rule_id": "DJS-001",
       "file": "config/settings/production.py"
+    },
+    {
+      "rule_id": "DJS-006",
+      "file": "config/settings/production.py"
+    },
+    {
+      "rule_id": "DJS-006",
+      "file": "config/settings/base.py"
     }
   ]
 }

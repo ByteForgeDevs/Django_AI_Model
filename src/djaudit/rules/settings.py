@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from djaudit.context import ProjectContext, SettingsModule, SettingsRole
+from djaudit.context import ProjectContext, SettingsRole
 from djaudit.models import Confidence, Family, Finding, Severity, Tier
 from djaudit.registry import RuleMeta, register
 from djaudit.rules._base import SettingGroup, SettingsRule
-from djaudit.settings import Definition, ResolvedSetting, SettingsView
+from djaudit.settings import Definition, ResolvedSetting
 from djaudit.values import Value
 
 _GRADING: dict[SettingsRole, tuple[Severity, Confidence]] = {
@@ -73,7 +73,8 @@ class DebugEnabled(SettingsRule):
         culprit = _culprit(resolved)
         if culprit is None:
             return
-        yield self._build(ctx, group, culprit, _overridden(self.views, group.module))
+        overridden = self.overridden(group.module, lambda rs: rs.is_always(False))
+        yield self._build(ctx, group, culprit, overridden)
 
     def _build(
         self,
@@ -115,26 +116,3 @@ def _culprit(resolved: ResolvedSetting) -> Definition | None:
         if could_be_true(definition.value):
             return definition
     return resolved.definition
-
-
-def _overridden(views: dict[str, SettingsView], module: SettingsModule) -> bool:
-    """Whether every settings module inheriting from ``module`` turns DEBUG off.
-
-    A base module is not deployed by itself, so DEBUG=True there is a latent
-    hazard rather than a live one when every module that imports it switches
-    DEBUG off. Asking the resolver replaces a scan for `DEBUG = False` anywhere
-    in the project, which said nothing about whether the two were connected.
-    """
-    if module.role is not SettingsRole.BASE:
-        return False
-
-    # A development module inheriting the base and leaving DEBUG on is the
-    # point of a development module, so it says nothing about production.
-    heirs = [
-        view
-        for dotted, view in views.items()
-        if dotted != module.dotted
-        and module.dotted in view.chain
-        and view.module.role.reaches_production
-    ]
-    return bool(heirs) and all(heir.get("DEBUG").is_always(False) for heir in heirs)

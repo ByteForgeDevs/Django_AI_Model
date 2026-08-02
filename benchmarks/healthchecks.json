@@ -25,6 +25,16 @@
       "note": "Real and deliberate. hc/settings.py:70 is `DEBUG = envbool(\"DEBUG\", \"True\")`, so a deployment that does not set the DEBUG environment variable runs with DEBUG on. Healthchecks knows this: its own production checklist in README.md tells operators to 'make sure it is set to False'. Convenient for local development, a hazard for anyone who deploys without reading the checklist, which is exactly what this rule is for. Reported at tentative because the environment can override it.",
       "reviewed": "2026-08-02",
       "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "1d24d2cef11f4856",
+      "rule_id": "DJS-006",
+      "verdict": "accepted_risk",
+      "file": "hc/settings.py",
+      "line": 1,
+      "note": "Correct about the source and defensible in practice. Healthchecks reads SECURE_PROXY_SSL_HEADER from the environment, which says plainly that the intended deployment puts a TLS-terminating proxy in front, and such a proxy is the normal and better place to perform the HTTP-to-HTTPS redirect -- doing it in Django means the plain-HTTP request has already reached the application. This is precisely the case the rule reports at tentative rather than firm, because we cannot see the proxy from inside the repository. Unlike the two cookie flags above, delegating this one loses nothing.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
     }
   ]
 }

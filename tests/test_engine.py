@@ -100,7 +100,11 @@ class TestSuppression:
         result = engine.run(project, min_severity=Severity.INFO)
 
         assert result.suppressed_inline == 1
-        assert not any("production" in f.location.file for f in result.findings)
+        # Other rules report against production too; the claim here is only
+        # that the suppressed one no longer does.
+        assert not any(
+            f.rule_id == "DJS-001" and "production" in f.location.file for f in result.findings
+        )
 
     def test_another_tools_noqa_does_not_suppress(self, vulnerable_project, tmp_path):
         project = tmp_path / "project"

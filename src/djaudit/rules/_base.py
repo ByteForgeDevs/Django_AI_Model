@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import ast
 from abc import abstractmethod
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 
 from djaudit.context import ProjectContext, SettingsModule, SettingsRole
@@ -152,10 +152,14 @@ class SettingsRule(Rule):
             )
             for resolved in found:
                 definition = resolved.definition
+                # A setting nobody assigns has no site to key on, and keying
+                # on each module instead would report one missing flag once per
+                # environment. It is one defect with one fix, so it gets one
+                # bucket, graded against the module with most to lose.
                 key = (
                     (resolved.name, str(definition.module), definition.node.lineno)
                     if definition
-                    else (resolved.name, str(module.path), 0)
+                    else (resolved.name, "", 0)
                 )
                 collected.setdefault(key, []).append((module, resolved))
 
@@ -172,6 +176,30 @@ class SettingsRule(Rule):
                 )
             )
         return groups
+
+    def overridden(self, module: SettingsModule, safe: Callable[[ResolvedSetting], bool]) -> bool:
+        """Whether every module inheriting ``module`` fixes the setting itself.
+
+        A base module is not deployed on its own, so an insecure value there is
+        a latent hazard rather than a live one when every environment that
+        imports it corrects the value. Asking the resolver replaces scanning
+        the project for a safe assignment anywhere, which said nothing about
+        whether the two were connected.
+
+        Development heirs are excluded: a development module leaving a flag off
+        is what a development module is for, and it says nothing about
+        production.
+        """
+        if module.role is not SettingsRole.BASE:
+            return False
+        heirs = [
+            view
+            for dotted, view in self.views.items()
+            if dotted != module.dotted
+            and module.dotted in view.chain
+            and view.module.role.reaches_production
+        ]
+        return bool(heirs) and all(safe(heir.get(self.setting)) for heir in heirs)
 
     @abstractmethod
     def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
@@ -350,3 +378,77 @@ def assignment_value(setting: ResolvedSetting) -> ast.expr | None:
     if definition is None or not isinstance(definition.node, ast.Assign | ast.AnnAssign):
         return None
     return definition.node.value
+
+
+def could_be_off(value: Value) -> bool:
+    """Whether a security flag is anything other than ``True`` on some path.
+
+    The mirror of ``could_be_true``, and deliberately not identity-based in the
+    same way: ``True`` is the only value that turns one of these on, so
+    ``SESSION_COOKIE_SECURE = 1`` is reported. That asymmetry is on purpose --
+    for DEBUG a stray truthy value means "something we have not modelled drives
+    this", and guessing costs noise; for a flag that must be on, anything we
+    cannot see as ``True`` is something the reader wants to look at.
+    """
+    if value.is_conditional:
+        return any(could_be_off(branch) for branch in value.branches)
+    return not (value.is_literal and value.literal is True)
+
+
+class FlagRule(SettingsRule):
+    """A setting that must be ``True`` and defaults to ``False``.
+
+    Django ships four of these -- ``SECURE_SSL_REDIRECT``,
+    ``SESSION_COOKIE_SECURE``, ``CSRF_COOKIE_SECURE``,
+    ``SECURE_CONTENT_TYPE_NOSNIFF`` -- and they differ only in what they
+    protect and how confidently we can complain, so those are the only two
+    things a subclass supplies.
+    """
+
+    consequence: str = ""
+    """What goes wrong while the flag is off, in the middle of a sentence."""
+
+    def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
+        resolved = group.setting
+        if not could_be_off(resolved.value):
+            return
+        if resolved.origin is Origin.UNRESOLVED:
+            # Nothing was learned, so there is nothing to say. Reporting every
+            # unresolvable flag would bury the ones we actually read.
+            return
+
+        where = group.module.dotted or ctx.rel(group.module.path)
+        # The shared policy already appends "the setting is never assigned, so
+        # Django's default applies", so saying it here too says it twice.
+        state = "is never set" if resolved.is_default else f"is {resolved.value.describe()}"
+        severity: Severity | None = None
+        ceiling: Confidence | None = None
+        caveats: tuple[str, ...] = ()
+        corrected = self.overridden(group.module, lambda rs: not could_be_off(rs.value))
+        if corrected and resolved.is_default:
+            # The base never mentions the flag and every environment sets it.
+            # There is no wrong value here to fix -- this is simply where the
+            # flag does not live -- which is different from a base that writes
+            # an insecure value down and gets overridden anyway.
+            return
+
+        if corrected:
+            # A base left insecure while every environment corrects it is
+            # ordinary split-settings practice, not a defect. Downgraded rather
+            # than dropped, because the base can still be pointed at directly.
+            severity, ceiling = Severity.LOW, Confidence.TENTATIVE
+            caveats = (
+                f"every settings module that imports this one sets "
+                f"{resolved.name} = True, which should override it",
+            )
+
+        yield self.report(
+            ctx,
+            group,
+            message=(
+                f"{resolved.name} in {where}{group.describe_reach()} {state}, so {self.consequence}"
+            ),
+            severity=severity,
+            ceiling=ceiling,
+            extra_caveats=caveats,
+        )

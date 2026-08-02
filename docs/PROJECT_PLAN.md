@@ -565,6 +565,39 @@ than after twenty-six of them disagree, is cheaper.
 ### Step 1.5 — Transport and cookie security rules
 
 - **1.5.1** — `DJS-006` `SECURE_SSL_REDIRECT` not enabled.
+
+  **Done.** `FlagRule` in `rules/_base.py` now carries the whole family: a flag
+  that must be `True`, ships `False`, and is worth reporting when absent. Three
+  things had to be got right before the first rule was worth having.
+
+  *An unset flag is the insecure state, so absence must be reportable.* That is
+  new — every rule before this one needed an assignment to point at. `report()`
+  gained an `at:` override and `groups()` now buckets a setting that is absent
+  everywhere into a single group keyed `(name, "", 0)`, because the first
+  version reported once per settings module and produced six findings on a
+  fixture with three defects.
+
+  *A base module that merely omits the flag is not a defect.* Every environment
+  that matters sets it, and the value in the base is not wrong, it is absent.
+  This is deliberately different from `DJS-001`, where the base writes
+  `DEBUG = True` down and is overridden anyway: a wrong value is worth saying
+  even when something later corrects it. `overridden_project` pins both halves.
+
+  *Confidence is where honesty about a proxy lives.* `SECURE_SSL_REDIRECT` is
+  capped at `firm`, never `certain`, because nginx or a load balancer may be
+  doing the redirect and no amount of reading the source will reveal it. Relying
+  on Django's default costs a further step, so an unset flag lands at
+  `tentative`. This is the difference between a useful rule and a reimplementation
+  of `check --deploy`'s noise.
+
+  `DJS-001`'s private `_overridden` was generalised onto `SettingsRule` and the
+  duplicate deleted; its fingerprint `204f74697636c950` is unchanged, so the
+  recorded healthchecks verdict still applies.
+
+  Triaged on both targets: healthchecks reads `SECURE_PROXY_SSL_HEADER` from the
+  environment, which says the redirect belongs to the proxy — `accepted_risk`.
+  NetBox exposes the setting as a documented operator knob — `accepted_risk`.
+  Precision stays 100% on both.
 - **1.5.2** — `DJS-007` `SECURE_HSTS_SECONDS` absent or below one year.
 - **1.5.3** — `DJS-008` `SECURE_HSTS_INCLUDE_SUBDOMAINS` disabled while HSTS is on.
 - **1.5.4** — `DJS-009` `SESSION_COOKIE_SECURE` disabled.
