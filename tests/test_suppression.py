@@ -37,6 +37,21 @@ class TestDjauditIgnore:
         """Unlike bare noqa, this can only have been written for us."""
         assert line_suppresses("DEBUG = True  # djaudit: ignore", "DJS-001")
 
+    def test_empty_bracket_list_suppresses_nothing(self):
+        """``ignore[]`` is a typo, not a blanket suppression.
+
+        The brackets announce "I am about to name rules". Naming none is a slip,
+        and treating a slip as "suppress everything" is exactly the silent
+        hiding of findings that bare ``# noqa`` is refused to prevent.
+        """
+        assert not line_suppresses("DEBUG = True  # djaudit: ignore[]", "DJS-001")
+        assert not line_suppresses("DEBUG = True  # djaudit: ignore[   ]", "DJS-001")
+        assert not line_suppresses("DEBUG = True  # djaudit: ignore[,]", "DJS-001")
+
+    def test_bare_ignore_still_works_alongside_the_empty_list_rule(self):
+        """Guard against a fix that over-corrects and breaks the bare form."""
+        assert line_suppresses("x  # djaudit: ignore reason here", "DJS-001")
+
     def test_trailing_reason_is_allowed(self):
         assert line_suppresses(
             "DEBUG = True  # djaudit: ignore[DJS-001] staging box, PROJ-412", "DJS-001"

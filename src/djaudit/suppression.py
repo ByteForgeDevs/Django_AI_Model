@@ -9,6 +9,12 @@ A bare ``# noqa`` is deliberately *not* honoured. Those are usually left behind
 for some other linter, and treating them as blanket djaudit suppressions would
 silently hide security findings. ``# djaudit: ignore`` without codes is honoured,
 because that one can only have been written for us.
+
+``# djaudit: ignore[]`` — an *empty* bracket list — suppresses nothing. The
+brackets say "I am about to name the rules I mean", so an empty list is a typo,
+not an intention. Treating it as a blanket suppression would turn a slip of the
+keyboard into silently hidden findings, which is the same failure we refuse
+bare ``# noqa`` to avoid.
 """
 
 from __future__ import annotations
@@ -26,7 +32,11 @@ _IGNORE = re.compile(
 
 
 def _codes(raw: str | None) -> set[str] | None:
-    """``None`` means "every rule"; a set means only those rule ids."""
+    """``None`` means "every rule"; a set means only those rule ids.
+
+    An empty set is therefore meaningfully different from ``None``: it names no
+    rules at all and so suppresses nothing.
+    """
     if raw is None:
         return None
     return {code.strip().upper() for code in raw.split(",") if code.strip()}
@@ -38,7 +48,7 @@ def line_suppresses(text: str, rule_id: str) -> bool:
 
     for match in _IGNORE.finditer(text):
         codes = _codes(match.group("codes"))
-        if codes is None or not codes or target in codes:
+        if codes is None or target in codes:
             return True
 
     for match in _NOQA.finditer(text):
