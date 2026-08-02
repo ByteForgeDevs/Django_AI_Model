@@ -36,6 +36,12 @@ jobs:
       - name: mypy
         run: uv run mypy
 
+      # The plan states its own counts. They were wrong the first time they
+      # were written by hand, and a plan that miscounts itself is one nobody
+      # checks against.
+      - name: project plan is self-consistent
+        run: uv run python scripts/check_plan.py
+
       - name: pytest
         run: uv run pytest
 

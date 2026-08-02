@@ -384,7 +384,12 @@ mode this project cares about most.
 
 The current zero-findings gate stops working the moment this phase lands.
 
-- **1.1.1** — Triage file format: per-target YAML mapping fingerprint to verdict (`true_positive` / `false_positive` / `accepted_risk`), with reviewer note and date. *Done when:* schema is defined and round-trips.
+- **1.1.1** — Triage file format: per-target JSON mapping fingerprint to verdict (`true_positive` / `false_positive` / `accepted_risk`), with reviewer note and date. *Done when:* schema is defined and round-trips.
+
+  *Amended 1.1.1: JSON, not YAML.* Reviewers edit these files by hand, which is
+  the case for YAML, but the per-entry `note` field covers what comments would
+  have carried and JSON keeps runtime dependencies at two packages. Also lets
+  the module reuse the baseline's I/O shape rather than inventing a second one.
 - **1.1.2** — `djaudit benchmark` command: run against a target, diff against its triage file, report new/resolved/untriaged counts.
 - **1.1.3** — Gate logic: fail on untriaged findings, on family false-positive rate above threshold, or on the disappearance of a known true positive.
 - **1.1.4** — Replace `scripts/check_precision.py` in CI; seed empty triage files for both targets.
@@ -840,7 +845,7 @@ conversation.
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
-| 1 | Settings and deployment hardening | 10 | 54 | In progress |
+| 1 | Settings and deployment hardening | 10 | 54 | In progress — Steps 1.0, 1.1 done |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
