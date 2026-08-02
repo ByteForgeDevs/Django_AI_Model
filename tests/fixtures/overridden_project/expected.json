@@ -1,5 +1,5 @@
 {
-  "description": "The normal split-settings pattern: base enables DEBUG, production unconditionally disables it. The base finding must survive but be downgraded to low/tentative so it stays below default CI gates. Development is a control case. The hardcoded SECRET_KEY in base.py is a defect regardless of the DEBUG override, and is reported once for the base and production pair that share it.",
+  "description": "The normal split-settings pattern: base enables DEBUG, production unconditionally disables it. The base finding must survive but be downgraded to low/tentative so it stays below default CI gates. Development is a control case. base.py carries the throwaway key startproject generates, which DJS-003 claims for being guessable; DJS-002 must stay quiet on it rather than report the same line for the lesser reason. It is reported once for the base and production pair that share it.",
   "expected": [
     {
       "rule_id": "DJS-001",
@@ -9,7 +9,7 @@
       "confidence": "tentative"
     },
     {
-      "rule_id": "DJS-002",
+      "rule_id": "DJS-003",
       "file": "config/settings/base.py",
       "line": 12,
       "severity": "critical",

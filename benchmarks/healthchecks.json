@@ -7,12 +7,12 @@
   "max_false_positive_rate": 0.1,
   "findings": [
     {
-      "fingerprint": "e854c669ed64fb60",
-      "rule_id": "DJS-002",
+      "fingerprint": "9f80d4e589623281",
+      "rule_id": "DJS-003",
       "verdict": "accepted_risk",
       "file": "hc/settings.py",
       "line": 68,
-      "note": "Real and deliberate. hc/settings.py:68 is `SECRET_KEY = envsecret(\"SECRET_KEY\", \"---\")`, so an instance deployed without the SECRET_KEY environment variable signs its sessions with the three-character string '---'. Anyone who knows that -- and it is in the public repository and the published configuration docs, which list `Default: ---` -- can forge a session for any user on such an instance. Healthchecks documents that it 'should be set to a unique, unpredictable value', so the weak default is a knowing convenience for local development rather than an oversight. Reported at firm rather than certain because the environment normally does supply a real key.",
+      "note": "Real and deliberate. hc/settings.py:68 is `SECRET_KEY = envsecret(\"SECRET_KEY\", \"---\")`, so an instance deployed without the SECRET_KEY environment variable signs its sessions with three hyphens. That is not a key an attacker has to steal -- healthchecks publishes it, as `Default: ---`, in its own configuration documentation, so anyone can forge a session for any user on such an instance without ever seeing the source. Healthchecks also documents that the value 'should be set to a unique, unpredictable value', which makes this a knowing convenience for local development rather than an oversight. Firm rather than certain because a real deployment normally does supply the variable.",
       "reviewed": "2026-08-02",
       "reviewer": "Zambagarrah"
     },

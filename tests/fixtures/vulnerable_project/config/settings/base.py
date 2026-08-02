@@ -8,8 +8,11 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-# PLANTED DEFECT: a key committed to the repository. Not a real secret.
-SECRET_KEY = "django-insecure-fixture-key-not-a-real-secret"
+# PLANTED DEFECT: a strong key, committed to the repository, which is DJS-002.
+# Random and fixture-only -- it signs nothing and never has. It is deliberately
+# strong so that DJS-003 does not claim it: overridden_project carries the weak
+# key, and between them both rules keep a recall case of their own.
+SECRET_KEY = "*x3t(5n^s*5!^3p6ideyjx%u!wwl@bdy$sf-jlu&3n$e&!#y*1"
 
 DEBUG = True
 

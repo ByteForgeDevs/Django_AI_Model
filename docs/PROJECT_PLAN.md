@@ -457,6 +457,41 @@ than after twenty-six of them disagree, is cheaper.
 - **1.4.0** — `SettingsRule` base: the production-reachable module loop, resolution, shared grading and provenance evidence, with `DJS-001` migrated onto it as its first user.
 - **1.4.1** — `DJS-002` hardcoded `SECRET_KEY` literal.
 - **1.4.2** — `DJS-003` weak or placeholder `SECRET_KEY` (`django-insecure-` prefix, `changeme`, entropy below threshold).
+
+  **Done.** Built as a classifier — `weakness(secret)` — rather than as a rule
+  body, because it is a pure function over a string and deserves to be tested
+  as one. Four signals, ordered most specific first so the reported reason is
+  the most useful one that applies: Django's own `django-insecure-` marker;
+  a placeholder, matched case- and punctuation-insensitively; length below 32
+  (where a hex-encoded 128-bit key sits, and clear of `token_hex(16)` at
+  exactly 32, `token_urlsafe(32)` at 43, and Django's 50); and fewer than 6
+  distinct characters over a long value, which catches padding that length
+  alone would pass.
+
+  *Amendment — Shannon entropy was dropped.* The plan said "entropy below
+  threshold", which does not survive contact with short strings: entropy is
+  measured per character, so `"changeme"` scores about 2.75 bits/char, higher
+  than a hex key's 2.0, and a threshold that catches it also catches every real
+  hex key. Length and character-class diversity say the intended thing
+  directly.
+
+  *Amendment — placeholder matching is length-dependent.* Words under six
+  characters (`dev`, `test`, `abc`, `xxx`) match only the whole normalised
+  value; longer phrases (`changeme`, `yoursecretkey`) match anywhere inside it.
+  A random 50-character key over Django's alphabet contains a given three-letter
+  run about once in 2,500, so substring-matching short words would have traded
+  a real defect class for a stream of nonsense.
+
+  *DJS-002 defers to this rule.* A guessable key is everything DJS-002 describes
+  and worse, so reporting both would leave the reader deciding which to act on.
+  The fixtures were split to keep a recall case for each: `vulnerable_project`
+  now carries a strong committed key (DJS-002), `overridden_project` the
+  `django-insecure-` one (DJS-003).
+
+  *Measured:* healthchecks' `envsecret("SECRET_KEY", "---")` moves from DJS-002
+  to DJS-003 — correctly, since `Default: ---` is published in its own
+  configuration docs and so needs no repository access to guess. Recorded as an
+  accepted risk. NetBox unchanged at zero findings.
 - **1.4.3** — `DJS-004` credentials hardcoded in `DATABASES`.
 - **1.4.4** — `DJS-005` secrets in other well-known settings (`AWS_SECRET_ACCESS_KEY`, `STRIPE_SECRET_KEY`, `EMAIL_HOST_PASSWORD`, `*_API_KEY`, `*_TOKEN`) by name pattern plus literal value.
 
