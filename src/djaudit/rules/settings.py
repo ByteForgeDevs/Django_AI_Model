@@ -4,10 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from djaudit.astutils import Assignment, literal, module_assignments
 from djaudit.context import ProjectContext, SettingsModule, SettingsRole
 from djaudit.models import Confidence, Evidence, EvidenceKind, Family, Finding, Severity, Tier
 from djaudit.registry import Rule, RuleMeta, register
+from djaudit.settings import (
+    Assessment,
+    Definition,
+    ResolvedSetting,
+    SettingsView,
+    assess,
+    resolve_all,
+)
+from djaudit.values import Value
 
 _GRADING: dict[SettingsRole, tuple[Severity, Confidence]] = {
     SettingsRole.PRODUCTION: (Severity.CRITICAL, Confidence.CERTAIN),
@@ -16,16 +24,23 @@ _GRADING: dict[SettingsRole, tuple[Severity, Confidence]] = {
     SettingsRole.BASE: (Severity.HIGH, Confidence.FIRM),
 }
 
-_DOWNGRADE: dict[Confidence, Confidence] = {
-    Confidence.CERTAIN: Confidence.FIRM,
-    Confidence.FIRM: Confidence.TENTATIVE,
-    Confidence.TENTATIVE: Confidence.TENTATIVE,
-}
+
+def could_be_true(value: Value) -> bool:
+    """Whether ``value`` is the boolean ``True`` on at least one path.
+
+    Deliberately identity-based. ``DEBUG = 1`` is truthy and Django would treat
+    it as enabled, but it is also what a project writes when DEBUG is driven by
+    something we have not modelled, and reporting it costs more in noise than
+    it returns.
+    """
+    if value.is_conditional:
+        return any(could_be_true(branch) for branch in value.branches)
+    return value.is_literal and value.literal is True
 
 
 @register
 class DebugEnabled(Rule):
-    """``DEBUG = True`` in a settings module that can reach production."""
+    """``DEBUG`` can be true in a settings module that can reach production."""
 
     meta = RuleMeta(
         id="DJS-001",
@@ -54,102 +69,113 @@ class DebugEnabled(Rule):
     )
 
     def check(self, ctx: ProjectContext) -> Iterator[Finding]:
-        overridden = self._debug_disabled_downstream(ctx)
+        views = resolve_all(ctx)
 
         for module in ctx.settings_modules:
-            # DEBUG=True is correct in development and test settings. Reporting it
-            # there is the fastest way to train people to ignore the tool.
+            # DEBUG=True is correct in development and test settings. Reporting
+            # it there is the fastest way to train people to ignore the tool.
             if not module.role.reaches_production:
                 continue
 
-            for assignment in self._debug_true_assignments(ctx, module):
-                yield self._build(ctx, module, assignment, overridden)
-
-    @staticmethod
-    def _debug_true_assignments(
-        ctx: ProjectContext, module: SettingsModule
-    ) -> Iterator[Assignment]:
-        tree = ctx.parse(module.path)
-        if tree is None:
-            return
-        for assignment in module_assignments(tree):
-            if assignment.name == "DEBUG" and literal(assignment.value) is True:
-                yield assignment
-
-    @staticmethod
-    def _debug_disabled_downstream(ctx: ProjectContext) -> bool:
-        """Whether some production-role module unconditionally sets ``DEBUG = False``.
-
-        In a split-settings layout it is normal for a base module to enable DEBUG
-        and for production to switch it off. When we can see that override we keep
-        the base finding but drop it to informational, rather than dropping it
-        entirely -- the override might itself be removed later.
-        """
-        for module in ctx.settings_modules:
-            if module.role not in (SettingsRole.PRODUCTION, SettingsRole.PRIMARY):
+            view = views.get(module.dotted)
+            if view is None:
                 continue
-            tree = ctx.parse(module.path)
-            if tree is None:
+
+            resolved = view.get("DEBUG")
+            # An unset DEBUG is already False, and an unresolvable one is not
+            # evidence of anything. Only an assignment we could read counts.
+            if not resolved.is_explicit or not could_be_true(resolved.value):
                 continue
-            for assignment in module_assignments(tree):
-                if (
-                    assignment.name == "DEBUG"
-                    and not assignment.conditional
-                    and literal(assignment.value) is False
-                ):
-                    return True
-        return False
+
+            culprit = _culprit(resolved)
+            if culprit is None:
+                continue
+
+            yield self._build(ctx, module, resolved, culprit, _overridden(views, module))
 
     def _build(
         self,
         ctx: ProjectContext,
         module: SettingsModule,
-        assignment: Assignment,
+        resolved: ResolvedSetting,
+        culprit: Definition,
         overridden: bool,
     ) -> Finding:
-        severity, confidence = _GRADING.get(module.role, (Severity.HIGH, Confidence.FIRM))
-        notes: list[str] = []
+        severity, ceiling = _GRADING.get(module.role, (Severity.HIGH, Confidence.FIRM))
+        graded = assess(resolved, ceiling=ceiling)
 
-        if assignment.conditional:
-            confidence = _DOWNGRADE[confidence]
-            notes.append("assignment is inside a conditional block, so it may not execute")
-
-        if overridden and module.role == SettingsRole.BASE:
-            severity, confidence = Severity.LOW, Confidence.TENTATIVE
-            notes.append(
-                "a production settings module unconditionally sets DEBUG = False, "
-                "which should override this"
+        if overridden:
+            severity = Severity.LOW
+            graded = Assessment(
+                Confidence.TENTATIVE,
+                (
+                    *graded.caveats,
+                    "every settings module that imports this one sets DEBUG = False, "
+                    "which should override it",
+                ),
             )
 
-        detail = f" ({'; '.join(notes)})" if notes else ""
+        where = module.dotted or ctx.rel(module.path)
+        inherited = f", inherited from {culprit.dotted}" if culprit.dotted != module.dotted else ""
         message = (
-            f"DEBUG is set to True in {module.dotted or ctx.rel(module.path)}, "
-            f"classified as a {module.role.value} settings module{detail}."
+            f"DEBUG can be True in {where}, classified as a "
+            f"{module.role.value} settings module{inherited}{graded.note()}."
         )
 
         evidence = (
             Evidence(
                 kind=EvidenceKind.SOURCE,
-                content=ctx.snippet(
-                    module.path, assignment.node.lineno, assignment.node.end_lineno
-                ),
-                source=ctx.rel(module.path),
+                content=ctx.snippet(culprit.module, culprit.node.lineno, culprit.node.end_lineno),
+                source=ctx.rel(culprit.module),
             ),
             Evidence(
                 kind=EvidenceKind.CONFIG,
                 content=(
                     f"module={module.dotted}  role={module.role.value}  "
-                    f"entrypoint={module.is_entrypoint}  conditional={assignment.conditional}"
+                    f"entrypoint={module.is_entrypoint}  "
+                    f"resolved={resolved.value.describe()}\n"
+                    + "\n".join(f"  {definition.describe()}" for definition in resolved.definitions)
                 ),
-                source="djaudit settings discovery",
+                source="djaudit settings resolver",
             ),
         )
 
         return self.finding(
-            location=ctx.location(module.path, assignment.node),
+            location=ctx.location(culprit.module, culprit.node),
             message=message,
             evidence=evidence,
             severity=severity,
-            confidence=confidence,
+            confidence=graded.confidence,
             properties={"settings_role": module.role.value, "settings_module": module.dotted},
         )
+
+
+def _culprit(resolved: ResolvedSetting) -> Definition | None:
+    """The last assignment that leaves DEBUG able to be true."""
+    for definition in reversed(resolved.definitions):
+        if could_be_true(definition.value):
+            return definition
+    return resolved.definition
+
+
+def _overridden(views: dict[str, SettingsView], module: SettingsModule) -> bool:
+    """Whether every settings module inheriting from ``module`` turns DEBUG off.
+
+    A base module is not deployed by itself, so DEBUG=True there is a latent
+    hazard rather than a live one when every module that imports it switches
+    DEBUG off. Asking the resolver replaces a scan for `DEBUG = False` anywhere
+    in the project, which said nothing about whether the two were connected.
+    """
+    if module.role is not SettingsRole.BASE:
+        return False
+
+    # A development module inheriting the base and leaving DEBUG on is the
+    # point of a development module, so it says nothing about production.
+    heirs = [
+        view
+        for dotted, view in views.items()
+        if dotted != module.dotted
+        and module.dotted in view.chain
+        and view.module.role.reaches_production
+    ]
+    return bool(heirs) and all(heir.get("DEBUG").is_always(False) for heir in heirs)

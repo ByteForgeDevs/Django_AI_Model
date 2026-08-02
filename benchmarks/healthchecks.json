@@ -5,5 +5,16 @@
   "repo": "https://github.com/healthchecks/healthchecks",
   "sha": "5086d282ea33831e8c86eb9d0802dc2602c66ef7",
   "max_false_positive_rate": 0.1,
-  "findings": []
+  "findings": [
+    {
+      "fingerprint": "204f74697636c950",
+      "rule_id": "DJS-001",
+      "verdict": "accepted_risk",
+      "file": "hc/settings.py",
+      "line": 70,
+      "note": "Real and deliberate. hc/settings.py:70 is `DEBUG = envbool(\"DEBUG\", \"True\")`, so a deployment that does not set the DEBUG environment variable runs with DEBUG on. Healthchecks knows this: its own production checklist in README.md tells operators to 'make sure it is set to False'. Convenient for local development, a hazard for anyone who deploys without reading the checklist, which is exactly what this rule is for. Reported at tentative because the environment can override it.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    }
+  ]
 }
