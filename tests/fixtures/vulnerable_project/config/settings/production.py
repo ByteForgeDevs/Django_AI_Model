@@ -9,6 +9,9 @@ was never switched on (DJS-008). The pair is deliberate: it is the only state in
 which DJS-008 has anything to say, since excluding subdomains is the correct
 value while HSTS is off.
 
+PLANTED DEFECT: ALLOWED_HOSTS opened to "*" (DJS-013), which switches off Host
+header validation -- and Django builds password reset links from that header.
+
 PLANTED DEFECT: SECURE_PROXY_SSL_HEADER spelled as an HTTP header rather than a
 WSGI environment key (DJS-012). Django looks this up in request.META, never
 finds it, and falls back to the real connection scheme -- so the setting does
@@ -19,7 +22,7 @@ from .base import *  # noqa: F401,F403
 
 DEBUG = True
 
-ALLOWED_HOSTS = ["app.example.test"]
+ALLOWED_HOSTS = ["*"]
 
 SECURE_HSTS_SECONDS = 3600
 SECURE_HSTS_INCLUDE_SUBDOMAINS = False

@@ -737,6 +737,33 @@ than after twenty-six of them disagree, is cheaper.
 ### Step 1.6 — Host, origin, and framing rules
 
 - **1.6.1** — `DJS-013` `ALLOWED_HOSTS` wildcard or empty while DEBUG is off.
+
+  **Done.** The first list-valued rule, so `hosts.py` opens with `entries_of`,
+  which returns every list a value could be rather than one. The distinction
+  that matters is *unreadable* versus *empty*: both benchmark targets drive
+  `ALLOWED_HOSTS` from configuration we cannot see, and a rule that treated
+  "cannot read" as "empty" would report both of them wrongly on its first run.
+
+  Two failures share the setting and are graded apart. A wildcard is `high`:
+  the Host header is client-controlled and Django builds absolute URLs from it,
+  so `django.contrib.auth` will put an attacker's hostname into a genuine
+  password-reset link and mail it to the victim. An empty list is `low` and
+  conditional on DEBUG — with DEBUG on Django allows localhost, which makes
+  empty the correct state of a module you only run locally; with DEBUG off it
+  is a deployment that 400s every request, which is a broken site rather than
+  an exposed one, and the message says so.
+
+  Both targets stay silent, so recall comes from `vulnerable_project`, which
+  now opens `ALLOWED_HOSTS` to `"*"`.
+
+  Two things measurement settled. Only a bare `"*"` disables the check, so
+  `"*.example.com"` is matched literally and reported by nobody — the
+  remediation names it, because it looks like it works. And a ternary collapses
+  to the environment's default value before a rule ever sees it, while an
+  `if`/`else` module stays conditional; the tests use the latter.
+
+  `could_be_true` moved from `rules/settings.py` to `_base.py` beside
+  `could_be_off`, and `InsecureDefaultRule` gained `severity_for()`.
 - **1.6.2** — `DJS-014` `CSRF_TRUSTED_ORIGINS` wildcard or scheme-less entry.
 - **1.6.3** — `DJS-015` `CORS_ALLOW_ALL_ORIGINS` enabled.
 - **1.6.4** — `DJS-016` CORS wildcard combined with `CORS_ALLOW_CREDENTIALS`.

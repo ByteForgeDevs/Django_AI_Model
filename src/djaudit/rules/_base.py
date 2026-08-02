@@ -380,6 +380,19 @@ def assignment_value(setting: ResolvedSetting) -> ast.expr | None:
     return definition.node.value
 
 
+def could_be_true(value: Value) -> bool:
+    """Whether ``value`` is the boolean ``True`` on at least one path.
+
+    Deliberately identity-based. ``DEBUG = 1`` is truthy and Django would treat
+    it as enabled, but it is also what a project writes when DEBUG is driven by
+    something we have not modelled, and reporting it costs more in noise than
+    it returns.
+    """
+    if value.is_conditional:
+        return any(could_be_true(branch) for branch in value.branches)
+    return value.is_literal and value.literal is True
+
+
 def could_be_off(value: Value) -> bool:
     """Whether a security flag is anything other than ``True`` on some path.
 
@@ -440,6 +453,15 @@ class InsecureDefaultRule(SettingsRule):
     def consequence_for(self, resolved: ResolvedSetting) -> str:
         return self.consequence
 
+    def severity_for(self, resolved: ResolvedSetting) -> Severity | None:
+        """Override the rule's default severity for this particular value.
+
+        Some of these settings are insecure in more than one way, and the ways
+        do not deserve the same weight -- a wildcard host is an attack, an
+        empty one is a deployment that answers nothing.
+        """
+        return None
+
     def applies(self, ctx: ProjectContext, group: SettingGroup) -> bool:
         """Whether the setting is worth having an opinion about here at all.
 
@@ -460,7 +482,7 @@ class InsecureDefaultRule(SettingsRule):
             # unresolvable setting would bury the ones we actually read.
             return
 
-        severity: Severity | None = None
+        severity: Severity | None = self.severity_for(resolved)
         ceiling: Confidence | None = None
         caveats: tuple[str, ...] = ()
         corrected = self.overridden(group.module, lambda rs: not self.insecure(rs.value))

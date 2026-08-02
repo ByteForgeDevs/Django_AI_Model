@@ -7,9 +7,8 @@ from collections.abc import Iterator
 from djaudit.context import ProjectContext, SettingsRole
 from djaudit.models import Confidence, Family, Finding, Severity, Tier
 from djaudit.registry import RuleMeta, register
-from djaudit.rules._base import SettingGroup, SettingsRule
+from djaudit.rules._base import SettingGroup, SettingsRule, could_be_true
 from djaudit.settings import Definition, ResolvedSetting
-from djaudit.values import Value
 
 _GRADING: dict[SettingsRole, tuple[Severity, Confidence]] = {
     SettingsRole.PRODUCTION: (Severity.CRITICAL, Confidence.CERTAIN),
@@ -17,19 +16,6 @@ _GRADING: dict[SettingsRole, tuple[Severity, Confidence]] = {
     SettingsRole.UNKNOWN: (Severity.HIGH, Confidence.FIRM),
     SettingsRole.BASE: (Severity.HIGH, Confidence.FIRM),
 }
-
-
-def could_be_true(value: Value) -> bool:
-    """Whether ``value`` is the boolean ``True`` on at least one path.
-
-    Deliberately identity-based. ``DEBUG = 1`` is truthy and Django would treat
-    it as enabled, but it is also what a project writes when DEBUG is driven by
-    something we have not modelled, and reporting it costs more in noise than
-    it returns.
-    """
-    if value.is_conditional:
-        return any(could_be_true(branch) for branch in value.branches)
-    return value.is_literal and value.literal is True
 
 
 @register
