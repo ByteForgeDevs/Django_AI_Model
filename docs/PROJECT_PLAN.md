@@ -161,6 +161,7 @@ Four gates run in CI on every push. All are blocking.
 | **Lint** — `ruff check .` | Consistency, common bug classes | Style or correctness lint violated |
 | **Types** — `mypy --strict` | Interface integrity across 30+ modules | A contract was broken silently |
 | **Tests** — `pytest` | Behaviour of every unit | A regression |
+| **SARIF conformance** | The CI integration itself | Code scanning would silently stop ingesting findings |
 | **Recall** — `djaudit eval` on fixtures | We still detect what we claim to | A rule stopped firing, or grading drifted |
 | **Precision** — real-repo benchmark | We do not cry wolf | A new rule produces false positives |
 
@@ -377,6 +378,7 @@ mode this project cares about most.
 - **1.0.1** — `# djaudit: ignore[]` acted as a blanket suppression, because an empty code set was conflated with "no code list given". A mistyped bracket pair silently hid every rule on that line. Empty brackets now suppress nothing.
 - **1.0.2** — SARIF `associatedRule` referenced rule IDs absent from `tool.driver.rules` when a rule crashed without producing findings, leaving a dangling reference some consumers reject. Descriptors are now built from `RuleMeta` and cover crashed rules too.
 - **1.0.3** — `--output` with `--format terminal` did not create missing parent directories, unlike JSON and SARIF, so `-o reports/out.txt` failed on a fresh checkout.
+- **1.0.4** — Found while verifying 1.0.2: the `$schema` URL emitted in every SARIF file returned 404, and nothing validated our SARIF against the spec. Points at the canonical OASIS URL now, with schema *and* reference-resolution checks wired into CI.
 
 ### Step 1.1 — Rebuild the precision benchmark
 
@@ -838,14 +840,14 @@ conversation.
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
-| 1 | Settings and deployment hardening | 10 | 53 | In progress |
+| 1 | Settings and deployment hardening | 10 | 54 | In progress |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
 | 5 | Portability and external adapters | 4 | 20 | Not started |
 | 6 | LLM layer | 5 | 17 | Not started |
 | 7 | Distribution | 3 | 10 | Not started |
-| | **Total** | **51** | **228** | |
+| | **Total** | **51** | **229** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3.

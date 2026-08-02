@@ -27,6 +27,19 @@ jobs:
       - name: pytest
         run: uv run pytest
 
+      # SARIF is the entire CI integration story. If the structure drifts,
+      # GitHub silently stops ingesting findings and no other gate notices.
+      - name: SARIF conforms to the OASIS 2.1.0 schema
+        run: |
+          uv run djaudit run tests/fixtures/vulnerable_project \
+            --format sarif --output /tmp/report.sarif \
+            --min-severity info --min-confidence tentative || [ $? -eq 1 ]
+          curl -sfL --retry 3 --max-time 60 \
+            "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json" \
+            -o /tmp/sarif-schema.json
+          uv run --with jsonschema python scripts/validate_sarif.py \
+            /tmp/report.sarif /tmp/sarif-schema.json
+
   evaluation:
     name: recall gate (planted-defect fixtures)
     runs-on: ubuntu-latest

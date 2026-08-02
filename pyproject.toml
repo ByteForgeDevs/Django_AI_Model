@@ -67,6 +67,12 @@ disallow_untyped_defs = false
 disallow_incomplete_defs = false
 disallow_untyped_calls = false
 
+# jsonschema is deliberately not a project dependency. The SARIF conformance
+# check runs it via `uv run --with`, so it stays out of what users install.
+[[tool.mypy.overrides]]
+module = "jsonschema.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"

@@ -26,7 +26,9 @@ from djaudit.fingerprint import FINGERPRINT_VERSION
 from djaudit.models import Confidence, Family, Finding, Severity
 from djaudit.registry import RuleError, get
 
-SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema.json"
+SARIF_SCHEMA = (
+    "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json"
+)
 SARIF_VERSION = "2.1.0"
 INFORMATION_URI = "https://github.com/ByteForgeDevs/Django_AI_Model"
 SRCROOT = "%SRCROOT%"
