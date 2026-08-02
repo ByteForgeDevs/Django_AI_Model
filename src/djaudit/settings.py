@@ -29,6 +29,7 @@ from djaudit.evaluator import (
     collect_functions,
     collect_imports,
 )
+from djaudit.models import Confidence
 from djaudit.values import Value
 
 
@@ -505,3 +506,67 @@ def django_default(name: str, version: str | None = None) -> Value | None:
             return Value.of(versioned[name])
 
     return None
+
+
+# -- confidence policy -------------------------------------------------------
+#
+# One mapping from resolution quality to Confidence, applied by every rule.
+# Written down once because the alternative is each rule inventing its own,
+# which makes the confidence field meaningless across a report -- and it is the
+# field CI gates on.
+
+_CONFIDENCE_ORDER: tuple[Confidence, ...] = (
+    Confidence.CERTAIN,
+    Confidence.FIRM,
+    Confidence.TENTATIVE,
+)
+
+
+def lower_confidence(confidence: Confidence, steps: int = 1) -> Confidence:
+    """Reduce ``confidence`` by ``steps``, stopping at TENTATIVE."""
+    index = _CONFIDENCE_ORDER.index(confidence) + max(steps, 0)
+    return _CONFIDENCE_ORDER[min(index, len(_CONFIDENCE_ORDER) - 1)]
+
+
+@dataclass(frozen=True, slots=True)
+class Assessment:
+    """How far a finding about a setting can be trusted, and why."""
+
+    confidence: Confidence
+    caveats: tuple[str, ...] = ()
+
+    def note(self) -> str:
+        """The caveats as a parenthesised clause, or empty."""
+        return f" ({'; '.join(self.caveats)})" if self.caveats else ""
+
+
+def assess(resolved: ResolvedSetting, ceiling: Confidence = Confidence.CERTAIN) -> Assessment:
+    """Grade a finding built on ``resolved``.
+
+    ``ceiling`` is the best a rule could claim if resolution were perfect; a
+    rule that infers rather than observes passes something lower.
+    """
+    caveats: list[str] = []
+    steps = 0
+
+    if resolved.origin is Origin.UNRESOLVED:
+        # Rules should not usually report on these at all.
+        return Assessment(Confidence.TENTATIVE, ("value could not be determined statically",))
+
+    if resolved.value.is_conditional:
+        steps += 2
+        caveats.append("the setting takes different values on different paths")
+
+    if resolved.conditional:
+        steps += 1
+        caveats.append("the assignment is inside a conditional block, so it may not execute")
+
+    if resolved.value.env_dependent:
+        steps += 1
+        caveats.append("the value comes from the environment, so a deployment may override it")
+
+    if resolved.origin is Origin.DJANGO_DEFAULT:
+        steps += 1
+        caveats.append("the setting is never assigned, so Django's default applies")
+
+    return Assessment(lower_confidence(ceiling, steps), tuple(caveats))
