@@ -448,6 +448,13 @@ Two amendments, both from measuring rather than reasoning:
 
 ### Step 1.4 — Secret management rules
 
+Amendment: **1.4.0** was added while starting this step. Steps 1.4 to 1.8 add
+twenty-six settings rules, and writing the fourth copy of the same
+resolve-and-grade loop made it clear the copies would drift — most damagingly
+in confidence, which CI gates on. Extracting it before the rules exist, rather
+than after twenty-six of them disagree, is cheaper.
+
+- **1.4.0** — `SettingsRule` base: the production-reachable module loop, resolution, shared grading and provenance evidence, with `DJS-001` migrated onto it as its first user.
 - **1.4.1** — `DJS-002` hardcoded `SECRET_KEY` literal.
 - **1.4.2** — `DJS-003` weak or placeholder `SECRET_KEY` (`django-insecure-` prefix, `changeme`, entropy below threshold).
 - **1.4.3** — `DJS-004` credentials hardcoded in `DATABASES`.
@@ -875,14 +882,14 @@ conversation.
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
-| 1 | Settings and deployment hardening | 10 | 54 | In progress — Steps 1.0–1.3 done |
+| 1 | Settings and deployment hardening | 10 | 55 | In progress — Steps 1.0–1.3 done |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
 | 5 | Portability and external adapters | 4 | 20 | Not started |
 | 6 | LLM layer | 5 | 17 | Not started |
 | 7 | Distribution | 3 | 10 | Not started |
-| | **Total** | **51** | **229** | |
+| | **Total** | **51** | **230** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3.

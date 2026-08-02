@@ -5,16 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from djaudit.context import ProjectContext, SettingsModule, SettingsRole
-from djaudit.models import Confidence, Evidence, EvidenceKind, Family, Finding, Severity, Tier
-from djaudit.registry import Rule, RuleMeta, register
-from djaudit.settings import (
-    Assessment,
-    Definition,
-    ResolvedSetting,
-    SettingsView,
-    assess,
-    resolve_all,
-)
+from djaudit.models import Confidence, Family, Finding, Severity, Tier
+from djaudit.registry import RuleMeta, register
+from djaudit.rules._base import SettingsRule
+from djaudit.settings import Definition, ResolvedSetting, SettingsView
 from djaudit.values import Value
 
 _GRADING: dict[SettingsRole, tuple[Severity, Confidence]] = {
@@ -39,7 +33,7 @@ def could_be_true(value: Value) -> bool:
 
 
 @register
-class DebugEnabled(Rule):
+class DebugEnabled(SettingsRule):
     """``DEBUG`` can be true in a settings module that can reach production."""
 
     meta = RuleMeta(
@@ -68,30 +62,18 @@ class DebugEnabled(Rule):
         ),
     )
 
-    def check(self, ctx: ProjectContext) -> Iterator[Finding]:
-        views = resolve_all(ctx)
-
-        for module in ctx.settings_modules:
-            # DEBUG=True is correct in development and test settings. Reporting
-            # it there is the fastest way to train people to ignore the tool.
-            if not module.role.reaches_production:
-                continue
-
-            view = views.get(module.dotted)
-            if view is None:
-                continue
-
-            resolved = view.get("DEBUG")
-            # An unset DEBUG is already False, and an unresolvable one is not
-            # evidence of anything. Only an assignment we could read counts.
-            if not resolved.is_explicit or not could_be_true(resolved.value):
-                continue
-
-            culprit = _culprit(resolved)
-            if culprit is None:
-                continue
-
-            yield self._build(ctx, module, resolved, culprit, _overridden(views, module))
+    def inspect(
+        self, ctx: ProjectContext, module: SettingsModule, view: SettingsView
+    ) -> Iterator[Finding]:
+        resolved = view.get("DEBUG")
+        # An unset DEBUG is already False, and an unresolvable one is not
+        # evidence of anything. Only an assignment we could read counts.
+        if not resolved.is_explicit or not could_be_true(resolved.value):
+            return
+        culprit = _culprit(resolved)
+        if culprit is None:
+            return
+        yield self._build(ctx, module, resolved, culprit, _overridden(self.views, module))
 
     def _build(
         self,
@@ -102,51 +84,29 @@ class DebugEnabled(Rule):
         overridden: bool,
     ) -> Finding:
         severity, ceiling = _GRADING.get(module.role, (Severity.HIGH, Confidence.FIRM))
-        graded = assess(resolved, ceiling=ceiling)
+        caveats: tuple[str, ...] = ()
 
         if overridden:
-            severity = Severity.LOW
-            graded = Assessment(
-                Confidence.TENTATIVE,
-                (
-                    *graded.caveats,
-                    "every settings module that imports this one sets DEBUG = False, "
-                    "which should override it",
-                ),
+            severity, ceiling = Severity.LOW, Confidence.TENTATIVE
+            caveats = (
+                "every settings module that imports this one sets DEBUG = False, "
+                "which should override it",
             )
 
         where = module.dotted or ctx.rel(module.path)
         inherited = f", inherited from {culprit.dotted}" if culprit.dotted != module.dotted else ""
-        message = (
-            f"DEBUG can be True in {where}, classified as a "
-            f"{module.role.value} settings module{inherited}{graded.note()}."
-        )
 
-        evidence = (
-            Evidence(
-                kind=EvidenceKind.SOURCE,
-                content=ctx.snippet(culprit.module, culprit.node.lineno, culprit.node.end_lineno),
-                source=ctx.rel(culprit.module),
+        return self.report(
+            ctx,
+            module,
+            resolved,
+            message=(
+                f"DEBUG can be True in {where}, classified as a "
+                f"{module.role.value} settings module{inherited}"
             ),
-            Evidence(
-                kind=EvidenceKind.CONFIG,
-                content=(
-                    f"module={module.dotted}  role={module.role.value}  "
-                    f"entrypoint={module.is_entrypoint}  "
-                    f"resolved={resolved.value.describe()}\n"
-                    + "\n".join(f"  {definition.describe()}" for definition in resolved.definitions)
-                ),
-                source="djaudit settings resolver",
-            ),
-        )
-
-        return self.finding(
-            location=ctx.location(culprit.module, culprit.node),
-            message=message,
-            evidence=evidence,
             severity=severity,
-            confidence=graded.confidence,
-            properties={"settings_role": module.role.value, "settings_module": module.dotted},
+            ceiling=ceiling,
+            extra_caveats=caveats,
         )
 
 
