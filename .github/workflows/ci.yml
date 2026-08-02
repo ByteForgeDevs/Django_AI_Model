@@ -2,8 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # Phase branches too, so every substep gets a gate result rather than the
+    # whole phase discovering breakage at pull request time.
+    branches: [main, 'phase-*']
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   quality:
