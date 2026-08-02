@@ -197,7 +197,7 @@ class TestBenchmarkCommand:
         assert result.exit_code == EXIT_FINDINGS
 
         written = Triage.load(path)
-        assert len(written) == 3
+        assert len(written) == 4
         assert {e.verdict for e in written.entries} == {Verdict.FALSE_POSITIVE}
 
     def test_update_never_overwrites_an_existing_verdict(self, vulnerable_project, tmp_path):
@@ -268,7 +268,7 @@ class TestJobSummary:
         text = out.read_text()
         assert "## Precision — fixture" in text
         assert "❌ fail" in text
-        assert "Untriaged (3)" in text
+        assert "Untriaged (4)" in text
         assert "--update" in text
 
     def test_summaries_append_rather_than_truncate(self, vulnerable_project, tmp_path):

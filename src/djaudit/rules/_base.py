@@ -12,19 +12,24 @@ that is actually its own.
 
 from __future__ import annotations
 
+import ast
 from abc import abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
 
 from djaudit.context import ProjectContext, SettingsModule, SettingsRole
+from djaudit.evaluator import Evaluator
 from djaudit.models import Confidence, Evidence, EvidenceKind, Finding, Location, Severity
 from djaudit.registry import Rule
-from djaudit.settings import Assessment, ResolvedSetting, SettingsView, assess, resolve_all
-
-if TYPE_CHECKING:
-    from djaudit.values import Value
-
+from djaudit.settings import (
+    Assessment,
+    Origin,
+    ResolvedSetting,
+    SettingsView,
+    assess,
+    resolve_all,
+)
+from djaudit.values import Value
 
 MIN_MASKABLE = 4
 """Below this a value is too short to redact usefully and too short to be a
@@ -56,6 +61,22 @@ class SettingGroup:
     @property
     def shared(self) -> bool:
         return len(self.modules) > 1
+
+    def narrow(self, name: str, value: Value) -> SettingGroup:
+        """The same group judged on one part of the setting rather than all of it.
+
+        ``DATABASES`` as a whole is usually unresolvable, and grading a finding
+        about one password against that would bury it at tentative. The part
+        keeps the whole's provenance -- whether the assignment was conditional,
+        where it lives, which modules it reaches -- and contributes only its own
+        value, so the shared policy grades it without needing a second path
+        through it.
+        """
+        # The whole setting is usually UNRESOLVED precisely because this part
+        # was not the problem, and assess() floors anything unresolved at
+        # tentative. The part is graded on whether the part resolved.
+        origin = Origin.EXPLICIT if not value.is_unknown else Origin.UNRESOLVED
+        return replace(self, setting=replace(self.setting, name=name, value=value, origin=origin))
 
     def describe_reach(self) -> str:
         """A clause naming the other modules affected, or nothing."""
@@ -150,6 +171,7 @@ class SettingsRule(Rule):
         group: SettingGroup,
         *,
         message: str,
+        at: ast.expr | None = None,
         severity: Severity | None = None,
         ceiling: Confidence | None = None,
         extra_caveats: tuple[str, ...] = (),
@@ -165,7 +187,9 @@ class SettingsRule(Rule):
 
         definition = resolved.definition
         path = definition.module if definition else module.path
-        node = definition.node if definition else None
+        # ``at`` points inside the assignment -- one entry of a dict, say --
+        # where the fix actually goes.
+        node: ast.stmt | ast.expr | None = at or (definition.node if definition else None)
 
         provenance = Evidence(
             kind=EvidenceKind.CONFIG,
@@ -245,3 +269,71 @@ def module_location(ctx: ProjectContext, module: SettingsModule) -> Location:
 def literal_text(value: Value) -> str | None:
     """The value as a plain string, or ``None`` if it is not one."""
     return value.literal if value.is_literal and isinstance(value.literal, str) else None
+
+
+@dataclass(frozen=True, slots=True)
+class Entry:
+    """One key of a dict literal, resolved without reference to its siblings."""
+
+    key: str
+    value: Value
+    node: ast.expr | None = None
+    """The value expression, when there was one to point at.
+
+    ``None`` when the entry came from a resolved value rather than a literal in
+    the source -- a dict built by a helper has no line of its own, so a finding
+    about it falls back to the assignment.
+    """
+
+
+def entries(
+    view: SettingsView, node: ast.expr | None, value: Value | None = None
+) -> dict[str, Entry]:
+    """Read a dict setting one key at a time.
+
+    Preferring the AST over the resolved value is deliberate. A dict collapses
+    to unknown the moment any single entry does, and a real ``DATABASES`` block
+    always has something coming from the environment -- so a password written
+    in beside it would disappear along with the rest. Resolving each entry on
+    its own keeps what is knowable, and the AST keeps the line numbers, which a
+    plain dict has already thrown away.
+
+    When the assignment is not a literal at all -- ``getattr(configuration,
+    'DATABASES', ...)``, or a call to the project's own builder -- there is no
+    dict in the source to walk, so a resolved value is used instead. That shape
+    is common enough to matter: it is how NetBox writes every one of its
+    settings, and a rule that quietly skipped it would report nothing and look
+    like it had checked. Such entries carry no node, so a finding about one
+    points at the assignment.
+
+    Non-string keys are skipped: every setting shaped like this is keyed by
+    name, and the callers all look keys up by name.
+    """
+    if not isinstance(node, ast.Dict):
+        if value is not None and value.is_literal and isinstance(value.literal, dict):
+            return {
+                key: Entry(key=key, value=Value.of(inner, env_dependent=value.env_dependent))
+                for key, inner in value.literal.items()
+                if isinstance(key, str)
+            }
+        return {}
+
+    evaluator = Evaluator(view.scope)
+    found: dict[str, Entry] = {}
+    for key_node, value_node in zip(node.keys, node.values, strict=True):
+        if key_node is None:
+            continue
+        key = evaluator.evaluate(key_node)
+        name = literal_text(key)
+        if name is None:
+            continue
+        found[name] = Entry(key=name, value=evaluator.evaluate(value_node), node=value_node)
+    return found
+
+
+def assignment_value(setting: ResolvedSetting) -> ast.expr | None:
+    """The right-hand side of the assignment that decided a setting."""
+    definition = setting.definition
+    if definition is None or not isinstance(definition.node, ast.Assign | ast.AnnAssign):
+        return None
+    return definition.node.value

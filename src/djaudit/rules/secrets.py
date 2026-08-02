@@ -14,7 +14,14 @@ from dataclasses import dataclass
 from djaudit.context import ProjectContext
 from djaudit.models import Confidence, Evidence, EvidenceKind, Family, Finding, Severity, Tier
 from djaudit.registry import RuleMeta, register
-from djaudit.rules._base import SettingGroup, SettingsRule, literal_text
+from djaudit.rules._base import (
+    Entry,
+    SettingGroup,
+    SettingsRule,
+    assignment_value,
+    entries,
+    literal_text,
+)
 
 
 @register
@@ -339,3 +346,97 @@ def weakness(secret: str) -> Weakness | None:
             "cover the pattern, not the length.",
         )
     return None
+
+
+@register
+class HardcodedDatabasePassword(SettingsRule):
+    """A ``DATABASES`` alias carries a password readable in the source."""
+
+    setting = "DATABASES"
+    ceiling = Confidence.CERTAIN
+
+    meta = RuleMeta(
+        id="DJS-004",
+        title="database password is readable in the source",
+        family=Family.DJS,
+        severity=Severity.CRITICAL,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "A database password in the repository is known to everyone who has ever "
+            "had read access, every fork, and every CI provider that cached the "
+            "checkout, and it stays known after they leave. Unlike a signing key it "
+            "usually cannot be rotated quietly -- the credential is shared by every "
+            "process that talks to the database, so changing it is a coordinated "
+            "restart, which is exactly the pressure that leaves it unrotated for "
+            "years. Whoever has it can read and change every row: users, sessions, "
+            "audit tables. If the database is reachable from outside the deployment "
+            "network, that is the whole application."
+        ),
+        remediation=(
+            "Read the credential from the environment or a secret manager, and let a "
+            "missing one stop the process:\n"
+            "    'PASSWORD': os.environ['DB_PASSWORD']\n"
+            "Rotate the exposed password, and remember that removing it from the "
+            "current source does not remove it from the history, so treat it as "
+            "compromised regardless. If the database is only reachable inside the "
+            "deployment network, that limits the damage but does not repair it."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/settings/#databases",
+            "https://cwe.mitre.org/data/definitions/798.html",
+            "https://owasp.org/Top10/A05_2021-Security_Misconfiguration/",
+        ),
+    )
+
+    def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
+        if not group.setting.is_assigned:
+            return
+
+        view = self.views[group.module.dotted]
+        setting = group.setting
+        for alias, entry in entries(view, assignment_value(setting), setting.value).items():
+            # Each alias is a separate credential on a separate server, so each
+            # is its own finding rather than one lumped together.
+            config = entries(view, entry.node, entry.value)
+            password = config.get("PASSWORD")
+            if password is None:
+                continue
+
+            secret = literal_text(password.value)
+            if not secret:
+                # Django reads an empty password as "no password supplied",
+                # which is a connection problem rather than a disclosure.
+                continue
+
+            where = group.module.dotted or ctx.rel(group.module.path)
+            how = (
+                "falls back to a password written into"
+                if password.value.env_dependent
+                else "takes its password from"
+            )
+
+            yield self.report(
+                ctx,
+                group.narrow(f'DATABASES["{alias}"]["PASSWORD"]', password.value),
+                at=password.node,
+                message=(
+                    f"the {alias!r} database in {where}{group.describe_reach()} {how} "
+                    f"the source, so anyone who can read the repository can connect to it"
+                ),
+                evidence=(
+                    Evidence(
+                        kind=EvidenceKind.CONFIG,
+                        content=f"alias={alias}  {_engine(config)}\n{describe_secret(secret)}",
+                        source="djaudit secret analysis",
+                    ),
+                ),
+                redact=secret,
+            )
+
+
+def _engine(config: dict[str, Entry]) -> str:
+    """Name the backend, which decides how much a leaked password is worth."""
+    engine = config.get("ENGINE")
+    name = literal_text(engine.value) if engine else None
+    return f"engine={name}" if name else "engine=unresolved"

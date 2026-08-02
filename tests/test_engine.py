@@ -173,7 +173,7 @@ class TestRuleIsolation:
         assert "boom" in result.rule_errors["DJX-999"]
         # The surviving rules still produced their findings, which is the point:
         # one bad rule must not cost the user every other rule's results.
-        assert {f.rule_id for f in result.findings} == {"DJS-001", "DJS-002"}
+        assert {"DJS-001", "DJS-002"} <= {f.rule_id for f in result.findings}
 
 
 class TestEmptyProject:

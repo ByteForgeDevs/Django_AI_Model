@@ -1,10 +1,10 @@
 {
-  "description": "Split settings with DEBUG left on. Production is a real critical finding; base is a real high finding because nothing overrides it; development is a control case that must never be reported. SECRET_KEY is hardcoded in base.py and inherited by production, so it is reported once against the module with most to lose rather than once per environment. base.py carries a strong but committed key, so DJS-002 reports it and DJS-003 must not: the two rules divide the fixtures between them so each keeps a recall case.",
+  "description": "Split settings with DEBUG left on. Production is a real critical finding; base is a real high finding because nothing overrides it; development is a control case that must never be reported. SECRET_KEY is hardcoded in base.py and inherited by production, so it is reported once against the module with most to lose rather than once per environment. base.py carries a strong but committed key, so DJS-002 reports it and DJS-003 must not: the two rules divide the fixtures between them so each keeps a recall case. DATABASES carries a hardcoded PASSWORD next to a HOST read from the environment: the environment value collapses the whole dict to unresolvable, so this is the case that proves DJS-004 reads entries individually rather than waiting for the setting to resolve.",
   "expected": [
     {
       "rule_id": "DJS-001",
       "file": "config/settings/base.py",
-      "line": 17,
+      "line": 18,
       "severity": "high",
       "confidence": "firm"
     },
@@ -18,7 +18,14 @@
     {
       "rule_id": "DJS-002",
       "file": "config/settings/base.py",
-      "line": 15,
+      "line": 16,
+      "severity": "critical",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJS-004",
+      "file": "config/settings/base.py",
+      "line": 47,
       "severity": "critical",
       "confidence": "certain"
     }

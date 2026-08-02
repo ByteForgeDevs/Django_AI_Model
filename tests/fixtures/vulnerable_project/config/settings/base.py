@@ -4,6 +4,7 @@ PLANTED DEFECT: DEBUG is enabled here and no production module turns it off,
 so this should be reported at high/firm.
 """
 
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -40,6 +41,11 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": "fixture",
+        # PLANTED DEFECT: a database password in the repository, which is
+        # DJS-004. The host beside it is unresolvable on purpose: that is what
+        # collapses the dict in real projects, and the rule has to see past it.
+        "PASSWORD": "fixture-db-password-not-real",
+        "HOST": os.environ["FIXTURE_DB_HOST"],
     }
 }
 

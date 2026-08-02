@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -103,6 +103,16 @@ class ResolvedSetting:
     @property
     def is_default(self) -> bool:
         return self.origin is Origin.DJANGO_DEFAULT
+
+    @property
+    def is_assigned(self) -> bool:
+        """Whether the project assigns this setting, resolvable or not.
+
+        A container the project clearly wrote but that we could not fully
+        evaluate is still the project's own configuration -- and for a rule
+        reading one entry out of it, still worth reading.
+        """
+        return self.origin in (Origin.EXPLICIT, Origin.UNRESOLVED)
 
     @property
     def conditional(self) -> bool:
@@ -236,6 +246,22 @@ class SettingsView:
 
     settings: dict[str, ResolvedSetting]
     django_version: str | None = None
+    scope: Scope = field(default_factory=Scope)
+    """The namespace the module left behind, for re-evaluating sub-expressions.
+
+    A rule that cares about one entry of a dict -- the ``PASSWORD`` inside
+    ``DATABASES["default"]``, say -- cannot use the resolved value, because a
+    dict collapses to unknown as soon as any one of its entries does, and real
+    database configuration always has at least one thing coming from the
+    environment. It also cannot use the resolved value for line numbers, which
+    only the AST has. So it walks the assignment and evaluates the part it
+    wants, which needs the names that were in scope.
+
+    This is the namespace as of the *end* of the chain rather than as of the
+    assignment, so a name rebound later reads with its final value. That is
+    wrong in principle and almost never wrong in practice, since configuration
+    dicts are built from constants defined above them.
+    """
 
     def get(self, name: str) -> ResolvedSetting:
         """The setting's effective value, falling back to Django's default."""
@@ -302,6 +328,7 @@ def resolve_settings(ctx: ProjectContext, module: SettingsModule) -> SettingsVie
         chain=tuple(dotted_path(ctx.root, path) for path in chain),
         settings={name: _resolved(name, found) for name, found in definitions.items()},
         django_version=ctx.django_version,
+        scope=scope,
     )
 
 

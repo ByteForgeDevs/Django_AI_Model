@@ -493,6 +493,34 @@ than after twenty-six of them disagree, is cheaper.
   configuration docs and so needs no repository access to guess. Recorded as an
   accepted risk. NetBox unchanged at zero findings.
 - **1.4.3** — `DJS-004` credentials hardcoded in `DATABASES`.
+
+  **Done.** The interesting part was not the rule but reaching the value. A
+  dict collapses to `unknown` as soon as any single entry does, and every real
+  `DATABASES` block takes its host or name from the environment — so reading
+  the resolved setting finds nothing, anywhere, while looking like it worked.
+  Confirmed by measurement: healthchecks' `DATABASES` resolves to `unknown`
+  entirely because of `os.getenv("DB_HOST", "")`.
+
+  So `_base.py` gained `entries()`, which walks the assignment's AST and
+  evaluates each entry independently, and `SettingGroup.narrow()`, which grades
+  a finding on the part rather than the whole. `SettingsView` now carries the
+  `Scope` the module left behind, which is what makes re-evaluating a
+  sub-expression possible. The AST is also the only thing that has line
+  numbers, so this is what lets a finding point at the `"PASSWORD"` line rather
+  than at `DATABASES = {`.
+
+  *Amendment — `entries()` falls back to the resolved value.* NetBox writes
+  every setting as `getattr(configuration, 'NAME', <default>)`, so there is no
+  dict literal in the source to walk. A rule that only handled literals would
+  report nothing on an entire configuration idiom and look like it had checked.
+  Such entries carry no node, so the finding points at the assignment.
+
+  *Measured:* no findings on either target, and verified to be silent for the
+  right reason rather than by accident — the rule reaches healthchecks'
+  `default` alias, reads all seven of its keys, and finds
+  `envsecret("DB_PASSWORD", "")`, whose empty fallback is not a disclosure.
+  Recall comes from the fixture, where the planted password sits beside an
+  unresolvable `HOST` on purpose.
 - **1.4.4** — `DJS-005` secrets in other well-known settings (`AWS_SECRET_ACCESS_KEY`, `STRIPE_SECRET_KEY`, `EMAIL_HOST_PASSWORD`, `*_API_KEY`, `*_TOKEN`) by name pattern plus literal value.
 
 ### Step 1.5 — Transport and cookie security rules

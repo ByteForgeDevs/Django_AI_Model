@@ -37,7 +37,7 @@ class TestScoring:
                 {
                     "expected": [
                         {"rule_id": "DJS-001", "file": "config/settings/production.py", "line": 9},
-                        {"rule_id": "DJS-001", "file": "config/settings/base.py", "line": 17},
+                        {"rule_id": "DJS-001", "file": "config/settings/base.py", "line": 18},
                         {"rule_id": "DJP-001", "file": "app/models.py", "line": 1},
                     ]
                 }
@@ -83,7 +83,7 @@ class TestScoring:
                             "line": 9,
                             "severity": "low",
                         },
-                        {"rule_id": "DJS-001", "file": "config/settings/base.py", "line": 17},
+                        {"rule_id": "DJS-001", "file": "config/settings/base.py", "line": 18},
                     ]
                 }
             )
