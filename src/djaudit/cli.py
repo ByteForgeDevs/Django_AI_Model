@@ -204,6 +204,13 @@ def evaluate_command(
         Path | None,
         typer.Option("--manifest", help="Manifest path, if not expected.json in the project."),
     ] = None,
+    summary: Annotated[
+        Path | None,
+        typer.Option(
+            "--summary",
+            help="Append a markdown report here, e.g. $GITHUB_STEP_SUMMARY.",
+        ),
+    ] = None,
 ) -> None:
     """Score the analyser against a manifest of expected findings.
 
@@ -224,6 +231,11 @@ def evaluate_command(
     console = Console()
     for line in report.failures():
         console.print(f"[red]{line}[/red]")
+
+    if summary is not None:
+        from djaudit.summary import write_evaluation  # noqa: PLC0415 - keeps `run` fast
+
+        write_evaluation(report, summary)
 
     console.print(
         f"precision [bold]{report.precision:.2%}[/bold]  "
@@ -255,6 +267,13 @@ def benchmark(
             help="Add untriaged findings to the triage file for review, then exit non-zero.",
         ),
     ] = False,
+    summary: Annotated[
+        Path | None,
+        typer.Option(
+            "--summary",
+            help="Append a markdown report here, e.g. $GITHUB_STEP_SUMMARY.",
+        ),
+    ] = None,
 ) -> None:
     """Measure precision against a real project with recorded verdicts.
 
@@ -279,6 +298,11 @@ def benchmark(
 
     console = Console()
     _print_benchmark(console, report)
+
+    if summary is not None:
+        from djaudit.summary import write_benchmark  # noqa: PLC0415 - keeps `run` fast
+
+        write_benchmark(report, summary)
 
     if update and report.untriaged:
         # Seeded as false_positive so an unreviewed entry can never silently

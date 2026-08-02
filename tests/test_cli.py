@@ -217,3 +217,48 @@ class TestBenchmarkCommand:
         result = runner.invoke(app, ["benchmark", str(vulnerable_project), "--triage", str(path)])
         assert result.exit_code == EXIT_OK
         assert "precision 100.0%" in result.output
+
+
+class TestJobSummary:
+    """CI writes markdown to $GITHUB_STEP_SUMMARY so a red build explains itself."""
+
+    def test_eval_summary_reports_recall(self, vulnerable_project, tmp_path):
+        out = tmp_path / "summary.md"
+        runner.invoke(app, ["eval", str(vulnerable_project), "--summary", str(out)])
+
+        text = out.read_text()
+        assert "## Recall" in text
+        assert "| recall | 100.0% |" in text
+
+    def test_benchmark_summary_reports_untriaged(self, vulnerable_project, tmp_path):
+        triage = tmp_path / "triage.json"
+        Triage(target="fixture").save(triage)
+        out = tmp_path / "summary.md"
+
+        runner.invoke(
+            app,
+            ["benchmark", str(vulnerable_project), "--triage", str(triage), "--summary", str(out)],
+        )
+
+        text = out.read_text()
+        assert "## Precision — fixture" in text
+        assert "❌ fail" in text
+        assert "Untriaged (2)" in text
+        assert "--update" in text
+
+    def test_summaries_append_rather_than_truncate(self, vulnerable_project, tmp_path):
+        # Several CI steps share one summary file; truncating loses the others.
+        out = tmp_path / "summary.md"
+        out.write_text("## Existing section\n\n")
+
+        runner.invoke(app, ["eval", str(vulnerable_project), "--summary", str(out)])
+        runner.invoke(app, ["eval", str(vulnerable_project), "--summary", str(out)])
+
+        text = out.read_text()
+        assert "## Existing section" in text
+        assert text.count("## Recall") == 2
+
+    def test_summary_path_parents_are_created(self, vulnerable_project, tmp_path):
+        out = tmp_path / "nested" / "deeper" / "summary.md"
+        runner.invoke(app, ["eval", str(vulnerable_project), "--summary", str(out)])
+        assert out.is_file()

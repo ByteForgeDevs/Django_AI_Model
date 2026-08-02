@@ -87,13 +87,24 @@ class BenchmarkReport:
         return sum(s.correct for s in self.scores) / reported if reported else 1.0
 
     @property
+    def scored(self) -> int:
+        """Findings carrying a verdict. Precision is meaningless without these."""
+        return sum(s.reported for s in self.scores)
+
+    @property
+    def precision_display(self) -> str:
+        # Reporting "100%" when nothing has been judged invites the reader to
+        # conclude the tool is perfect, on a run that may be entirely untriaged.
+        return f"{self.precision:.1%}" if self.scored else "not measured"
+
+    @property
     def ok(self) -> bool:
         return not (self.untriaged or self.regressed or self.over_budget or self.rule_errors)
 
     def summary(self) -> str:
         return (
             f"{self.target}: {self.python_files} files · {self.reported} reported · "
-            f"precision {self.precision:.1%} · {len(self.untriaged)} untriaged · "
+            f"precision {self.precision_display} · {len(self.untriaged)} untriaged · "
             f"{len(self.regressed)} regressed · {len(self.rule_errors)} rule errors"
         )
 

@@ -68,8 +68,10 @@ jobs:
       # existing one's grading and nobody notices until a user does.
       - name: score against fixture manifests
         run: |
-          uv run djaudit eval tests/fixtures/vulnerable_project
-          uv run djaudit eval tests/fixtures/overridden_project
+          uv run djaudit eval tests/fixtures/vulnerable_project \
+            --summary "$GITHUB_STEP_SUMMARY"
+          uv run djaudit eval tests/fixtures/overridden_project \
+            --summary "$GITHUB_STEP_SUMMARY"
 
   false_positives:
     name: precision gate (${{ matrix.target.name }})
@@ -113,7 +115,8 @@ jobs:
             --min-severity info \
             --min-confidence tentative
           uv run djaudit benchmark target \
-            --triage benchmarks/${{ matrix.target.name }}.json
+            --triage benchmarks/${{ matrix.target.name }}.json \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       - name: upload report
         if: always()

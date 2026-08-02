@@ -151,3 +151,28 @@ class TestCrashes:
 
         assert report.rule_errors == {"DJS-001": "boom"}
         assert report.ok is False
+
+
+class TestPrecisionDisplay:
+    def test_precision_is_not_claimed_when_nothing_is_scored(self, tmp_path) -> None:
+        # A wholly untriaged run must not advertise 100% precision.
+        report = compare(make_result([make_finding("DJS-001")], tmp_path), Triage(target="t"))
+
+        assert report.scored == 0
+        assert report.precision_display == "not measured"
+        assert "precision not measured" in report.summary()
+
+    def test_precision_is_shown_once_findings_are_judged(self, tmp_path) -> None:
+        findings = make_findings("DJS-001", 2)
+        triage = Triage(
+            target="t",
+            entries=(
+                entry(findings[0], Verdict.TRUE_POSITIVE),
+                entry(findings[1], Verdict.FALSE_POSITIVE),
+            ),
+        )
+
+        report = compare(make_result(findings, tmp_path), triage)
+
+        assert report.scored == 2
+        assert report.precision_display == "50.0%"
