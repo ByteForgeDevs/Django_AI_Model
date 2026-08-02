@@ -16,6 +16,8 @@ from djaudit.evaluator import (
     Budget,
     Evaluator,
     Scope,
+    collect_env_objects,
+    collect_functions,
     collect_imports,
     evaluate,
 )
@@ -269,7 +271,13 @@ class TestUnsupported:
 def module_scope(source: str, names: dict[str, Value] | None = None) -> Scope:
     """Build a scope from module source, so imports are recognised as written."""
     tree = ast.parse(source)
-    return Scope(names=names or {}, imports=collect_imports(tree))
+    imports = collect_imports(tree)
+    return Scope(
+        names=names or {},
+        imports=imports,
+        functions=collect_functions(tree),
+        env_objects=collect_env_objects(tree, imports),
+    )
 
 
 class TestImportTracking:
@@ -507,3 +515,208 @@ class TestComprehensions:
     def test_nested_comprehension_is_unknown_not_wrong(self) -> None:
         scope = Scope(names={"X": Value.of([[1], [2]])})
         assert value_of("[i for row in X for i in row]", scope).is_unknown
+
+
+HEALTHCHECKS_HELPERS = """
+import os
+
+def envbool(s: str, default: str) -> bool:
+    v = os.getenv(s, default=default)
+    if v not in ("", "True", "False"):
+        msg = f"Unexpected value {s}={v}, use 'True' or 'False'"
+        raise ImproperlyConfigured(msg)
+    return v == "True"
+
+
+def envint(s: str, default: str):
+    v = os.getenv(s, default)
+    if v == "None":
+        return None
+    return int(v)
+
+
+def envsecret(s: str, default=None):
+    if secret_path := os.getenv(s + "_FILE"):
+        return secret_path
+    return os.getenv(s, default)
+"""
+
+
+class TestFollowingLocalFunctions:
+    """Verbatim helpers from healthchecks, which is the point of this feature."""
+
+    def test_envbool_resolves_through_the_helper(self) -> None:
+        scope = module_scope(HEALTHCHECKS_HELPERS)
+        result = value_of("envbool('DEBUG', 'True')", scope)
+        assert result.literal is True
+        assert result.env_dependent
+
+    def test_envbool_with_a_false_default(self) -> None:
+        scope = module_scope(HEALTHCHECKS_HELPERS)
+        assert literal("envbool('DEBUG', 'False')", scope) is False
+
+    def test_envint_casts_through_the_helper(self) -> None:
+        scope = module_scope(HEALTHCHECKS_HELPERS)
+        assert literal("envint('EMAIL_PORT', '587')", scope) == 587
+
+    def test_envint_takes_the_early_return(self) -> None:
+        scope = module_scope(HEALTHCHECKS_HELPERS)
+        assert literal("envint('PORT', 'None')", scope) is None
+
+    def test_walrus_binding(self) -> None:
+        scope = module_scope(HEALTHCHECKS_HELPERS)
+        # SECRET_KEY_FILE is unset, so the walrus binds None and the branch is
+        # not taken -- the function falls through to the plain getenv.
+        assert literal("envsecret('SECRET_KEY', '---')", scope) == "---"
+
+    def test_keyword_arguments(self) -> None:
+        scope = module_scope(HEALTHCHECKS_HELPERS + "\ndef f(a, b='x'):\n    return a + b\n")
+        assert literal("f('p', b='q')", scope) == "pq"
+
+    def test_parameter_defaults(self) -> None:
+        scope = module_scope("def f(a, b='!'):\n    return a + b\n")
+        assert literal("f('hi')", scope) == "hi!"
+
+    def test_falling_off_the_end_returns_none(self) -> None:
+        scope = module_scope("def f():\n    x = 1\n")
+        assert literal("f()", scope) is None
+
+    def test_an_unconditional_raise_is_unknown(self) -> None:
+        scope = module_scope("def f():\n    raise ValueError('no')\n")
+        assert value_of("f()", scope).is_unknown
+
+    def test_an_unresolvable_branch_is_unknown(self) -> None:
+        scope = module_scope("def f(x):\n    if x:\n        return 1\n    return 2\n")
+        assert value_of("f(MYSTERY)", scope).is_unknown
+
+    def test_an_unsupported_statement_is_unknown_not_wrong(self) -> None:
+        scope = module_scope("def f():\n    for i in range(3):\n        pass\n    return 1\n")
+        assert value_of("f()", scope).is_unknown
+
+    def test_recursion_does_not_hang(self) -> None:
+        scope = module_scope("def f(x):\n    return f(x)\n")
+        assert value_of("f(1)", scope).is_unknown
+
+    def test_mutual_recursion_does_not_hang(self) -> None:
+        scope = module_scope("def a(x):\n    return b(x)\ndef b(x):\n    return a(x)\n")
+        assert value_of("a(1)", scope).is_unknown
+
+    def test_locals_do_not_leak_into_the_module(self) -> None:
+        scope = module_scope("def f():\n    hidden = 1\n    return hidden\n")
+        value_of("f()", scope)
+        assert "hidden" not in scope.names
+
+    def test_star_args_are_refused(self) -> None:
+        scope = module_scope("def f(*args):\n    return 1\n")
+        assert value_of("f(1)", scope).is_unknown
+
+    def test_too_many_arguments_is_unknown(self) -> None:
+        scope = module_scope("def f(a):\n    return a\n")
+        assert value_of("f(1, 2)", scope).is_unknown
+
+    def test_a_helper_can_see_module_globals(self) -> None:
+        scope = module_scope("BASE = '/srv'\ndef f():\n    return BASE\n")
+        scope.names["BASE"] = Value.of("/srv")
+        assert literal("f()", scope) == "/srv"
+
+
+class TestDjangoEnviron:
+    def test_bool_takes_its_default_second(self) -> None:
+        scope = module_scope("import environ\nenv = environ.Env()")
+        result = value_of("env.bool('DEBUG', False)", scope)
+        assert result.literal is False
+        assert result.env_dependent
+
+    def test_a_string_default_is_not_cast(self) -> None:
+        # Verified against django-environ: it returns the default untouched,
+        # so env.bool("DEBUG", "True") really is the string, not True.
+        scope = module_scope("import environ\nenv = environ.Env()")
+        assert literal("env.bool('DEBUG', 'True')", scope) == "True"
+
+    def test_int_default_is_not_cast_either(self) -> None:
+        scope = module_scope("import environ\nenv = environ.Env()")
+        assert literal("env.int('PORT', '8000')", scope) == "8000"
+
+    def test_list_takes_a_cast_second_not_a_default(self) -> None:
+        # The signature is list(var, cast=None, default=NOTSET). Reading the
+        # second argument as a default would report a cast as the value.
+        scope = module_scope("import environ\nenv = environ.Env()")
+        assert value_of("env.list('HOSTS', ['a'])", scope).is_unknown
+
+    def test_list_default_by_keyword(self) -> None:
+        scope = module_scope("import environ\nenv = environ.Env()")
+        assert literal("env.list('HOSTS', default=['a', 'b'])", scope) == ["a", "b"]
+
+    def test_list_default_third_positionally(self) -> None:
+        scope = module_scope("import environ\nenv = environ.Env()")
+        assert literal("env.list('HOSTS', str, ['a'])", scope) == ["a"]
+
+    def test_call_falls_back_to_the_declared_schema(self) -> None:
+        scope = module_scope("import environ\nenv = environ.Env(DEBUG=(bool, False))")
+        result = value_of("env('DEBUG')", scope)
+        assert result.literal is False
+        assert result.env_dependent
+
+    def test_call_takes_a_cast_second_not_a_default(self) -> None:
+        scope = module_scope("import environ\nenv = environ.Env()")
+        assert value_of("env('DEBUG', bool)", scope).is_unknown
+
+    def test_call_with_an_explicit_keyword_default(self) -> None:
+        scope = module_scope("import environ\nenv = environ.Env()")
+        assert literal("env('SITE', default='localhost')", scope) == "localhost"
+
+    def test_a_required_variable_has_no_value(self) -> None:
+        # django-environ raises ImproperlyConfigured, so there is no value.
+        scope = module_scope("import environ\nenv = environ.Env()")
+        result = value_of("env.bool('DEBUG')", scope)
+        assert result.is_unknown
+        assert result.env_dependent
+
+    def test_db_transforms_its_default(self) -> None:
+        scope = module_scope("import environ\nenv = environ.Env()")
+        assert value_of("env.db('DATABASE_URL', 'sqlite:///x')", scope).is_unknown
+
+    def test_from_environ_import_env(self) -> None:
+        scope = module_scope("from environ import Env\nenv = Env(DEBUG=(bool, True))")
+        assert literal("env('DEBUG')", scope) is True
+
+    def test_a_local_variable_named_env_is_not_an_env_object(self) -> None:
+        scope = module_scope("env = 1")
+        assert value_of("env.bool('DEBUG', False)", scope).is_unknown
+
+
+class TestPythonDecouple:
+    def test_default(self) -> None:
+        scope = module_scope("from decouple import config")
+        result = value_of("config('DEBUG', default=False)", scope)
+        assert result.literal is False
+        assert result.env_dependent
+
+    def test_default_is_cast_unlike_django_environ(self) -> None:
+        # Verified against python-decouple, which does apply the cast.
+        scope = module_scope("from decouple import config")
+        assert literal("config('DEBUG', default='True', cast=bool)", scope) is True
+
+    def test_falsey_strings(self) -> None:
+        scope = module_scope("from decouple import config")
+        assert literal("config('DEBUG', default='off', cast=bool)", scope) is False
+
+    def test_int_cast(self) -> None:
+        scope = module_scope("from decouple import config")
+        assert literal("config('PORT', default='8000', cast=int)", scope) == 8000
+
+    def test_positional_default(self) -> None:
+        scope = module_scope("from decouple import config")
+        assert literal("config('SITE', 'localhost')", scope) == "localhost"
+
+    def test_an_unknown_cast_is_unknown(self) -> None:
+        scope = module_scope("from decouple import config")
+        assert value_of("config('HOSTS', default='a,b', cast=Csv())", scope).is_unknown
+
+    def test_an_invalid_truth_value_is_unknown_not_a_crash(self) -> None:
+        scope = module_scope("from decouple import config")
+        assert value_of("config('DEBUG', default='maybe', cast=bool)", scope).is_unknown
+
+    def test_a_required_value_has_no_default(self) -> None:
+        scope = module_scope("from decouple import config")
+        assert value_of("config('SECRET_KEY')", scope).is_unknown

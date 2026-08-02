@@ -41,6 +41,7 @@ no reason to reason about, or an attempt to make us allocate.
 """
 
 MAX_INT_BITS = 4096
+MAX_CALL_DEPTH = 4
 """Ceiling on the magnitude of any integer we compute with.
 
 Roughly 1,233 decimal digits -- orders of magnitude beyond any real setting.
@@ -81,9 +82,15 @@ class Scope:
     names: dict[str, Value] = field(default_factory=dict)
     functions: dict[str, ast.FunctionDef] = field(default_factory=dict)
     imports: dict[str, str] = field(default_factory=dict)
+    env_objects: dict[str, dict[str, ast.expr]] = field(default_factory=dict)
 
     def child(self, names: dict[str, Value]) -> Scope:
-        return Scope(names={**self.names, **names}, functions=self.functions, imports=self.imports)
+        return Scope(
+            names={**self.names, **names},
+            functions=self.functions,
+            imports=self.imports,
+            env_objects=self.env_objects,
+        )
 
     def origin(self, node: ast.expr) -> str | None:
         """Dotted path an expression refers to, following imports.
@@ -115,12 +122,61 @@ def collect_imports(module: ast.Module) -> dict[str, str]:
     return imports
 
 
+def collect_functions(module: ast.Module) -> dict[str, ast.FunctionDef]:
+    """Module-level function definitions the evaluator may follow."""
+    return {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+
+
+def collect_env_objects(
+    module: ast.Module, imports: dict[str, str]
+) -> dict[str, dict[str, ast.expr]]:
+    """Locate ``env = environ.Env(DEBUG=(bool, False))`` bindings and their schema.
+
+    The schema matters because ``env("DEBUG")`` with no inline default falls
+    back to it, so without this the most common django-environ idiom resolves
+    to nothing.
+    """
+    scope = Scope(imports=imports)
+    found: dict[str, dict[str, ast.expr]] = {}
+
+    for node in module.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target, value = node.targets[0], node.value
+        if not isinstance(target, ast.Name) or not isinstance(value, ast.Call):
+            continue
+        if scope.origin(value.func) not in _ENV_CLASS_PATHS:
+            continue
+
+        schema: dict[str, ast.expr] = {}
+        for keyword in value.keywords:
+            # Env(DEBUG=(bool, False)) -- the second element is the default.
+            if (
+                keyword.arg
+                and isinstance(keyword.value, ast.Tuple)
+                and len(keyword.value.elts) == 2
+            ):
+                schema[keyword.arg] = keyword.value.elts[1]
+        found[target.id] = schema
+
+    return found
+
+
+class _UnresolvableError(Exception):
+    """Raised inside a followed function body when execution cannot continue."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class Evaluator:
     """Resolves expressions against a :class:`Scope`."""
 
     def __init__(self, scope: Scope | None = None, budget: Budget | None = None) -> None:
         self.scope = scope or Scope()
         self.budget = budget or Budget()
+        self._calls: list[str] = []
 
     def evaluate(self, node: ast.expr) -> Value:
         """Public entry point. Never raises."""
@@ -396,6 +452,12 @@ class Evaluator:
             return Value.unknown("unresolvable environment default", env_dependent=True)
         return Value.of(default.literal, env_dependent=True)
 
+    def _eval_NamedExpr(self, node: ast.NamedExpr, depth: int) -> Value:  # noqa: N802
+        value = self._eval(node.value, depth)
+        if isinstance(node.target, ast.Name):
+            self.scope.names[node.target.id] = value
+        return value
+
     # -- conditionals -------------------------------------------------------
 
     def _eval_IfExp(self, node: ast.IfExp, depth: int) -> Value:  # noqa: N802
@@ -545,12 +607,214 @@ class Evaluator:
         path = self.scope.origin(node.func)
         if path in _ENVIRON_GET_PATHS:
             return self._environment_lookup(node, depth)
+        if path in _DECOUPLE_PATHS:
+            return self._decouple_config(node, depth)
+
+        if isinstance(node.func, ast.Name):
+            if node.func.id in self.scope.env_objects:
+                return self._environ_instance_call(node, node.func.id, depth)
+            if node.func.id in self.scope.functions:
+                return self._call_function(self.scope.functions[node.func.id], node, depth)
+            if node.func.id in _SAFE_BUILTINS:
+                return self._eval_builtin(node, node.func.id, depth)
+            return Value.unknown("unsupported call")
 
         if isinstance(node.func, ast.Attribute):
+            receiver = node.func.value
+            if isinstance(receiver, ast.Name) and receiver.id in self.scope.env_objects:
+                return self._environ_method(node, node.func.attr, depth)
             return self._eval_method_call(node, node.func, depth)
-        if isinstance(node.func, ast.Name) and node.func.id in _SAFE_BUILTINS:
-            return self._eval_builtin(node, node.func.id, depth)
         return Value.unknown("unsupported call")
+
+    # -- configuration libraries --------------------------------------------
+
+    def _default_argument(self, node: ast.Call, position: int, depth: int) -> Value | None:
+        """The ``default`` argument, whether passed by keyword or position."""
+        for keyword in node.keywords:
+            if keyword.arg == "default":
+                return self._eval(keyword.value, depth)
+        if len(node.args) > position:
+            return self._eval(node.args[position], depth)
+        return None
+
+    def _environ_method(self, node: ast.Call, method: str, depth: int) -> Value:
+        """``env.bool("DEBUG", False)`` and friends.
+
+        django-environ's signatures are not uniform: ``bool``/``int``/``str``
+        take the default second, while ``list``/``tuple``/``dict`` take a cast
+        there and the default third. Getting that backwards would read a cast
+        as a value.
+        """
+        if method in _ENVIRON_OPAQUE_METHODS:
+            # These parse the default into something else entirely (db() turns
+            # a URL into a connection dict), so the literal we can see is not
+            # the value the setting ends up with.
+            return Value.unknown(f"env.{method}() transforms its default", env_dependent=True)
+
+        position = _ENVIRON_DEFAULT_POSITION.get(method)
+        if position is None:
+            return Value.unknown(f"unsupported django-environ method: {method}")
+        return self._environ_default(self._default_argument(node, position, depth))
+
+    def _environ_instance_call(self, node: ast.Call, name: str, depth: int) -> Value:
+        """``env("DEBUG")``, which falls back to the schema given to ``Env()``."""
+        default = self._default_argument(node, 2, depth)
+        if default is None and node.args:
+            variable = self._eval(node.args[0], depth)
+            schema = self.scope.env_objects[name]
+            if variable.is_literal and isinstance(variable.literal, str):
+                declared = schema.get(variable.literal)
+                if declared is not None:
+                    default = self._eval(declared, depth)
+        return self._environ_default(default)
+
+    def _environ_default(self, default: Value | None) -> Value:
+        if default is None:
+            # django-environ raises ImproperlyConfigured when a variable has no
+            # default and is unset, so there is no value to reason about.
+            return Value.unknown("environment variable is required", env_dependent=True)
+        if not default.is_literal:
+            return Value.unknown("unresolvable environment default", env_dependent=True)
+        # Deliberately uncast: django-environ returns the default untouched, so
+        # env.bool("DEBUG", "True") really is the string "True" at runtime.
+        return Value.of(default.literal, env_dependent=True)
+
+    def _decouple_config(self, node: ast.Call, depth: int) -> Value:
+        """``config("DEBUG", default=False, cast=bool)``.
+
+        Unlike django-environ, python-decouple *does* apply the cast to the
+        default, so the two libraries need different handling.
+        """
+        default = self._default_argument(node, 1, depth)
+        if default is None:
+            return Value.unknown("configuration value is required", env_dependent=True)
+        if not default.is_literal:
+            return Value.unknown("unresolvable configuration default", env_dependent=True)
+
+        cast = self._cast_name(node, depth)
+        if cast is None:
+            return Value.of(default.literal, env_dependent=True)
+        if cast not in _DECOUPLE_CASTS:
+            return Value.unknown(f"unsupported cast: {cast}", env_dependent=True)
+        try:
+            return Value.of(_DECOUPLE_CASTS[cast](default.literal), env_dependent=True)
+        except Exception:  # target code: any failure means 'we cannot tell'
+            return Value.unknown("configuration cast failed", env_dependent=True)
+
+    def _cast_name(self, node: ast.Call, depth: int) -> str | None:
+        for keyword in node.keywords:
+            if keyword.arg == "cast":
+                return keyword.value.id if isinstance(keyword.value, ast.Name) else "?"
+        if len(node.args) > 2:
+            return node.args[2].id if isinstance(node.args[2], ast.Name) else "?"
+        return None
+
+    # -- following local functions ------------------------------------------
+
+    def _call_function(self, function: ast.FunctionDef, node: ast.Call, depth: int) -> Value:
+        """Follow a project's own helper, e.g. healthchecks' ``envbool``.
+
+        Every real settings module wraps environment access in a helper, so a
+        resolver that stops at the call boundary sees almost nothing.
+        """
+        if len(self._calls) >= MAX_CALL_DEPTH:
+            return Value.unknown("call nesting too deep")
+        if function.name in self._calls:
+            return Value.unknown("recursive call")
+
+        bindings = self._bind_arguments(function, node, depth)
+        if bindings is None:
+            return Value.unknown(f"unresolvable call to {function.name}()")
+
+        outer = self.scope
+        self.scope = outer.child(bindings)
+        self._calls.append(function.name)
+        try:
+            returned = self._exec_block(function.body, depth)
+        except _UnresolvableError as bail:
+            returned = Value.unknown(f"{function.name}(): {bail.reason}")
+        finally:
+            self.scope = outer
+            self._calls.pop()
+        # Falling off the end of a function returns None.
+        return returned if returned is not None else Value.of(None)
+
+    def _bind_arguments(
+        self, function: ast.FunctionDef, node: ast.Call, depth: int
+    ) -> dict[str, Value] | None:
+        spec = function.args
+        if spec.vararg or spec.kwarg or spec.posonlyargs:
+            return None
+
+        positional = [argument.arg for argument in spec.args]
+        keyword_only = [argument.arg for argument in spec.kwonlyargs]
+        if len(node.args) > len(positional):
+            return None
+
+        bindings: dict[str, Value] = {}
+        for name, argument in zip(positional, node.args, strict=False):
+            bindings[name] = self._eval(argument, depth)
+        for keyword in node.keywords:
+            if keyword.arg is None or keyword.arg not in positional + keyword_only:
+                return None
+            bindings[keyword.arg] = self._eval(keyword.value, depth)
+
+        offset = len(positional) - len(spec.defaults)
+        for name, fallback in zip(positional[offset:], spec.defaults, strict=True):
+            bindings.setdefault(name, self._eval(fallback, depth))
+        for name, optional in zip(keyword_only, spec.kw_defaults, strict=True):
+            if optional is not None:
+                bindings.setdefault(name, self._eval(optional, depth))
+
+        if not set(positional) | set(keyword_only) <= set(bindings):
+            return None
+        return bindings
+
+    def _exec_block(self, body: list[ast.stmt], depth: int) -> Value | None:
+        """Run statements until one returns. ``None`` means control fell through."""
+        tainted = False
+
+        for statement in body:
+            self.budget.charge()
+
+            if isinstance(statement, ast.Return):
+                if statement.value is None:
+                    return _taint(Value.of(None), tainted)
+                return _taint(self._eval(statement.value, depth), tainted)
+
+            if isinstance(statement, ast.Assign):
+                target = statement.targets[0]
+                if len(statement.targets) != 1 or not isinstance(target, ast.Name):
+                    raise _UnresolvableError("unsupported assignment")
+                self.scope.names[target.id] = self._eval(statement.value, depth)
+
+            elif isinstance(statement, ast.AnnAssign):
+                if not isinstance(statement.target, ast.Name) or statement.value is None:
+                    raise _UnresolvableError("unsupported annotated assignment")
+                self.scope.names[statement.target.id] = self._eval(statement.value, depth)
+
+            elif isinstance(statement, ast.If):
+                test = self._eval(statement.test, depth)
+                if not test.is_literal:
+                    raise _UnresolvableError("unresolvable branch")
+                # Which branch ran depended on the environment, so the value
+                # produced by either one inherits that.
+                tainted |= test.env_dependent
+                returned = self._exec_block(
+                    statement.body if test.literal else statement.orelse, depth
+                )
+                if returned is not None:
+                    return _taint(returned, tainted)
+
+            elif isinstance(statement, ast.Raise):
+                # Reaching a raise means the settings module does not import,
+                # so the setting never takes a value at all.
+                raise _UnresolvableError("raises")
+
+            elif not isinstance(statement, ast.Pass | ast.Expr):
+                raise _UnresolvableError(f"unsupported statement: {type(statement).__name__}")
+
+        return None
 
     def _eval_builtin(self, node: ast.Call, name: str, depth: int) -> Value:
         if node.keywords:
@@ -592,6 +856,18 @@ class Evaluator:
         return Value.of(result, env_dependent=tainted)
 
 
+def _decouple_bool(value: Any) -> bool:
+    """python-decouple casts with strtobool, which rejects unknown strings."""
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in _TRUE_STRINGS:
+            return True
+        if lowered in _FALSE_STRINGS:
+            return False
+        raise ValueError(f"invalid truth value {value!r}")
+    return bool(value)
+
+
 def _taint(value: Value, tainted: bool) -> Value:
     """Mark ``value`` environment-dependent without disturbing its kind."""
     if not tainted or value.env_dependent:
@@ -610,6 +886,37 @@ _COMPARE_OPS: dict[type, Any] = {
     ast.NotIn: lambda a, b: a not in b,
     ast.Is: lambda a, b: a is b,
     ast.IsNot: lambda a, b: a is not b,
+}
+
+_ENV_CLASS_PATHS = frozenset({"environ.Env", "environ.FileAwareEnv"})
+
+# Position of the `default` parameter, which django-environ does not keep
+# consistent: list/tuple/dict take a `cast` second and the default third.
+_ENVIRON_DEFAULT_POSITION = {
+    "bool": 1,
+    "int": 1,
+    "float": 1,
+    "str": 1,
+    "json": 1,
+    "list": 2,
+    "tuple": 2,
+    "dict": 2,
+}
+
+# Methods that parse the default into something else, so the visible literal is
+# not the resulting value.
+_ENVIRON_OPAQUE_METHODS = frozenset({"db", "db_url", "cache", "cache_url", "url", "path"})
+
+_DECOUPLE_PATHS = frozenset({"decouple.config", "decouple.AutoConfig"})
+
+_TRUE_STRINGS = frozenset({"y", "yes", "t", "true", "on", "1"})
+_FALSE_STRINGS = frozenset({"n", "no", "f", "false", "off", "0"})
+
+_DECOUPLE_CASTS: dict[str, Any] = {
+    "bool": _decouple_bool,
+    "int": int,
+    "float": float,
+    "str": str,
 }
 
 _ENVIRON_PATHS = frozenset({"os.environ", "environ"})
