@@ -60,3 +60,46 @@ class SslRedirectDisabled(FlagRule):
             "https://docs.djangoproject.com/en/stable/ref/settings/#secure-ssl-redirect",
         ),
     )
+
+
+@register
+class SessionCookieNotSecure(FlagRule):
+    """``SESSION_COOKIE_SECURE`` is off, so the session cookie travels over HTTP."""
+
+    setting = "SESSION_COOKIE_SECURE"
+    ceiling = Confidence.CERTAIN
+    """Nothing in front of Django changes this. The flag sets an attribute on the
+    cookie, and the browser is what acts on it."""
+
+    consequence = (
+        "the browser will send the session cookie over plain HTTP, where anyone on "
+        "the network path can read it and use it"
+    )
+
+    meta = RuleMeta(
+        id="DJS-009",
+        title="session cookie is not marked Secure",
+        family=Family.DJS,
+        severity=Severity.HIGH,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "Without this flag the browser attaches the session cookie to plain HTTP "
+            "requests, so a single such request -- a typed hostname, an old bookmark, "
+            "an http:// image in an email -- puts the cookie on the wire in clear "
+            "text. Whoever reads it is logged in as that user until the session "
+            "expires, and there is nothing in the logs to distinguish them from the "
+            "real one. A reverse proxy does not help: this is an attribute of the "
+            "cookie, and the browser is what enforces it."
+        ),
+        remediation=(
+            "Set SESSION_COOKIE_SECURE = True in every settings module that can reach "
+            "production. Existing sessions keep their old attributes until they are "
+            "reissued, so consider cycling them if you believe one has been exposed."
+        ),
+        references=(
+            _HTTPS_CHECKLIST,
+            "https://docs.djangoproject.com/en/stable/ref/settings/#session-cookie-secure",
+            "https://cwe.mitre.org/data/definitions/614.html",
+        ),
+    )

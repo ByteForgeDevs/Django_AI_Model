@@ -1,10 +1,9 @@
-"""DJS-006 -- redirect plain HTTP to HTTPS.
+"""DJS-006 and DJS-009 -- redirect to HTTPS, and the session cookie.
 
-The rule is "must be True, ships False", and so are the cookie flags that follow it, so
-FlagRule does the work and these tests cover the parts that are easy to get
-wrong: that an unassigned setting is still reported, that it is reported once
-rather than once per module, and that a base which merely omits it is not the
-same thing as a base which turns it off.
+Both are "must be True, ships False", so the shared FlagRule does the work
+and these tests are mostly about the two things that are not shared: that an
+unassigned setting is still reported, and that the confidence differs where the
+confidence should differ.
 """
 
 from pathlib import Path
@@ -16,11 +15,16 @@ from djaudit.models import Confidence, Severity
 from djaudit.rules._base import could_be_off
 from djaudit.values import Value
 
-SECURE = "SECURE_SSL_REDIRECT = True"
+SECURE = "\n".join(
+    [
+        "SECURE_SSL_REDIRECT = True",
+        "SESSION_COOKIE_SECURE = True",
+    ]
+)
 MARKERS = "INSTALLED_APPS = []\nDEBUG = False\nDATABASES = {}\nSECRET_KEY = 'x'\n"
 
-FLAGS = ["SECURE_SSL_REDIRECT"]
-RULES = {"SECURE_SSL_REDIRECT": "DJS-006"}
+FLAGS = ["SECURE_SSL_REDIRECT", "SESSION_COOKIE_SECURE"]
+RULES = {"SECURE_SSL_REDIRECT": "DJS-006", "SESSION_COOKIE_SECURE": "DJS-009"}
 
 
 def build(tmp_path: Path, body: str) -> Path:
@@ -62,7 +66,7 @@ class TestDetection:
 
     @pytest.mark.parametrize("flag", FLAGS)
     def test_a_flag_that_is_never_set_is_reported(self, tmp_path, flag):
-        """Django ships it off, so silence is the insecure state."""
+        """Django ships both off, so silence is the insecure state."""
         root = build(tmp_path, "")
         (finding,) = audit(root, RULES[flag])
         assert "never set" in finding.message
@@ -75,20 +79,31 @@ class TestDetection:
     def test_an_unassigned_flag_points_at_the_settings_module(self, tmp_path):
         """There is no line to blame, but the file that should have had one."""
         root = build(tmp_path, "")
-        (finding,) = audit(root, "DJS-006")
+        (finding,) = audit(root, "DJS-009")
         assert finding.location.file.endswith("settings.py")
         assert finding.location.line == 1
 
     def test_a_flag_set_from_the_environment_is_still_reported(self, tmp_path):
-        root = build(tmp_path, "SECURE_SSL_REDIRECT = os.environ.get('S') == '1'\n")
-        assert audit(root, "DJS-006")
+        root = build(tmp_path, "SESSION_COOKIE_SECURE = os.environ.get('S') == '1'\n")
+        assert audit(root, "DJS-009")
 
 
 class TestConfidenceReflectsWhatWeCanKnow:
+    def test_a_cookie_flag_off_in_the_source_is_certain(self, tmp_path):
+        """Nothing in front of Django changes a cookie attribute."""
+        root = build(tmp_path, "SESSION_COOKIE_SECURE = False\n")
+        (finding,) = audit(root, "DJS-009")
+        assert finding.confidence is Confidence.CERTAIN
+
     def test_ssl_redirect_never_claims_certainty(self, tmp_path):
         """A proxy may be doing the redirect, and we cannot see one from here."""
         root = build(tmp_path, "SECURE_SSL_REDIRECT = False\n")
         (finding,) = audit(root, "DJS-006")
+        assert finding.confidence is Confidence.FIRM
+
+    def test_relying_on_djangos_default_costs_a_step(self, tmp_path):
+        root = build(tmp_path, "")
+        (finding,) = audit(root, "DJS-009")
         assert finding.confidence is Confidence.FIRM
 
 
@@ -99,21 +114,21 @@ class TestControls:
         (root / "myproj/settings/__init__.py").write_text("")
         (root / "myproj/settings/base.py").write_text(MARKERS + SECURE)
         (root / "myproj/settings/development.py").write_text(
-            "from .base import *\nSECURE_SSL_REDIRECT = False\n"
+            "from .base import *\nSESSION_COOKIE_SECURE = False\n"
         )
-        assert not audit(root, "DJS-006")
+        assert not audit(root, "DJS-009")
 
     def test_production_overriding_an_insecure_base_downgrades_it(self, tmp_path):
         root = tmp_path / "project"
         (root / "myproj/settings").mkdir(parents=True)
         (root / "myproj/settings/__init__.py").write_text("")
-        (root / "myproj/settings/base.py").write_text(MARKERS + "SECURE_SSL_REDIRECT = False\n")
+        (root / "myproj/settings/base.py").write_text(MARKERS + "SESSION_COOKIE_SECURE = False\n")
         (root / "myproj/settings/production.py").write_text(
-            "from .base import *\nSECURE_SSL_REDIRECT = True\n"
+            "from .base import *\nSESSION_COOKIE_SECURE = True\n"
         )
         # Not silenced: base.py can still be pointed at directly. Graded down
         # to where it stays out of the way, which is what split settings are.
-        (finding,) = audit(root, "DJS-006")
+        (finding,) = audit(root, "DJS-009")
         assert finding.severity is Severity.LOW
         assert finding.confidence is Confidence.TENTATIVE
         assert "should override it" in finding.message
@@ -125,20 +140,20 @@ class TestControls:
         (root / "myproj/settings/__init__.py").write_text("")
         (root / "myproj/settings/base.py").write_text(MARKERS)
         (root / "myproj/settings/production.py").write_text(
-            "from .base import *\nSECURE_SSL_REDIRECT = True\n"
+            "from .base import *\nSESSION_COOKIE_SECURE = True\n"
         )
-        assert not audit(root, "DJS-006")
+        assert not audit(root, "DJS-009")
 
     def test_a_base_that_writes_the_insecure_value_down_is_still_reported(self, tmp_path):
         """The distinction from the test above: a wrong value is worth saying."""
         root = tmp_path / "project"
         (root / "myproj/settings").mkdir(parents=True)
         (root / "myproj/settings/__init__.py").write_text("")
-        (root / "myproj/settings/base.py").write_text(MARKERS + "SECURE_SSL_REDIRECT = False\n")
+        (root / "myproj/settings/base.py").write_text(MARKERS + "SESSION_COOKIE_SECURE = False\n")
         (root / "myproj/settings/production.py").write_text(
-            "from .base import *\nSECURE_SSL_REDIRECT = True\n"
+            "from .base import *\nSESSION_COOKIE_SECURE = True\n"
         )
-        assert audit(root, "DJS-006")
+        assert audit(root, "DJS-009")
 
     def test_one_missing_flag_is_one_finding_not_one_per_module(self, tmp_path):
         root = tmp_path / "project"
@@ -146,5 +161,5 @@ class TestControls:
         (root / "myproj/settings/__init__.py").write_text("")
         (root / "myproj/settings/base.py").write_text(MARKERS)
         (root / "myproj/settings/production.py").write_text("from .base import *\n")
-        (finding,) = audit(root, "DJS-006")
+        (finding,) = audit(root, "DJS-009")
         assert "production" in finding.location.file

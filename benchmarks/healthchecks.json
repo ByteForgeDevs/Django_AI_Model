@@ -27,6 +27,16 @@
       "reviewer": "Zambagarrah"
     },
     {
+      "fingerprint": "4eca41d92b1884e1",
+      "rule_id": "DJS-009",
+      "verdict": "true_positive",
+      "file": "hc/settings.py",
+      "line": 1,
+      "note": "A genuine gap, not a configuration choice. Healthchecks never assigns SESSION_COOKIE_SECURE and, unlike DEBUG or SECRET_KEY, offers no environment variable for it either, so there is no supported way for an operator to turn it on short of patching settings.py. The project clearly expects a TLS-terminating proxy -- it reads SECURE_PROXY_SSL_HEADER from the environment at line 78 -- but a proxy does not set this flag, and without it a browser that touches the plain-HTTP URL even once transmits the session cookie in clear text on the wire. Firm rather than certain only because we cannot see the deployment; the absence of the setting itself is not in doubt.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
       "fingerprint": "1d24d2cef11f4856",
       "rule_id": "DJS-006",
       "verdict": "accepted_risk",

@@ -601,6 +601,24 @@ than after twenty-six of them disagree, is cheaper.
 - **1.5.2** — `DJS-007` `SECURE_HSTS_SECONDS` absent or below one year.
 - **1.5.3** — `DJS-008` `SECURE_HSTS_INCLUDE_SUBDOMAINS` disabled while HSTS is on.
 - **1.5.4** — `DJS-009` `SESSION_COOKIE_SECURE` disabled.
+
+  **Done.** The first rule where we can say `certain` and mean it. Nothing in
+  front of Django changes a cookie attribute: if `Secure` is not set, the
+  browser sends the session cookie over plain HTTP, and no proxy, load balancer
+  or CDN alters that. So where `DJS-006` is capped at `firm` because the
+  redirect may be someone else's job, this one is capped at `certain` — the
+  ceiling is where each rule records how much of the story it can actually see.
+
+  Severity is `high` rather than `DJS-006`'s `medium`, because the thing on the
+  wire is the session itself. Reading it is the attack; there is no second step.
+
+  Healthchecks is the interesting target. It never sets this and, unlike `DEBUG`
+  or `SECRET_KEY`, offers no environment variable for it either, so an operator
+  cannot turn it on without patching `settings.py`. It clearly expects a
+  TLS-terminating proxy — it reads `SECURE_PROXY_SSL_HEADER` from the
+  environment — but a proxy does not set this flag. Recorded as
+  `true_positive`, the first one in the benchmark. NetBox exposes it as a
+  documented operator knob and stays `accepted_risk`.
 - **1.5.5** — `DJS-010` `CSRF_COOKIE_SECURE` disabled.
 - **1.5.6** — `DJS-011` `SESSION_COOKIE_HTTPONLY` disabled.
 - **1.5.7** — `DJS-012` `SECURE_PROXY_SSL_HEADER` trusting a client-controllable header.
