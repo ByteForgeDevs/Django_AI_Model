@@ -115,11 +115,15 @@ jobs:
       # the gate tracks a false-positive rate instead of asserting zero.
       - name: precision gate
         run: |
+          # Exit 1 means "findings exist", which is the normal case here and
+          # not the gate's verdict -- `djaudit benchmark` decides that against
+          # the recorded verdicts. Exit 2 means the tool broke, which is a real
+          # failure, so the two are handled separately rather than with `|| true`.
           uv run djaudit run target \
             --format json \
             --output report.json \
             --min-severity info \
-            --min-confidence tentative
+            --min-confidence tentative || [ $? -eq 1 ]
           uv run djaudit benchmark target \
             --triage benchmarks/${{ matrix.target.name }}.json \
             --summary "$GITHUB_STEP_SUMMARY"
