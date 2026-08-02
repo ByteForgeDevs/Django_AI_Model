@@ -83,6 +83,7 @@ class Scope:
     functions: dict[str, ast.FunctionDef] = field(default_factory=dict)
     imports: dict[str, str] = field(default_factory=dict)
     env_objects: dict[str, dict[str, ast.expr]] = field(default_factory=dict)
+    attributes: dict[str, dict[str, Value]] = field(default_factory=dict)
 
     def child(self, names: dict[str, Value]) -> Scope:
         return Scope(
@@ -90,6 +91,7 @@ class Scope:
             functions=self.functions,
             imports=self.imports,
             env_objects=self.env_objects,
+            attributes=self.attributes,
         )
 
     def origin(self, node: ast.expr) -> str | None:
@@ -611,6 +613,8 @@ class Evaluator:
             return self._decouple_config(node, depth)
 
         if isinstance(node.func, ast.Name):
+            if node.func.id == "getattr" and "getattr" not in self.scope.names:
+                return self._eval_getattr(node, depth)
             if node.func.id in self.scope.env_objects:
                 return self._environ_instance_call(node, node.func.id, depth)
             if node.func.id in self.scope.functions:
@@ -625,6 +629,54 @@ class Evaluator:
                 return self._environ_method(node, node.func.attr, depth)
             return self._eval_method_call(node, node.func, depth)
         return Value.unknown("unsupported call")
+
+    # -- attribute indirection ----------------------------------------------
+
+    def _eval_getattr(self, node: ast.Call, depth: int) -> Value:
+        """``getattr(configuration, "DEBUG", False)``, the NetBox idiom.
+
+        A settings module that reads everything off a deployment-supplied
+        configuration object is invisible to a resolver that stops here, and
+        that is most of NetBox.
+        """
+        if node.keywords or not 2 <= len(node.args) <= 3:
+            return Value.unknown("unsupported getattr()")
+
+        attribute = self._eval(node.args[1], depth)
+        if not attribute.is_literal or not isinstance(attribute.literal, str):
+            return Value.unknown("unresolvable getattr() attribute")
+
+        known = self._known_attributes(node.args[0])
+        if known is not None:
+            defined = known.get(attribute.literal)
+            if defined is not None:
+                return defined
+            # The namespace is visible and genuinely lacks the attribute, so
+            # the default is not a guess.
+            if len(node.args) == 3:
+                return self._eval(node.args[2], depth)
+            return Value.unknown(f"no attribute {attribute.literal}")
+
+        if len(node.args) < 3:
+            # getattr with no default raises when the attribute is absent, and
+            # we cannot tell whether it is. NetBox marks these "# Required".
+            return Value.unknown("getattr() with no default")
+
+        if self._eval(node.args[0], depth).is_literal:
+            # A resolved value is not a configuration object; asking for an
+            # arbitrary attribute of it is not something we model.
+            return Value.unknown("getattr() on a resolved value")
+
+        # An opaque object, in practice a deployment-time configuration module
+        # that is not in the repository. The default is what a fresh install
+        # runs with, which is the deployment we can actually reason about.
+        return _taint(self._eval(node.args[2], depth), True)
+
+    def _known_attributes(self, node: ast.expr) -> dict[str, Value] | None:
+        if isinstance(node, ast.Name) and node.id in self.scope.attributes:
+            return self.scope.attributes[node.id]
+        origin = self.scope.origin(node)
+        return self.scope.attributes.get(origin) if origin else None
 
     # -- configuration libraries --------------------------------------------
 

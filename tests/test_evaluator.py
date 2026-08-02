@@ -720,3 +720,69 @@ class TestPythonDecouple:
     def test_a_required_value_has_no_default(self) -> None:
         scope = module_scope("from decouple import config")
         assert value_of("config('SECRET_KEY')", scope).is_unknown
+
+
+class TestAttributeIndirection:
+    """``getattr(configuration, "DEBUG", False)`` -- most of NetBox's settings."""
+
+    def test_an_opaque_object_resolves_to_the_default(self) -> None:
+        scope = module_scope("configuration = load_configuration()")
+        result = value_of("getattr(configuration, 'DEBUG', False)", scope)
+        assert result.literal is False
+        assert result.env_dependent
+
+    def test_no_default_stays_unknown(self) -> None:
+        # NetBox marks these "# Required": getattr raises if absent, so there
+        # is no value to fall back to.
+        scope = module_scope("configuration = load_configuration()")
+        assert value_of("getattr(configuration, 'ALLOWED_HOSTS')", scope).is_unknown
+
+    def test_a_visible_namespace_wins_over_the_default(self) -> None:
+        scope = module_scope("configuration = load_configuration()")
+        scope.attributes["configuration"] = {"DEBUG": Value.of(True)}
+        result = value_of("getattr(configuration, 'DEBUG', False)", scope)
+        assert result.literal is True
+        assert not result.env_dependent
+
+    def test_a_visible_namespace_without_the_attribute_uses_the_default(self) -> None:
+        scope = module_scope("configuration = load_configuration()")
+        scope.attributes["configuration"] = {"OTHER": Value.of(1)}
+        result = value_of("getattr(configuration, 'DEBUG', False)", scope)
+        assert result.literal is False
+        assert not result.env_dependent
+
+    def test_a_visible_namespace_without_a_default_is_unknown(self) -> None:
+        scope = module_scope("configuration = load_configuration()")
+        scope.attributes["configuration"] = {"OTHER": Value.of(1)}
+        assert value_of("getattr(configuration, 'DEBUG')", scope).is_unknown
+
+    def test_an_imported_module_namespace(self) -> None:
+        scope = module_scope("import myproject.conf")
+        scope.attributes["myproject"] = {"DEBUG": Value.of(True)}
+        assert literal("getattr(myproject, 'DEBUG', False)", scope) is True
+
+    def test_getattr_on_a_resolved_value_is_unknown(self) -> None:
+        scope = Scope(names={"HOSTS": Value.of(["a"])})
+        assert value_of("getattr(HOSTS, 'DEBUG', False)", scope).is_unknown
+
+    def test_a_dynamic_attribute_name_is_unknown(self) -> None:
+        scope = module_scope("configuration = load_configuration()")
+        assert value_of("getattr(configuration, MYSTERY, False)", scope).is_unknown
+
+    def test_the_default_is_evaluated_not_copied(self) -> None:
+        scope = module_scope("configuration = load_configuration()")
+        assert literal("getattr(configuration, 'PATH', 'a' + 'b')", scope) == "ab"
+
+    def test_an_unresolvable_default_stays_unknown(self) -> None:
+        scope = module_scope("configuration = load_configuration()")
+        assert value_of("getattr(configuration, 'X', MYSTERY)", scope).is_unknown
+
+    def test_a_shadowed_getattr_is_not_treated_as_the_builtin(self) -> None:
+        scope = Scope(names={"getattr": Value.of("shadowed")})
+        assert value_of("getattr(configuration, 'DEBUG', True)", scope).is_unknown
+
+    def test_taint_survives_wrapping(self) -> None:
+        scope = module_scope("configuration = load_configuration()")
+        result = value_of("getattr(configuration, 'BASE_PATH', '/a/').strip('/')", scope)
+        assert result.literal == "a"
+        assert result.env_dependent
