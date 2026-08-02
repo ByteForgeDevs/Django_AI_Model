@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "djaudit"
+version = "0.1.0"
+description = "Django-aware static analysis: security, DRF authorization, ORM performance, migration safety and database portability."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "ByteForgeDevs" }]
+keywords = ["django", "static-analysis", "security", "sarif", "linter"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Django",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "typer>=0.15",
+    "rich>=13.9",
+]
+
+[project.scripts]
+djaudit = "djaudit.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/djaudit"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ANN", "PTH", "C4", "TID", "PL"]
+ignore = ["ANN401", "PLR0911", "PLR0912", "PLR2004"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "PLR2004", "PLC0415"]
+# Builder-style APIs: many keyword arguments is the interface, not a smell.
+"src/djaudit/cli.py" = ["PLR0913", "PLR0917"]
+"src/djaudit/engine.py" = ["PLR0913", "PLR0917"]
+"src/djaudit/registry.py" = ["PLR0913", "PLR0917"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests", "scripts"]
+exclude = "tests/fixtures"
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+norecursedirs = ["tests/fixtures"]

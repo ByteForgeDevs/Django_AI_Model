@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    name: lint, types, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync
+
+      - name: ruff
+        run: uv run ruff check .
+
+      - name: mypy
+        run: uv run mypy
+
+      - name: pytest
+        run: uv run pytest
+
+  evaluation:
+    name: recall gate (planted-defect fixtures)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync
+
+      # Rules interact. Without a scored gate, a new rule silently breaks an
+      # existing one's grading and nobody notices until a user does.
+      - name: score against fixture manifests
+        run: |
+          uv run djaudit eval tests/fixtures/vulnerable_project
+          uv run djaudit eval tests/fixtures/overridden_project
+
+  false_positives:
+    name: precision gate (${{ matrix.target.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: healthchecks
+            repo: healthchecks/healthchecks
+            sha: 5086d282ea33831e8c86eb9d0802dc2602c66ef7
+          - name: netbox
+            repo: netbox-community/netbox
+            sha: 4877d1167f4e20c0507bc902ee4c708e20f92e36
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync
+
+      # Pinned by SHA and never vendored: keeps our repository licence-clean and
+      # the benchmark reproducible.
+      - name: clone target
+        run: |
+          git clone --quiet https://github.com/${{ matrix.target.repo }}.git target
+          git -C target checkout --quiet ${{ matrix.target.sha }}
+
+      # These repositories are mature and well audited, so essentially anything
+      # we report is a false positive. That makes them a precision benchmark and
+      # a crash-resistance test, not a recall benchmark -- recall is what the
+      # planted-defect fixtures measure.
+      - name: audit and require zero findings
+        run: |
+          uv run djaudit run target \
+            --format json \
+            --output report.json \
+            --min-severity info \
+            --min-confidence tentative
+          uv run python scripts/check_precision.py report.json
+
+      - name: upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ matrix.target.name }}
+          path: report.json
