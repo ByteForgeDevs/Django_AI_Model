@@ -25,7 +25,7 @@ arbitrary untrusted source:
 from __future__ import annotations
 
 import ast
-from collections.abc import Callable
+from collections.abc import Callable, ItemsView, KeysView, ValuesView
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -881,14 +881,15 @@ class Evaluator:
         return Value.of(result, env_dependent=any(arg.env_dependent for arg in args))
 
     def _eval_method_call(self, node: ast.Call, func: ast.Attribute, depth: int) -> Value:
-        if func.attr not in _SAFE_STR_METHODS:
-            return Value.unknown(f"unsupported method: {func.attr}")
-
         receiver = self._eval(func.value, depth)
         if not receiver.is_literal:
             return Value.unknown("unresolvable receiver")
-        if not isinstance(receiver.literal, str | list | tuple):
+
+        allowed = _SAFE_METHODS.get(type(receiver.literal))
+        if allowed is None:
             return Value.unknown("method on an unsupported type")
+        if func.attr not in allowed:
+            return Value.unknown(f"unsupported method: {func.attr}")
 
         args = self._eval_all(node.args, depth)
         kwargs = {kw.arg: self._eval(kw.value, depth) for kw in node.keywords if kw.arg}
@@ -900,6 +901,11 @@ class Evaluator:
             result = method(*[a.literal for a in args], **{k: v.literal for k, v in kwargs.items()})
         except Exception:  # target code: any failure means 'we cannot tell'
             return Value.unknown(f"{func.attr}() failed")
+
+        if isinstance(result, KeysView | ValuesView | ItemsView):
+            # A view is not a literal we can store, and materialising it keeps
+            # membership and iteration behaving the same way.
+            result = list(result)
 
         if isinstance(result, str) and len(result) > MAX_SIZE:
             return Value.unknown("result too large to evaluate")
@@ -1014,7 +1020,7 @@ _SAFE_BUILTINS: dict[str, Any] = {
     "sorted": sorted,
 }
 
-_SAFE_STR_METHODS = frozenset(
+_STR_METHODS = frozenset(
     {
         "format",
         "join",
@@ -1032,6 +1038,18 @@ _SAFE_STR_METHODS = frozenset(
         "removesuffix",
     }
 )
+
+# Settings modules read structured configuration back out of dictionaries, so
+# a resolver that stops at dict.get() loses whole blocks of derived settings.
+_DICT_METHODS = frozenset({"get", "copy", "keys", "values", "items"})
+_SEQUENCE_METHODS = frozenset({"count", "index", "copy"})
+
+_SAFE_METHODS: dict[type, frozenset[str]] = {
+    str: _STR_METHODS,
+    dict: _DICT_METHODS,
+    list: _SEQUENCE_METHODS | {"join"},
+    tuple: _SEQUENCE_METHODS,
+}
 
 
 def evaluate(node: ast.expr, scope: Scope | None = None) -> Value:

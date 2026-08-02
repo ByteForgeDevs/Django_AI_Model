@@ -786,3 +786,47 @@ class TestAttributeIndirection:
         result = value_of("getattr(configuration, 'BASE_PATH', '/a/').strip('/')", scope)
         assert result.literal == "a"
         assert result.env_dependent
+
+
+class TestContainerMethods:
+    def test_dict_get_with_a_default(self) -> None:
+        scope = Scope(names={"REDIS": Value.of({"HOST": "db"})})
+        assert literal("REDIS.get('HOST', 'localhost')", scope) == "db"
+
+    def test_dict_get_falls_back(self) -> None:
+        scope = Scope(names={"REDIS": Value.of({})})
+        assert literal("REDIS.get('HOST', 'localhost')", scope) == "localhost"
+
+    def test_dict_get_without_a_default_is_none(self) -> None:
+        scope = Scope(names={"REDIS": Value.of({})})
+        assert literal("REDIS.get('URL')", scope) is None
+
+    def test_dict_keys_materialise_to_a_list(self) -> None:
+        scope = Scope(names={"D": Value.of({"a": 1, "b": 2})})
+        assert literal("D.keys()", scope) == ["a", "b"]
+
+    def test_dict_items_materialise(self) -> None:
+        scope = Scope(names={"D": Value.of({"a": 1})})
+        assert literal("list(D.items())", scope) == [("a", 1)]
+
+    def test_taint_propagates_through_get(self) -> None:
+        scope = module_scope("configuration = load_configuration()")
+        result = value_of("getattr(configuration, 'REDIS', {}).get('HOST', 'localhost')", scope)
+        assert result.literal == "localhost"
+        assert result.env_dependent
+
+    def test_an_unsupported_dict_method_is_unknown(self) -> None:
+        scope = Scope(names={"D": Value.of({"a": 1})})
+        assert value_of("D.pop('a')", scope).is_unknown
+
+    def test_a_string_method_on_a_dict_is_unknown(self) -> None:
+        scope = Scope(names={"D": Value.of({"a": 1})})
+        assert value_of("D.upper()", scope).is_unknown
+
+    def test_list_index(self) -> None:
+        scope = Scope(names={"X": Value.of(["a", "b"])})
+        assert literal("X.index('b')", scope) == 1
+
+    def test_a_mutating_list_method_is_unknown(self) -> None:
+        scope = Scope(names={"X": Value.of(["a"])})
+        assert value_of("X.append('b')", scope).is_unknown
