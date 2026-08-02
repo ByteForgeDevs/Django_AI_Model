@@ -105,6 +105,31 @@ def dotted_name(node: ast.expr) -> str | None:
     return ".".join(reversed(parts))
 
 
+@dataclass(frozen=True, slots=True)
+class StarImport:
+    """A ``from x import *``, keeping the relative level.
+
+    ``from .base import *`` and ``from base import *`` name different modules,
+    and dropping the level makes a split-settings layout unresolvable.
+    """
+
+    module: str
+    level: int = 0
+
+    @property
+    def is_relative(self) -> bool:
+        return self.level > 0
+
+
+def star_imports(tree: ast.Module) -> list[StarImport]:
+    """Every ``from x import *`` in source order, with relative levels intact."""
+    return [
+        StarImport(module=node.module or "", level=node.level)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names)
+    ]
+
+
 def star_import_targets(tree: ast.Module) -> list[str]:
     """Modules pulled in via ``from x import *``.
 

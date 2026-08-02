@@ -165,7 +165,8 @@ def settings_module_from_manage(ctx: ProjectContext, manage_py: Path) -> str | N
     return None
 
 
-def _resolve_dotted(root: Path, dotted: str) -> Path | None:
+def resolve_dotted(root: Path, dotted: str) -> Path | None:
+    """Map a dotted module path to a file inside ``root``."""
     relative = Path(*dotted.split("."))
     for candidate in (root / relative.with_suffix(".py"), root / relative / "__init__.py"):
         if candidate.is_file():
@@ -197,7 +198,7 @@ def discover_settings_modules(
     """
     candidates = [p for p in files if _is_settings_candidate(p)]
     if entrypoint:
-        resolved = _resolve_dotted(ctx.root, entrypoint)
+        resolved = resolve_dotted(ctx.root, entrypoint)
         if resolved is not None and resolved not in candidates:
             candidates.append(resolved)
 
@@ -216,7 +217,7 @@ def discover_settings_modules(
                 confirmed.add(path)
                 break
 
-    entry_path = _resolve_dotted(ctx.root, entrypoint) if entrypoint else None
+    entry_path = resolve_dotted(ctx.root, entrypoint) if entrypoint else None
     return tuple(
         sorted(
             (
