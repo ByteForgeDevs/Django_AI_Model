@@ -407,6 +407,15 @@ Static resolution of the expression forms that actually appear in Django setting
 - **1.2.6** — Comprehensions, `if`/`else` expressions, and boolean operators, producing `CONDITIONAL` with both branch values.
 - **1.2.7** — Call safety: a hard recursion and node budget so a pathological file cannot hang the evaluator.
 
+*Done when:* the evaluator resolves a majority of real settings on both
+benchmark targets. **Measured on completion: 93% of Healthchecks settings
+(95/102) and 67% of NetBox settings (134/199), in 3ms per module.** Spot-checked
+for correctness rather than count: Healthchecks resolves `DEBUG` to `True` and
+`SECRET_KEY` to its `"---"` placeholder, NetBox resolves `DEBUG`,
+`SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE` and `SECURE_SSL_REDIRECT` to
+`False`, and NetBox's two `# Required` settings stay unresolved rather than
+being guessed.
+
 ### Step 1.3 — Settings resolver with provenance
 
 - **1.3.1** — `ResolvedSetting`: name, effective value, defining module, line, whether conditional, and the full override chain.
@@ -845,7 +854,7 @@ conversation.
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
-| 1 | Settings and deployment hardening | 10 | 54 | In progress — Steps 1.0, 1.1 done |
+| 1 | Settings and deployment hardening | 10 | 54 | In progress — Steps 1.0, 1.1, 1.2 done |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
