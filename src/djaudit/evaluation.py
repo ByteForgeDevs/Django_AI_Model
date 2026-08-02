@@ -164,14 +164,25 @@ class EvalReport:
         return lines
 
 
-def evaluate(project: Path, manifest_path: Path | None = None) -> EvalReport:
+def evaluate(
+    project: Path, manifest_path: Path | None = None, include: set[str] | None = None
+) -> EvalReport:
     """Audit ``project`` and score the result against its manifest.
 
     Thresholds are opened all the way up: an evaluation must see everything the
     rules produce, including tentative findings that a normal run would hide.
+
+    ``include`` narrows the run to specific rule ids, which is how one rule's
+    recall is measured without the rest of the catalogue's findings counting
+    against it as false positives.
     """
     manifest = Manifest.load(manifest_path or project / MANIFEST_NAME)
-    result = engine.run(project, min_severity=Severity.INFO, min_confidence=Confidence.TENTATIVE)
+    result = engine.run(
+        project,
+        include=include,
+        min_severity=Severity.INFO,
+        min_confidence=Confidence.TENTATIVE,
+    )
 
     report = EvalReport(project=project)
     remaining = list(result.findings)

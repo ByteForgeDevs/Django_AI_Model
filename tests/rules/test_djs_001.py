@@ -23,9 +23,11 @@ def build(tmp_path: Path, files: dict[str, str]) -> Path:
 
 
 def audit(root: Path):
-    return engine.run(
+    """Only DJS-001. Other rules fire on these projects and are not the subject."""
+    findings = engine.run(
         root, min_severity=Severity.INFO, min_confidence=Confidence.TENTATIVE
     ).findings
+    return [f for f in findings if f.rule_id == "DJS-001"]
 
 
 class TestProductionReachable:

@@ -7,6 +7,11 @@ import pytest
 from djaudit.evaluation import Expectation, Manifest, ManifestError, evaluate
 from djaudit.models import Confidence, Severity
 
+ONLY_DEBUG = {"DJS-001"}
+"""Scoring arithmetic is the subject here, so the run is pinned to one rule.
+Otherwise every rule added to the catalogue changes these numbers and the test
+teaches us to edit the expected value rather than read the failure."""
+
 
 class TestRegressionGate:
     """These two assertions are the actual CI gate for rule quality."""
@@ -32,13 +37,13 @@ class TestScoring:
                 {
                     "expected": [
                         {"rule_id": "DJS-001", "file": "config/settings/production.py", "line": 9},
-                        {"rule_id": "DJS-001", "file": "config/settings/base.py", "line": 13},
+                        {"rule_id": "DJS-001", "file": "config/settings/base.py", "line": 14},
                         {"rule_id": "DJP-001", "file": "app/models.py", "line": 1},
                     ]
                 }
             )
         )
-        report = evaluate(vulnerable_project, manifest)
+        report = evaluate(vulnerable_project, manifest, include=ONLY_DEBUG)
 
         assert not report.passed
         assert report.false_negatives == 1
@@ -56,7 +61,7 @@ class TestScoring:
                 }
             )
         )
-        report = evaluate(vulnerable_project, manifest)
+        report = evaluate(vulnerable_project, manifest, include=ONLY_DEBUG)
 
         assert not report.passed
         assert report.false_positives == 1
@@ -78,7 +83,7 @@ class TestScoring:
                             "line": 9,
                             "severity": "low",
                         },
-                        {"rule_id": "DJS-001", "file": "config/settings/base.py", "line": 13},
+                        {"rule_id": "DJS-001", "file": "config/settings/base.py", "line": 14},
                     ]
                 }
             )

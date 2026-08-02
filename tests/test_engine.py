@@ -11,11 +11,18 @@ from djaudit.context import ProjectContext
 from djaudit.models import Confidence, Family, Finding, Severity, Tier
 from djaudit.registry import Rule, RuleMeta
 
+ONLY_DEBUG = {"DJS-001"}
+"""These tests are about engine mechanics -- thresholds, baselines, isolation --
+and only borrow a fixture to have something to filter. Pinning them to one rule
+keeps them from breaking every time the catalogue grows, which would train us to
+update the number rather than read the failure."""
+
 
 class TestRunAgainstFixtures:
     def test_reports_both_planted_defects(self, vulnerable_project):
         result = engine.run(
             vulnerable_project,
+            include=ONLY_DEBUG,
             min_severity=Severity.INFO,
             min_confidence=Confidence.TENTATIVE,
         )
@@ -47,19 +54,22 @@ class TestRunAgainstFixtures:
 
 class TestThresholds:
     def test_severity_threshold_hides_and_counts(self, vulnerable_project):
-        result = engine.run(vulnerable_project, min_severity=Severity.CRITICAL)
+        result = engine.run(vulnerable_project, include=ONLY_DEBUG, min_severity=Severity.CRITICAL)
         assert len(result.findings) == 1
         assert result.filtered_threshold == 1
 
     def test_confidence_threshold_hides_and_counts(self, overridden_project):
         result = engine.run(
-            overridden_project, min_severity=Severity.INFO, min_confidence=Confidence.FIRM
+            overridden_project,
+            include=ONLY_DEBUG,
+            min_severity=Severity.INFO,
+            min_confidence=Confidence.FIRM,
         )
         assert result.findings == []
         assert result.filtered_threshold == 1
 
     def test_totals_survive_filtering_so_silence_is_explainable(self, vulnerable_project):
-        result = engine.run(vulnerable_project, min_severity=Severity.CRITICAL)
+        result = engine.run(vulnerable_project, include=ONLY_DEBUG, min_severity=Severity.CRITICAL)
         assert result.total_raw == 2
 
 
@@ -71,7 +81,7 @@ class TestSelection:
 
     def test_ignoring_a_rule_silences_it(self, vulnerable_project):
         result = engine.run(vulnerable_project, exclude={"DJS-001"}, min_severity=Severity.INFO)
-        assert result.findings == []
+        assert not any(f.rule_id == "DJS-001" for f in result.findings)
 
     def test_live_tier_rules_are_skipped_without_a_live_context(self, vulnerable_project):
         result = engine.run(vulnerable_project, tiers={Tier.LIVE})
@@ -106,19 +116,29 @@ class TestSuppression:
 
 class TestBaselineIntegration:
     def test_baselined_findings_are_hidden_but_counted(self, vulnerable_project):
-        first = engine.run(vulnerable_project, min_severity=Severity.INFO)
+        first = engine.run(vulnerable_project, include=ONLY_DEBUG, min_severity=Severity.INFO)
         baseline = Baseline.from_findings(first.findings)
 
-        second = engine.run(vulnerable_project, min_severity=Severity.INFO, baseline=baseline)
+        second = engine.run(
+            vulnerable_project,
+            include=ONLY_DEBUG,
+            min_severity=Severity.INFO,
+            baseline=baseline,
+        )
 
         assert second.findings == []
         assert second.suppressed_baseline == 2
 
     def test_new_findings_still_surface_through_a_baseline(self, vulnerable_project):
-        first = engine.run(vulnerable_project, min_severity=Severity.INFO)
+        first = engine.run(vulnerable_project, include=ONLY_DEBUG, min_severity=Severity.INFO)
         partial = Baseline.from_findings(first.findings[:1])
 
-        second = engine.run(vulnerable_project, min_severity=Severity.INFO, baseline=partial)
+        second = engine.run(
+            vulnerable_project,
+            include=ONLY_DEBUG,
+            min_severity=Severity.INFO,
+            baseline=partial,
+        )
 
         assert len(second.findings) == 1
         assert second.suppressed_baseline == 1
@@ -151,7 +171,9 @@ class TestRuleIsolation:
 
         assert "DJX-999" in result.rule_errors
         assert "boom" in result.rule_errors["DJX-999"]
-        assert len(result.findings) == 2
+        # The surviving rules still produced their findings, which is the point:
+        # one bad rule must not cost the user every other rule's results.
+        assert {f.rule_id for f in result.findings} == {"DJS-001", "DJS-002"}
 
 
 class TestEmptyProject:

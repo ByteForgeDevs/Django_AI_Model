@@ -54,9 +54,9 @@ class TestRuleDescriptors:
 
     def test_per_finding_severity_still_surfaces_on_the_result(self, overridden_project):
         """Grading is not lost by the change above -- it lives on the result."""
-        result = run(overridden_project)
-        sarif_result = sarif.build(result)["runs"][0]["results"][0]
-        assert sarif_result["level"] == "note"
+        results = sarif.build(run(overridden_project))["runs"][0]["results"]
+        downgraded = next(r for r in results if r["ruleId"] == "DJS-001")
+        assert downgraded["level"] == "note"
 
     def test_result_indices_point_at_the_right_descriptor(self, vulnerable_project):
         run_data = sarif.build(run(vulnerable_project))["runs"][0]

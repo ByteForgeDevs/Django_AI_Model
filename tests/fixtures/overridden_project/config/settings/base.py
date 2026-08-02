@@ -8,6 +8,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
+# PLANTED DEFECT: a key committed to the repository. Not a real secret.
 SECRET_KEY = "django-insecure-fixture-key-not-a-real-secret"
 
 DEBUG = True

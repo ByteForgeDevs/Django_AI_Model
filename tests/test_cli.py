@@ -12,6 +12,12 @@ from djaudit.triage import Triage, Verdict
 
 runner = CliRunner()
 
+ONLY_DEBUG = ["--select", "DJS-001"]
+"""CLI mechanics -- exit codes, output files, baselines -- are the subject of
+these tests; the fixtures are only a source of findings. Pinning the run to one
+rule keeps the assertions about the mechanism rather than about how many rules
+the catalogue happens to contain."""
+
 
 class TestExitCodes:
     def test_findings_at_or_above_fail_on_exit_one(self, vulnerable_project):
@@ -19,11 +25,25 @@ class TestExitCodes:
         assert result.exit_code == EXIT_FINDINGS
 
     def test_raising_fail_on_above_the_worst_finding_exits_zero(self, overridden_project):
-        result = runner.invoke(app, ["run", str(overridden_project)])
+        result = runner.invoke(app, ["run", str(overridden_project), *ONLY_DEBUG])
         assert result.exit_code == EXIT_OK
 
-    def test_findings_below_fail_on_still_exit_zero(self, vulnerable_project):
-        result = runner.invoke(app, ["run", str(vulnerable_project), "--ignore", "DJS-001"])
+    def test_findings_below_fail_on_still_exit_zero(self, overridden_project):
+        result = runner.invoke(
+            app,
+            [
+                "run",
+                str(overridden_project),
+                *ONLY_DEBUG,
+                "--min-severity",
+                "info",
+                "--min-confidence",
+                "tentative",
+                "--fail-on",
+                "high",
+            ],
+        )
+        assert "DJS-001" in result.output, result.output
         assert result.exit_code == EXIT_OK
 
     def test_a_bad_path_is_a_tool_error_not_a_finding(self, tmp_path):
@@ -46,7 +66,9 @@ class TestExitCodes:
 class TestOutputFormats:
     def test_json_output_is_parseable(self, vulnerable_project, tmp_path):
         out = tmp_path / "out.json"
-        runner.invoke(app, ["run", str(vulnerable_project), "-f", "json", "-o", str(out)])
+        runner.invoke(
+            app, ["run", str(vulnerable_project), *ONLY_DEBUG, "-f", "json", "-o", str(out)]
+        )
         assert len(json.loads(out.read_text())["findings"]) == 2
 
     def test_sarif_output_is_parseable(self, vulnerable_project, tmp_path):
@@ -99,7 +121,10 @@ class TestBaselineWorkflow:
     ):
         """Otherwise lowering a threshold later resurfaces old findings as 'new'."""
         baseline = tmp_path / "baseline.json"
-        runner.invoke(app, ["run", str(overridden_project), "--write-baseline", str(baseline)])
+        runner.invoke(
+            app,
+            ["run", str(overridden_project), *ONLY_DEBUG, "--write-baseline", str(baseline)],
+        )
         assert len(Baseline.load(baseline)) == 1
 
 
@@ -172,7 +197,7 @@ class TestBenchmarkCommand:
         assert result.exit_code == EXIT_FINDINGS
 
         written = Triage.load(path)
-        assert len(written) == 2
+        assert len(written) == 3
         assert {e.verdict for e in written.entries} == {Verdict.FALSE_POSITIVE}
 
     def test_update_never_overwrites_an_existing_verdict(self, vulnerable_project, tmp_path):
@@ -243,7 +268,7 @@ class TestJobSummary:
         text = out.read_text()
         assert "## Precision — fixture" in text
         assert "❌ fail" in text
-        assert "Untriaged (2)" in text
+        assert "Untriaged (3)" in text
         assert "--update" in text
 
     def test_summaries_append_rather_than_truncate(self, vulnerable_project, tmp_path):

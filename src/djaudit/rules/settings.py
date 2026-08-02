@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from djaudit.context import ProjectContext, SettingsModule, SettingsRole
 from djaudit.models import Confidence, Family, Finding, Severity, Tier
 from djaudit.registry import RuleMeta, register
-from djaudit.rules._base import SettingsRule
+from djaudit.rules._base import SettingGroup, SettingsRule
 from djaudit.settings import Definition, ResolvedSetting, SettingsView
 from djaudit.values import Value
 
@@ -36,6 +36,8 @@ def could_be_true(value: Value) -> bool:
 class DebugEnabled(SettingsRule):
     """``DEBUG`` can be true in a settings module that can reach production."""
 
+    setting = "DEBUG"
+
     meta = RuleMeta(
         id="DJS-001",
         title="DEBUG enabled in a production-reachable settings module",
@@ -62,10 +64,8 @@ class DebugEnabled(SettingsRule):
         ),
     )
 
-    def inspect(
-        self, ctx: ProjectContext, module: SettingsModule, view: SettingsView
-    ) -> Iterator[Finding]:
-        resolved = view.get("DEBUG")
+    def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
+        resolved = group.setting
         # An unset DEBUG is already False, and an unresolvable one is not
         # evidence of anything. Only an assignment we could read counts.
         if not resolved.is_explicit or not could_be_true(resolved.value):
@@ -73,16 +73,16 @@ class DebugEnabled(SettingsRule):
         culprit = _culprit(resolved)
         if culprit is None:
             return
-        yield self._build(ctx, module, resolved, culprit, _overridden(self.views, module))
+        yield self._build(ctx, group, culprit, _overridden(self.views, group.module))
 
     def _build(
         self,
         ctx: ProjectContext,
-        module: SettingsModule,
-        resolved: ResolvedSetting,
+        group: SettingGroup,
         culprit: Definition,
         overridden: bool,
     ) -> Finding:
+        module = group.module
         severity, ceiling = _GRADING.get(module.role, (Severity.HIGH, Confidence.FIRM))
         caveats: tuple[str, ...] = ()
 
@@ -98,11 +98,10 @@ class DebugEnabled(SettingsRule):
 
         return self.report(
             ctx,
-            module,
-            resolved,
+            group,
             message=(
                 f"DEBUG can be True in {where}, classified as a "
-                f"{module.role.value} settings module{inherited}"
+                f"{module.role.value} settings module{inherited}{group.describe_reach()}"
             ),
             severity=severity,
             ceiling=ceiling,

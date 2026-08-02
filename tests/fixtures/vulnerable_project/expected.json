@@ -1,6 +1,13 @@
 {
-  "description": "Split settings with DEBUG left on. Production is a real critical finding; base is a real high finding because nothing overrides it; development is a control case that must never be reported.",
+  "description": "Split settings with DEBUG left on. Production is a real critical finding; base is a real high finding because nothing overrides it; development is a control case that must never be reported. SECRET_KEY is hardcoded in base.py and inherited by production, so it is reported once against the module with most to lose rather than once per environment.",
   "expected": [
+    {
+      "rule_id": "DJS-001",
+      "file": "config/settings/base.py",
+      "line": 14,
+      "severity": "high",
+      "confidence": "firm"
+    },
     {
       "rule_id": "DJS-001",
       "file": "config/settings/production.py",
@@ -9,11 +16,11 @@
       "confidence": "certain"
     },
     {
-      "rule_id": "DJS-001",
+      "rule_id": "DJS-002",
       "file": "config/settings/base.py",
-      "line": 13,
-      "severity": "high",
-      "confidence": "firm"
+      "line": 12,
+      "severity": "critical",
+      "confidence": "certain"
     }
   ],
   "must_not_report": [
