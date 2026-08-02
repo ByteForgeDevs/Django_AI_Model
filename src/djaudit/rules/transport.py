@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from djaudit.models import Confidence, Family, Severity, Tier
 from djaudit.registry import RuleMeta, register
-from djaudit.rules._base import FlagRule
+from djaudit.rules._base import FlagRule, InsecureDefaultRule, could_be_under
+from djaudit.settings import ResolvedSetting
+from djaudit.values import Value
 
 _HTTPS_CHECKLIST = "https://docs.djangoproject.com/en/stable/howto/deployment/checklist/#https"
 
@@ -179,5 +181,93 @@ class SessionCookieNotHttpOnly(FlagRule):
         references=(
             "https://docs.djangoproject.com/en/stable/ref/settings/#session-cookie-httponly",
             "https://owasp.org/www-community/HttpOnly",
+        ),
+    )
+
+
+ONE_YEAR = 31_536_000
+"""The floor the HSTS preload list requires, and the usual target once a site
+has finished ramping up. Chosen because it is a published requirement rather
+than a number we picked."""
+
+_HSTS_DOCS = (
+    "https://docs.djangoproject.com/en/stable/ref/middleware/#http-strict-transport-security"
+)
+
+
+def _duration(seconds: int) -> str:
+    for size, unit in ((86400, "day"), (3600, "hour"), (60, "minute")):
+        if seconds >= size:
+            count = seconds / size
+            rendered = f"{count:.0f}" if count == int(count) else f"{count:.1f}"
+            return f"{seconds:,} seconds (about {rendered} {unit}{'' if rendered == '1' else 's'})"
+    return f"{seconds:,} seconds"
+
+
+@register
+class HstsNotEnforced(InsecureDefaultRule):
+    """``SECURE_HSTS_SECONDS`` is unset, zero, or shorter than a year."""
+
+    setting = "SECURE_HSTS_SECONDS"
+    ceiling = Confidence.FIRM
+    """A CDN or nginx may be sending the header instead, and that is a very
+    common place to put it. We cannot see one from here, so we never claim
+    certainty that the header is missing from the response."""
+
+    corrected_as = "sets a longer max-age"
+
+    def insecure(self, value: Value) -> bool:
+        return could_be_under(value, ONE_YEAR)
+
+    def describe_state(self, resolved: ResolvedSetting) -> str:
+        literal = resolved.value.literal
+        if resolved.is_default or literal == 0:
+            return "is never set" if resolved.is_default else "is 0"
+        if isinstance(literal, int) and not isinstance(literal, bool):
+            return f"is {_duration(literal)}, short of the one year"
+        return f"is {resolved.value.describe()}"
+
+    def consequence_for(self, resolved: ResolvedSetting) -> str:
+        literal = resolved.value.literal
+        if isinstance(literal, int) and not isinstance(literal, bool) and 0 < literal < ONE_YEAR:
+            return (
+                "the browser stops enforcing HTTPS again that soon after its last visit, "
+                "and a visitor who returns after the window has lapsed can still be "
+                "stripped back to plain HTTP on their first request -- which is usually a "
+                "ramp-up that was started and never finished"
+            )
+        return (
+            "no Strict-Transport-Security header is sent and the browser is willing to try "
+            "plain HTTP first, which is the request an attacker on the network path needs "
+            "in order to intercept it before any redirect can happen"
+        )
+
+    meta = RuleMeta(
+        id="DJS-007",
+        title="HSTS not enforced for at least a year",
+        family=Family.DJS,
+        severity=Severity.LOW,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "Redirecting HTTP to HTTPS still leaves the very first request in the clear, "
+            "and that request is the one an attacker needs. HSTS closes the gap by telling "
+            "the browser never to use plain HTTP for this host again. Low severity rather "
+            "than high because the header is very often set at nginx, a load balancer or a "
+            "CDN instead, and from inside the repository we cannot see that."
+        ),
+        remediation=(
+            "Set SECURE_HSTS_SECONDS = 31536000 once the site is served over HTTPS "
+            "everywhere, including every subdomain if SECURE_HSTS_INCLUDE_SUBDOMAINS is on. "
+            "Ramp up rather than jumping straight there -- a few minutes, then a day, then "
+            "a year -- because the header is sticky: a browser that has seen it refuses "
+            "plain HTTP for the full max-age and there is no way to recall it early. If a "
+            "proxy in front of Django already sends the header, set it there and suppress "
+            "this finding instead of sending it twice."
+        ),
+        references=(
+            _HTTPS_CHECKLIST,
+            _HSTS_DOCS,
+            "https://docs.djangoproject.com/en/stable/ref/settings/#secure-hsts-seconds",
         ),
     )

@@ -599,6 +599,36 @@ than after twenty-six of them disagree, is cheaper.
   NetBox exposes the setting as a documented operator knob — `accepted_risk`.
   Precision stays 100% on both.
 - **1.5.2** — `DJS-007` `SECURE_HSTS_SECONDS` absent or below one year.
+
+  **Done.** The first numeric rule, so `FlagRule`'s body was lifted into
+  `InsecureDefaultRule` — the split-settings handling is the part that is easy
+  to get subtly wrong and not worth debugging twice — leaving `FlagRule` as
+  `insecure = could_be_off`. `DJS-001`'s fingerprint and all recorded verdicts
+  survived the move.
+
+  The threshold is one year because that is the HSTS preload list's published
+  requirement, not a number we picked. `could_be_under` treats anything that is
+  not an `int` at or above it as too short, which folds in `None`, strings and
+  the `True` trap — `True` is an `int` in Python and is not a duration.
+
+  This rule is deliberately the quietest in the step: `low` severity, ceiling
+  `firm`, so an unset value lands at `tentative` and stays out of a default run.
+  HSTS is the one header whose absence from Django settings is genuinely weak
+  evidence — nginx, load balancers and every CDN can send it, doing so is
+  common, and none of it is visible from here.
+
+  Two messages, not one. Absent or `0` means HSTS is off; a non-zero value under
+  a year is described as a ramp-up that was started and never finished, because
+  Django's own advice is to ramp. The remediation says plainly that the header
+  is sticky and cannot be recalled early — this is the only advice we ship that
+  can take a site offline if followed carelessly, and a test pins that wording.
+
+  Both targets `accepted_risk`: healthchecks mentions HSTS nowhere at all,
+  NetBox exposes it as a documented operator knob. Precision 100% on both.
+
+  Also fixed a test that had broken twice as the family grew, each time because
+  a new rule needed the shared fixture to set whatever setting the test had
+  picked as its example of "unset". It now builds its own project.
 - **1.5.3** — `DJS-008` `SECURE_HSTS_INCLUDE_SUBDOMAINS` disabled while HSTS is on.
 - **1.5.4** — `DJS-009` `SESSION_COOKIE_SECURE` disabled.
 

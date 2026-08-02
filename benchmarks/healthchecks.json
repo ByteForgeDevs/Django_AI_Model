@@ -55,6 +55,16 @@
       "note": "Correct about the source and defensible in practice. Healthchecks reads SECURE_PROXY_SSL_HEADER from the environment, which says plainly that the intended deployment puts a TLS-terminating proxy in front, and such a proxy is the normal and better place to perform the HTTP-to-HTTPS redirect -- doing it in Django means the plain-HTTP request has already reached the application. This is precisely the case the rule reports at tentative rather than firm, because we cannot see the proxy from inside the repository. Unlike the two cookie flags above, delegating this one loses nothing.",
       "reviewed": "2026-08-02",
       "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "d29e1d665c2a9ae6",
+      "rule_id": "DJS-007",
+      "verdict": "accepted_risk",
+      "file": "hc/settings.py",
+      "line": 1,
+      "note": "Correct, and quiet on purpose. Healthchecks mentions HSTS nowhere at all -- not in settings, not in its nginx or Docker configuration, not in its documentation. HSTS is the one security header whose absence from the Django settings is weak evidence: nginx, a load balancer and every CDN can send Strict-Transport-Security, it is extremely common to set it there, and none of that is visible from inside the repository. The rule reports this at low/tentative for exactly that reason, which is why it does not appear in a default run. Recorded as accepted rather than a false positive because the statement is true -- Django is not sending the header -- and because a project that assumes the proxy is doing it and is wrong has no way to find out except by being attacked.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
     }
   ]
 }

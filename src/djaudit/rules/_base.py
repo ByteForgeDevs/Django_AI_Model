@@ -395,41 +395,69 @@ def could_be_off(value: Value) -> bool:
     return not (value.is_literal and value.literal is True)
 
 
-class FlagRule(SettingsRule):
-    """A setting that must be ``True`` and defaults to ``False``.
+def could_be_under(value: Value, threshold: int) -> bool:
+    """Whether a numeric setting is below ``threshold`` on some path.
 
-    Django ships four of these -- ``SECURE_SSL_REDIRECT``,
-    ``SESSION_COOKIE_SECURE``, ``CSRF_COOKIE_SECURE``,
-    ``SECURE_CONTENT_TYPE_NOSNIFF`` -- and they differ only in what they
-    protect and how confidently we can complain, so those are the only two
-    things a subclass supplies.
+    Anything that is not an integer at or above the threshold counts, which
+    folds in the cases that are not numbers at all: ``None``, a string, a
+    stray ``True``. None of those is a valid duration, so none of them is
+    evidence that the duration is long enough.
+    """
+    if value.is_conditional:
+        return any(could_be_under(branch, threshold) for branch in value.branches)
+    if not value.is_literal:
+        return True
+    literal = value.literal
+    return not (isinstance(literal, int) and not isinstance(literal, bool) and literal >= threshold)
+
+
+class InsecureDefaultRule(SettingsRule):
+    """A setting Django ships at an insecure value, which a project must raise.
+
+    The family shares everything except the question "is this value bad" --
+    the reporting, the wording, and above all the split-settings handling,
+    which is the part that is easy to get subtly wrong and expensive to debug
+    twice. Subclasses supply ``insecure()`` and a consequence.
     """
 
     consequence: str = ""
-    """What goes wrong while the flag is off, in the middle of a sentence."""
+    """What goes wrong while the setting is unraised, mid-sentence."""
+
+    corrected_as = "sets it"
+    """How to describe an heir that fixes the value, mid-sentence."""
+
+    @abstractmethod
+    def insecure(self, value: Value) -> bool:
+        """Whether ``value`` is the unsafe one, on any branch."""
+        raise NotImplementedError
+
+    def describe_state(self, resolved: ResolvedSetting) -> str:
+        """The clause naming the current value, mid-sentence."""
+        # The shared policy already appends "the setting is never assigned, so
+        # Django's default applies", so saying it here too says it twice.
+        return "is never set" if resolved.is_default else f"is {resolved.value.describe()}"
+
+    def consequence_for(self, resolved: ResolvedSetting) -> str:
+        return self.consequence
 
     def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
         resolved = group.setting
-        if not could_be_off(resolved.value):
+        if not self.insecure(resolved.value):
             return
         if resolved.origin is Origin.UNRESOLVED:
             # Nothing was learned, so there is nothing to say. Reporting every
-            # unresolvable flag would bury the ones we actually read.
+            # unresolvable setting would bury the ones we actually read.
             return
 
-        where = group.module.dotted or ctx.rel(group.module.path)
-        # The shared policy already appends "the setting is never assigned, so
-        # Django's default applies", so saying it here too says it twice.
-        state = "is never set" if resolved.is_default else f"is {resolved.value.describe()}"
         severity: Severity | None = None
         ceiling: Confidence | None = None
         caveats: tuple[str, ...] = ()
-        corrected = self.overridden(group.module, lambda rs: not could_be_off(rs.value))
+        corrected = self.overridden(group.module, lambda rs: not self.insecure(rs.value))
         if corrected and resolved.is_default:
-            # The base never mentions the flag and every environment sets it.
-            # There is no wrong value here to fix -- this is simply where the
-            # flag does not live -- which is different from a base that writes
-            # an insecure value down and gets overridden anyway.
+            # The base never mentions the setting and every environment raises
+            # it. There is no wrong value here to fix -- this is simply where
+            # the setting does not live -- which is different from a base that
+            # writes an insecure value down and gets overridden anyway.
             return
 
         if corrected:
@@ -438,17 +466,34 @@ class FlagRule(SettingsRule):
             # than dropped, because the base can still be pointed at directly.
             severity, ceiling = Severity.LOW, Confidence.TENTATIVE
             caveats = (
-                f"every settings module that imports this one sets "
-                f"{resolved.name} = True, which should override it",
+                f"every settings module that imports this one "
+                f"{self.corrected_as}, which should override it",
             )
 
+        where = group.module.dotted or ctx.rel(group.module.path)
         yield self.report(
             ctx,
             group,
             message=(
-                f"{resolved.name} in {where}{group.describe_reach()} {state}, so {self.consequence}"
+                f"{resolved.name} in {where}{group.describe_reach()} "
+                f"{self.describe_state(resolved)}, so {self.consequence_for(resolved)}"
             ),
             severity=severity,
             ceiling=ceiling,
             extra_caveats=caveats,
         )
+
+
+class FlagRule(InsecureDefaultRule):
+    """A setting that must be ``True`` and defaults to ``False``.
+
+    Django ships several of these -- ``SECURE_SSL_REDIRECT``,
+    ``SESSION_COOKIE_SECURE``, ``CSRF_COOKIE_SECURE`` -- and they differ only
+    in what they protect and how confidently we can complain, so those are the
+    only two things a subclass supplies.
+    """
+
+    corrected_as = "sets it to True"
+
+    def insecure(self, value: Value) -> bool:
+        return could_be_off(value)

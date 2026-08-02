@@ -121,12 +121,23 @@ class TestLookup:
 
 
 class TestViewFallback:
-    def test_an_unset_setting_reports_the_django_default(self, overridden_project) -> None:
+    def test_an_unset_setting_reports_the_django_default(self, tmp_path) -> None:
+        """Built here rather than taken from a shared fixture on purpose.
+
+        This test broke twice while the DJS family grew, both times because a
+        rule needed the fixture to start setting whichever setting the test had
+        picked as its example of "unset". The claim is about the resolver, not
+        about any fixture, so it now owns its own project.
+        """
         from djaudit.discovery import build_context
         from djaudit.settings import resolve_all
 
-        ctx = build_context(overridden_project)
-        resolved = resolve_all(ctx)["config.settings.production"].get("SECURE_HSTS_SECONDS")
+        settings = tmp_path / "myproj" / "settings.py"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("INSTALLED_APPS = []\nDATABASES = {}\n")
+
+        ctx = build_context(tmp_path)
+        resolved = resolve_all(ctx)["myproj.settings"].get("SECURE_HSTS_SECONDS")
         assert resolved.origin is Origin.DJANGO_DEFAULT
         assert resolved.value.literal == 0
         assert resolved.definition is None
