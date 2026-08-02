@@ -523,6 +523,45 @@ than after twenty-six of them disagree, is cheaper.
   unresolvable `HOST` on purpose.
 - **1.4.4** — `DJS-005` secrets in other well-known settings (`AWS_SECRET_ACCESS_KEY`, `STRIPE_SECRET_KEY`, `EMAIL_HOST_PASSWORD`, `*_API_KEY`, `*_TOKEN`) by name pattern plus literal value.
 
+  **Done.** The first rule that matches settings by name rather than by knowing
+  them, so nearly all the work is in *not* firing. Two conditions, both
+  necessary:
+
+  - the credential word must **end** the name. `PASSWORD_HASHERS`,
+    `AUTH_PASSWORD_VALIDATORS` and `PASSWORD_RESET_TIMEOUT` all contain
+    `PASSWORD` and all hold policy. Requiring the word to come last separates
+    them without a list of exceptions to maintain.
+  - bare `_KEY` never matches. `CACHE_KEY_PREFIX`, `EMAIL_SSL_KEYFILE` and
+    healthchecks' own `TRELLO_APP_KEY` are ordinary configuration, so the word
+    in front is what gets matched: `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`,
+    `SIGNING_KEY`, `CLIENT_SECRET` and so on.
+
+  The value must also be a non-empty string that is not an import path, since
+  `FOO_TOKEN = "myapp.tokens.Backend"` names a class. `SECRET_KEY` is excluded
+  outright — DJS-002 and DJS-003 own it and say more.
+
+  *Severity is split.* `HIGH` by default, `CRITICAL` for key material
+  (`PRIVATE_KEY`, `SIGNING_KEY`, `ENCRYPTION_KEY`). A leaked service token is
+  bounded by that service's permissions and can be revoked there; key material
+  compromises everything it ever protected, including data already at rest.
+  `ACCESS_KEY` stays `HIGH` deliberately — an access key *id* is an identifier,
+  not the credential beside it.
+
+  *Measured before it was written, which is what set the thresholds.* Surveying
+  every secret-shaped setting on both targets found 23: healthchecks resolves
+  all of its real ones (`GITHUB_PRIVATE_KEY`, `TELEGRAM_TOKEN`, `S3_SECRET_KEY`
+  …) to `None` via `os.getenv` with no default, `EMAIL_HOST_PASSWORD` to `""`,
+  and `PASSWORD_HASHERS` to a list of dotted paths; NetBox's `API_TOKEN_PEPPERS`
+  is `{}` and its `EMAIL_SSL_KEYFILE` is `None`. **Zero findings on both
+  targets**, and the exclusion list is drawn from those names rather than
+  invented.
+
+  *Supporting change:* `SettingsRule.selects()` lets a rule match a family of
+  settings. A rule naming one setting still goes through `view.get`, so Django's
+  default applies and an absent setting can be the finding; a family rule sees
+  only what the project assigns, since there is no default for a setting nobody
+  has heard of.
+
 ### Step 1.5 — Transport and cookie security rules
 
 - **1.5.1** — `DJS-006` `SECURE_SSL_REDIRECT` not enabled.

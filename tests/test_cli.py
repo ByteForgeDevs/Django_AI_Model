@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 from typer.testing import CliRunner
 
+from djaudit import engine
 from djaudit.baseline import Baseline
 from djaudit.cli import EXIT_ERROR, EXIT_FINDINGS, EXIT_OK, app
 from djaudit.triage import Triage, Verdict
@@ -197,7 +198,11 @@ class TestBenchmarkCommand:
         assert result.exit_code == EXIT_FINDINGS
 
         written = Triage.load(path)
-        assert len(written) == 4
+        # Counting findings here would only pin this test to the size of the
+        # rule catalogue, and it has already been bumped once per rule added.
+        # What --update promises is that every finding gets an entry and that
+        # none of them is seeded in our favour.
+        assert len(written) == len(engine.run(vulnerable_project).findings)
         assert {e.verdict for e in written.entries} == {Verdict.FALSE_POSITIVE}
 
     def test_update_never_overwrites_an_existing_verdict(self, vulnerable_project, tmp_path):
@@ -268,7 +273,7 @@ class TestJobSummary:
         text = out.read_text()
         assert "## Precision — fixture" in text
         assert "❌ fail" in text
-        assert "Untriaged (4)" in text
+        assert f"Untriaged ({len(engine.run(vulnerable_project).findings)})" in text
         assert "--update" in text
 
     def test_summaries_append_rather_than_truncate(self, vulnerable_project, tmp_path):

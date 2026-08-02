@@ -8,6 +8,7 @@ which are shared more widely than the source it came from.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -440,3 +441,142 @@ def _engine(config: dict[str, Entry]) -> str:
     engine = config.get("ENGINE")
     name = literal_text(engine.value) if engine else None
     return f"engine={name}" if name else "engine=unresolved"
+
+
+_SECRET_TAIL = frozenset({"SECRET", "PASSWORD", "PASSWD", "TOKEN", "CREDENTIALS", "APIKEY"})
+"""A single trailing word that makes a setting a credential.
+
+Matched against the last underscore-separated word only. `PASSWORD_HASHERS`
+and `AUTH_PASSWORD_VALIDATORS` both contain `PASSWORD` and neither holds one;
+what they hold is policy. Requiring the word to end the name separates the two
+without a list of exceptions to maintain.
+"""
+
+_SECRET_PAIR = frozenset(
+    {
+        ("ACCESS", "KEY"),
+        ("ACCESS", "TOKEN"),
+        ("API", "KEY"),
+        ("AUTH", "TOKEN"),
+        ("CLIENT", "SECRET"),
+        ("ENCRYPTION", "KEY"),
+        ("PRIVATE", "KEY"),
+        ("REFRESH", "TOKEN"),
+        ("SECRET", "KEY"),
+        ("SIGNING", "KEY"),
+    }
+)
+"""Two trailing words, for the cases where `KEY` alone would be far too broad.
+
+`CACHE_KEY_PREFIX`, `SORT_KEY` and healthchecks' own `TRELLO_APP_KEY` are
+ordinary configuration. `S3_ACCESS_KEY` is not. The distinction is the word in
+front, so that is what gets matched.
+"""
+
+_KEY_MATERIAL = frozenset({("ENCRYPTION", "KEY"), ("PRIVATE", "KEY"), ("SIGNING", "KEY")})
+"""Credentials that sign or decrypt, rather than authenticating to one service.
+
+A leaked service token is bounded by that service's permissions and can be
+revoked there. Key material compromises everything it ever protected, including
+data already at rest, and revoking it does not undo that.
+"""
+
+_IMPORT_PATH = re.compile(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$")
+
+
+def looks_like_a_secret_name(setting: str) -> bool:
+    """Whether the setting's name says it holds a credential."""
+    if setting == "SECRET_KEY":
+        # DJS-002 and DJS-003 own this one, and say more about it.
+        return False
+    words = setting.split("_")
+    if words[-1] in _SECRET_TAIL:
+        return True
+    return len(words) >= 2 and (words[-2], words[-1]) in _SECRET_PAIR
+
+
+@register
+class HardcodedServiceCredential(SettingsRule):
+    """A setting named as a credential holds one, in the source."""
+
+    ceiling = Confidence.CERTAIN
+
+    meta = RuleMeta(
+        id="DJS-005",
+        title="service credential is readable in the source",
+        family=Family.DJS,
+        severity=Severity.HIGH,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "A credential in the repository is known to everyone who has ever had read "
+            "access, every fork, and every CI provider that cached the checkout, and it "
+            "stays known after they leave. Removing it from the current source does not "
+            "remove it from the history. What it costs depends on what it opens -- a "
+            "payment provider key moves money, an object-store key exposes every file, "
+            "a mail credential lets someone send as you -- but in each case the holder "
+            "is acting as your application, which is what makes it hard to notice."
+        ),
+        remediation=(
+            "Read the credential from the environment or a secret manager, and let a "
+            "missing one stop the process:\n"
+            "    STRIPE_SECRET_KEY = os.environ['STRIPE_SECRET_KEY']\n"
+            "Then revoke the exposed credential at the provider and issue a new one. "
+            "Revoking matters more than rewriting history: the old value is already "
+            "out, and most providers show when a key was last used, which is worth "
+            "checking before you assume nobody found it."
+        ),
+        references=(
+            "https://cwe.mitre.org/data/definitions/798.html",
+            "https://owasp.org/Top10/A05_2021-Security_Misconfiguration/",
+            "https://docs.djangoproject.com/en/stable/topics/settings/",
+        ),
+    )
+
+    def selects(self, name: str) -> bool:
+        return looks_like_a_secret_name(name)
+
+    def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
+        resolved = group.setting
+        if not resolved.is_explicit:
+            return
+
+        secret = literal_text(resolved.value)
+        if not secret:
+            # An unset credential is a deployment that has not been finished,
+            # not a disclosure.
+            return
+        if _IMPORT_PATH.match(secret):
+            # `FOO_TOKEN = "myapp.tokens.Backend"` names a class to import.
+            return
+
+        where = group.module.dotted or ctx.rel(group.module.path)
+        how = "falls back to a value written into" if resolved.value.env_dependent else "is set in"
+
+        yield self.report(
+            ctx,
+            group,
+            message=(
+                f"{resolved.name}, whose name says it holds a credential, {how} "
+                f"{where}{group.describe_reach()}, so anyone who can read the "
+                f"repository can use it"
+            ),
+            severity=_severity(resolved.name),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.CONFIG,
+                    content=describe_secret(secret),
+                    source="djaudit secret analysis",
+                ),
+            ),
+            redact=secret,
+        )
+
+
+def _severity(setting: str) -> Severity:
+    words = setting.split("_")
+    return (
+        Severity.CRITICAL
+        if len(words) >= 2 and (words[-2], words[-1]) in _KEY_MATERIAL
+        else Severity.HIGH
+    )

@@ -52,3 +52,11 @@ DATABASES = {
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 STATIC_URL = "static/"
 USE_TZ = True
+
+# PLANTED DEFECT: a service credential in the repository, which is DJS-005.
+# Matched by name rather than by being known, so the two settings under it are
+# controls: one reads like a credential and holds policy, the other holds an
+# import path.
+STRIPE_SECRET_KEY = "fixture-stripe-value-not-real-0123456789"
+PASSWORD_RESET_TIMEOUT = 3600
+NOTIFICATION_TOKEN = "app.notifications.TokenBackend"

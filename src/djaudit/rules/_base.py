@@ -106,8 +106,13 @@ class SettingsRule(Rule):
     """The setting this rule is about, resolved and grouped for it.
 
     Almost every settings rule is about exactly one setting, and saying so lets
-    the base do the part that is easy to get wrong.
+    the base do the part that is easy to get wrong. A rule about a family of
+    settings leaves this empty and overrides :meth:`selects` instead.
     """
+
+    def selects(self, name: str) -> bool:
+        """Whether this rule is about the setting called ``name``."""
+        return name == self.setting
 
     def check(self, ctx: ProjectContext) -> Iterator[Finding]:
         self.views = resolve_all(ctx)
@@ -125,7 +130,7 @@ class SettingsRule(Rule):
         group is graded by the worst-affected module, so a key sitting in
         base.py is judged by the fact that production uses it.
         """
-        collected: dict[tuple[str, int], list[tuple[SettingsModule, ResolvedSetting]]] = {}
+        collected: dict[tuple[str, str, int], list[tuple[SettingsModule, ResolvedSetting]]] = {}
         for module in ctx.settings_modules:
             # Development and test settings are allowed to be insecure. That is
             # what they are for, and reporting them is how a tool teaches people
@@ -135,16 +140,24 @@ class SettingsRule(Rule):
             view = self.views.get(module.dotted)
             if view is None:
                 continue
-            resolved = view.get(self.setting) if self.setting else None
-            if resolved is None:
-                continue
-            definition = resolved.definition
-            key = (
-                (str(definition.module), definition.node.lineno)
-                if definition
-                else (str(module.path), 0)
+            # A rule naming one setting wants view.get, which supplies Django's
+            # default when the project never assigns it -- an absent setting is
+            # often the finding. A rule matching a family cannot: there is no
+            # default for a setting nobody has heard of, so it sees only what
+            # the project actually assigns.
+            found = (
+                [view.get(self.setting)]
+                if self.setting
+                else [rs for name, rs in view.settings.items() if self.selects(name)]
             )
-            collected.setdefault(key, []).append((module, resolved))
+            for resolved in found:
+                definition = resolved.definition
+                key = (
+                    (resolved.name, str(definition.module), definition.node.lineno)
+                    if definition
+                    else (resolved.name, str(module.path), 0)
+                )
+                collected.setdefault(key, []).append((module, resolved))
 
         groups = []
         for members in collected.values():
