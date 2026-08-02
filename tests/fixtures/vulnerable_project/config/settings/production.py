@@ -8,6 +8,11 @@ is far short of the year the preload list wants (DJS-007), and includeSubDomains
 was never switched on (DJS-008). The pair is deliberate: it is the only state in
 which DJS-008 has anything to say, since excluding subdomains is the correct
 value while HSTS is off.
+
+PLANTED DEFECT: SECURE_PROXY_SSL_HEADER spelled as an HTTP header rather than a
+WSGI environment key (DJS-012). Django looks this up in request.META, never
+finds it, and falls back to the real connection scheme -- so the setting does
+nothing at all and says nothing about it.
 """
 
 from .base import *  # noqa: F401,F403
@@ -18,3 +23,5 @@ ALLOWED_HOSTS = ["app.example.test"]
 
 SECURE_HSTS_SECONDS = 3600
 SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+
+SECURE_PROXY_SSL_HEADER = ("X-Forwarded-Proto", "https")

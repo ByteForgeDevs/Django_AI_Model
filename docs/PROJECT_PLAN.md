@@ -706,6 +706,34 @@ than after twenty-six of them disagree, is cheaper.
   choice is exactly the kind that keeps a report readable.
 - **1.5.7** — `DJS-012` `SECURE_PROXY_SSL_HEADER` trusting a client-controllable header.
 
+  **Done.** This rule fires on correctly configured deployments by design,
+  which made "not being noise" the whole design problem. Three answers:
+
+  *Absent is safe and silent.* Unlike the rest of the step, Django's default
+  here is the secure one, so the rule only speaks when a project opted in.
+  Unresolvable is silent too — healthchecks builds the value from an
+  environment variable and we learned nothing.
+
+  *A well-formed value is `low`/`tentative`.* We can read the setting; we cannot
+  see the proxy, and the proxy is the entire question. That keeps it out of a
+  default run while leaving it in SARIF and the baseline, which is where a
+  "confirm this invariant once" finding belongs. The message names the header
+  the way a person would write it in an nginx config, not as the WSGI key.
+
+  *One branch is escalated, and it is the reason the rule exists.* A header
+  spelled `X-Forwarded-Proto` rather than `HTTP_X_FORWARDED_PROTO` is not a
+  WSGI environment key, so Django looks it up in `request.META`, never finds
+  it, and falls back to the real connection scheme. The setting does nothing
+  and nothing anywhere reports it — the operator believes TLS termination is
+  being honoured and it is not. Reported at `medium`/`firm` with the working
+  spelling computed into the remediation. A bare string or a one-item tuple is
+  caught the same way, since Django raises `ImproperlyConfigured` on every
+  request.
+
+  NetBox has the textbook value at settings.py:601 and is `accepted_risk` —
+  correct configuration, worth exactly one review. `vulnerable_project` carries
+  the misspelling as a planted defect.
+
 ### Step 1.6 — Host, origin, and framing rules
 
 - **1.6.1** — `DJS-013` `ALLOWED_HOSTS` wildcard or empty while DEBUG is off.
@@ -1118,7 +1146,7 @@ conversation.
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
-| 1 | Settings and deployment hardening | 10 | 55 | In progress — Steps 1.0–1.4 done, 1.5 underway (1.5.1, 1.5.4–1.5.6) |
+| 1 | Settings and deployment hardening | 10 | 55 | In progress — Steps 1.0–1.5 done (`DJS-001`…`DJS-012`) |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |

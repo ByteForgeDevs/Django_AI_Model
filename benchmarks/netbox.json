@@ -45,6 +45,16 @@
       "note": "Correct, and quiet on purpose. NetBox exposes SECURE_HSTS_SECONDS at settings.py:204 as a documented operator knob defaulting to 0, alongside SECURE_HSTS_INCLUDE_SUBDOMAINS and SECURE_HSTS_PRELOAD, so enabling it is a deliberate operator decision. HSTS is the one security header whose absence from the Django settings is weak evidence: nginx, a load balancer and every CDN can send Strict-Transport-Security, it is extremely common to set it there, and none of that is visible from inside the repository. The rule reports this at low/tentative for exactly that reason, which is why it does not appear in a default run. Recorded as accepted rather than a false positive because the statement is true -- Django is not sending the header -- and because a project that assumes the proxy is doing it and is wrong has no way to find out except by being attacked.",
       "reviewed": "2026-08-02",
       "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "47a5c85aea75a78f",
+      "rule_id": "DJS-012",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 601,
+      "note": "Correct, well-formed, and exactly what the rule is designed to say quietly rather than loudly. netbox/netbox/settings.py:601 is the textbook ('HTTP_X_FORWARDED_PROTO', 'https'), which is the right configuration for the nginx or Apache deployment NetBox documents, and the line immediately below it sets USE_X_FORWARDED_HOST = True for the same reason. There is no misspelling and no alternative NetBox could sensibly choose. What the finding records is the invariant this creates -- that every route to the application must pass through a proxy which overwrites the header -- and that invariant is a deployment property we cannot see from the repository, which is why the rule caps itself at low/tentative and stays out of a default run. Accepted rather than a false positive because the statement is true and worth one review; it is the kind of finding a reader is meant to confirm once and then suppress.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
     }
   ]
 }

@@ -5,7 +5,9 @@ off. That is the normal split-settings pattern, so the base finding must be
 downgraded to low/tentative rather than reported as a real problem.
 
 CONTROL CASE: the transport and cookie flags are all set correctly here, so
-DJS-006, DJS-007, DJS-008, DJS-009 and DJS-010 must stay silent. Django ships every one of them
+DJS-006, DJS-007, DJS-008, DJS-009 and DJS-010 must stay silent. DJS-012
+stays silent too, by never setting SECURE_PROXY_SSL_HEADER: absent is its safe
+value, so there is nothing to write down. Django ships every one of them
 off, which means a rule for them fires on a project that simply never mentions
 them -- and this fixture is what proves that setting them is enough to stop it.
 """

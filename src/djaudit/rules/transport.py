@@ -10,13 +10,16 @@ where that difference is recorded.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from djaudit.context import ProjectContext
-from djaudit.models import Confidence, Family, Severity, Tier
+from djaudit.models import Confidence, Family, Finding, Severity, Tier
 from djaudit.registry import RuleMeta, register
 from djaudit.rules._base import (
     FlagRule,
     InsecureDefaultRule,
     SettingGroup,
+    SettingsRule,
     could_be_off,
     could_be_under,
 )
@@ -339,5 +342,127 @@ class HstsSubdomainsExcluded(InsecureDefaultRule):
             _HTTPS_CHECKLIST,
             _HSTS_DOCS,
             "https://docs.djangoproject.com/en/stable/ref/settings/#secure-hsts-include-subdomains",
+        ),
+    )
+
+
+@register
+class ProxySslHeaderTrusted(SettingsRule):
+    """``SECURE_PROXY_SSL_HEADER`` makes a request header decide "is this HTTPS"."""
+
+    setting = "SECURE_PROXY_SSL_HEADER"
+    ceiling = Confidence.TENTATIVE
+    """We can read the setting. We cannot see the proxy, and the proxy is the
+    entire question, so this never claims more than tentative when the value
+    itself is well-formed."""
+
+    def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
+        resolved = group.setting
+        if not resolved.is_assigned or not resolved.value.is_literal:
+            # Absent is the safe default, and unresolvable means we learned
+            # nothing -- healthchecks builds this from an environment variable.
+            return
+        literal = resolved.value.literal
+        if literal is None:
+            return
+
+        header = self._header(literal)
+        if header is None:
+            yield self.report(
+                ctx,
+                group,
+                message=(
+                    f"SECURE_PROXY_SSL_HEADER in {group.module.dotted} is "
+                    f"{resolved.value.describe()}, which is not a two-item sequence, so "
+                    "Django raises ImproperlyConfigured while working out the scheme of "
+                    "every single request"
+                ),
+                severity=Severity.MEDIUM,
+                ceiling=Confidence.FIRM,
+            )
+            return
+
+        if not header.startswith("HTTP_"):
+            yield self.report(
+                ctx,
+                group,
+                message=(
+                    f"SECURE_PROXY_SSL_HEADER in {group.module.dotted} names {header!r}, "
+                    "which is not a WSGI environment key, so Django looks it up in "
+                    "request.META, never finds it, and quietly falls back to the scheme "
+                    "of the connection it actually received -- the setting has no effect "
+                    "at all and nothing anywhere reports a problem"
+                ),
+                severity=Severity.MEDIUM,
+                ceiling=Confidence.FIRM,
+                remediation=(
+                    f"WSGI uppercases a request header, replaces its dashes with "
+                    f"underscores and prefixes it with HTTP_, so write it that way: "
+                    f"{self._as_wsgi(header)!r}. Then confirm the change took effect "
+                    "rather than assuming it, because the broken spelling fails silently "
+                    "and so does the fix."
+                ),
+            )
+            return
+
+        yield self.report(
+            ctx,
+            group,
+            message=(
+                f"SECURE_PROXY_SSL_HEADER in {group.module.dotted} tells Django to treat "
+                f"any request carrying {self._as_header(header)} as HTTPS, so that header "
+                "now decides whether cookies are marked secure and whether "
+                "SECURE_SSL_REDIRECT thinks it has anything to do"
+            ),
+            severity=Severity.LOW,
+        )
+
+    @staticmethod
+    def _header(literal: object) -> str | None:
+        if isinstance(literal, (tuple, list)) and len(literal) == 2:
+            name = literal[0]
+            if isinstance(name, str):
+                return name
+        return None
+
+    @staticmethod
+    def _as_wsgi(header: str) -> str:
+        return "HTTP_" + header.upper().replace("-", "_")
+
+    @staticmethod
+    def _as_header(wsgi: str) -> str:
+        return wsgi.removeprefix("HTTP_").replace("_", "-").title()
+
+    meta = RuleMeta(
+        id="DJS-012",
+        title="SECURE_PROXY_SSL_HEADER trusts a request header",
+        family=Family.DJS,
+        severity=Severity.LOW,
+        confidence=Confidence.TENTATIVE,
+        tier=Tier.STATIC,
+        rationale=(
+            "This setting hands a request header the job of deciding whether a request "
+            "arrived over HTTPS. That is correct and necessary behind a TLS-terminating "
+            "proxy, and it is sound only while every route to the application passes "
+            "through a proxy that overwrites the header. If anything can reach Django "
+            "directly -- a container port published by accident, a health-check ingress, "
+            "a second load balancer added later -- a client can send the header itself and "
+            "Django will believe it, which marks cookies secure over plain HTTP and makes "
+            "SECURE_SSL_REDIRECT decide it has nothing to do. Reported at low and "
+            "tentative because we can read the setting but cannot see the proxy, and the "
+            "proxy is the entire question. It is escalated when the header is spelled in "
+            "a way that can never match, which is a different problem: not a risk to "
+            "weigh, but a setting that silently does nothing."
+        ),
+        remediation=(
+            "Confirm that the proxy sets this header on every request it forwards and "
+            "strips any copy the client supplied, and that Django is not reachable except "
+            "through it. Once confirmed, suppress this finding with a comment naming the "
+            "proxy -- the point of the rule is that the invariant gets checked once by "
+            "somebody, not that the setting is wrong."
+        ),
+        references=(
+            _HTTPS_CHECKLIST,
+            "https://docs.djangoproject.com/en/stable/ref/settings/#secure-proxy-ssl-header",
         ),
     )
