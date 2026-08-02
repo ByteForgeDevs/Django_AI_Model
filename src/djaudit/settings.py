@@ -16,6 +16,7 @@ import ast
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from djaudit.astutils import StarImport, star_imports
 from djaudit.context import ProjectContext, SettingsModule
@@ -216,12 +217,16 @@ class SettingsView:
     """Modules in resolution order, ending with ``module`` itself."""
 
     settings: dict[str, ResolvedSetting]
+    django_version: str | None = None
 
     def get(self, name: str) -> ResolvedSetting:
-        """The setting's effective value, or ABSENT when it is never assigned."""
+        """The setting's effective value, falling back to Django's default."""
         found = self.settings.get(name)
         if found is not None:
             return found
+        default = django_default(name, self.django_version)
+        if default is not None:
+            return ResolvedSetting(name, default, Origin.DJANGO_DEFAULT)
         return ResolvedSetting(name, Value.unknown("setting is not assigned"), Origin.ABSENT)
 
     def __contains__(self, name: str) -> bool:
@@ -274,6 +279,7 @@ def resolve_settings(ctx: ProjectContext, module: SettingsModule) -> SettingsVie
         module=module,
         chain=tuple(dotted_path(ctx.root, path) for path in chain),
         settings={name: _resolved(name, found) for name, found in definitions.items()},
+        django_version=ctx.django_version,
     )
 
 
@@ -380,4 +386,107 @@ def _resolve_star(ctx: ProjectContext, importer: Path, star: StarImport) -> Path
     ):
         if candidate.is_file():
             return candidate
+    return None
+
+
+# Django's own defaults, read out of django.conf.global_settings rather than
+# transcribed, and checked against it by tests/test_django_defaults.py.
+#
+# "Never set" and "explicitly set to the same value" are different facts about
+# a project: the first is usually an oversight and the second is a decision, so
+# the finding text and the remediation differ.
+DJANGO_DEFAULTS: dict[str, Any] = {
+    "ALLOWED_HOSTS": [],
+    "AUTH_PASSWORD_VALIDATORS": [],
+    "CSRF_COOKIE_HTTPONLY": False,
+    "CSRF_COOKIE_SAMESITE": "Lax",
+    "CSRF_COOKIE_SECURE": False,
+    "CSRF_TRUSTED_ORIGINS": [],
+    "DEBUG": False,
+    "DEBUG_PROPAGATE_EXCEPTIONS": False,
+    "EMAIL_USE_TLS": False,
+    "INSTALLED_APPS": [],
+    "LOGGING": {},
+    "MIDDLEWARE": [],
+    "PASSWORD_HASHERS": [
+        "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+        "django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher",
+        "django.contrib.auth.hashers.Argon2PasswordHasher",
+        "django.contrib.auth.hashers.BCryptSHA256PasswordHasher",
+        "django.contrib.auth.hashers.ScryptPasswordHasher",
+    ],
+    "SECRET_KEY": "",
+    "SECURE_CONTENT_TYPE_NOSNIFF": True,
+    "SECURE_CROSS_ORIGIN_OPENER_POLICY": "same-origin",
+    "SECURE_HSTS_INCLUDE_SUBDOMAINS": False,
+    "SECURE_HSTS_PRELOAD": False,
+    "SECURE_HSTS_SECONDS": 0,
+    "SECURE_PROXY_SSL_HEADER": None,
+    "SECURE_REFERRER_POLICY": "same-origin",
+    "SECURE_SSL_REDIRECT": False,
+    "SESSION_COOKIE_HTTPONLY": True,
+    "SESSION_COOKIE_SAMESITE": "Lax",
+    "SESSION_COOKIE_SECURE": False,
+    "USE_X_FORWARDED_HOST": False,
+}
+
+# Defaults that Django changed between supported releases. Reporting the wrong
+# one is exactly the version drift the plan lists as a risk, so an unknown
+# Django version yields no default at all rather than a guess.
+DEFAULTS_BY_VERSION: dict[tuple[int, int], dict[str, Any]] = {
+    (5, 2): {"DEFAULT_AUTO_FIELD": "django.db.models.AutoField"},
+    (6, 0): {"DEFAULT_AUTO_FIELD": "django.db.models.BigAutoField"},
+}
+
+# Settings that do not exist before a given release. A rule must not report a
+# 6.0-only setting as missing from a 5.2 project.
+INTRODUCED_IN: dict[str, tuple[int, int]] = {
+    "SECURE_CSP": (6, 0),
+    "SECURE_CSP_REPORT_ONLY": (6, 0),
+    "TASKS": (6, 0),
+    "URLIZE_ASSUME_HTTPS": (6, 0),
+}
+
+# Per-connection options, which live inside DATABASES[alias] rather than at
+# module level, so they are not part of the flat table.
+DATABASE_DEFAULTS: dict[str, Any] = {
+    "ATOMIC_REQUESTS": False,
+    "CONN_HEALTH_CHECKS": False,
+    "CONN_MAX_AGE": 0,
+    "AUTOCOMMIT": True,
+}
+
+
+def parse_version(version: str | None) -> tuple[int, int] | None:
+    """``"5.2.1"`` -> ``(5, 2)``. Anything unparseable is None."""
+    if not version:
+        return None
+    parts = version.split(".")
+    try:
+        return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+    except ValueError:
+        return None
+
+
+def django_default(name: str, version: str | None = None) -> Value | None:
+    """Django's default for ``name``, or None when we do not know one.
+
+    None is returned rather than a guess in three cases: the setting is not in
+    our table, its default differs across supported releases and we could not
+    detect which one is in use, or it postdates the detected release.
+    """
+    release = parse_version(version)
+
+    introduced = INTRODUCED_IN.get(name)
+    if introduced is not None and (release is None or release < introduced):
+        return None
+
+    if name in DJANGO_DEFAULTS:
+        return Value.of(DJANGO_DEFAULTS[name])
+
+    if release is not None:
+        versioned = DEFAULTS_BY_VERSION.get(release)
+        if versioned is not None and name in versioned:
+            return Value.of(versioned[name])
+
     return None

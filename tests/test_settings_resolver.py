@@ -195,8 +195,10 @@ class TestExpressionsAcrossModules:
         assert resolved.value.literal is True
 
     def test_an_unassigned_setting_is_absent(self, overridden_project: Path) -> None:
+        # A name Django holds no default for. SECURE_SSL_REDIRECT would now
+        # come back as DJANGO_DEFAULT instead, which is the point of 1.3.3.
         ctx = build_context(overridden_project)
-        resolved = view(ctx, "config.settings.base").get("SECURE_SSL_REDIRECT")
+        resolved = view(ctx, "config.settings.base").get("STRIPE_SECRET_KEY")
         assert resolved.origin is Origin.ABSENT
         assert resolved.definition is None
 
