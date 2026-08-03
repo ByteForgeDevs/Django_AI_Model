@@ -429,6 +429,54 @@ class ObjectPermissionsNotChecked(ApiRule):
     )
 
 
+@register
+class UnprotectedFunctionView(ApiRule):
+    """An ``@api_view`` function with no permission decorator."""
+
+    def inspect(self, ctx: ProjectContext, endpoint: Endpoint) -> Iterator[Finding]:
+        view = endpoint.view
+        if view.kind != "function" or not endpoint.guard.is_open:
+            return
+        if endpoint.guard.source is Source.DECORATOR:
+            return
+        yield self.finding(
+            location=self.at(ctx, view),
+            message=(
+                f"{view.name} is an @api_view with no @permission_classes decorator, "
+                f"so it answers {_methods(endpoint)} for anonymous callers"
+            ),
+            evidence=(self.guard_evidence(endpoint.guard),),
+            severity=Severity.HIGH if endpoint.writes else Severity.MEDIUM,
+        )
+
+    meta = RuleMeta(
+        id="DJA-006",
+        title="Function view has no permission decorator",
+        family=Family.DJA,
+        severity=Severity.HIGH,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "A function view carries its configuration in decorators, and a missing "
+            "decorator looks exactly like a view that needs no configuration. Class "
+            "views at least inherit from a base someone chose; @api_view inherits only "
+            "the project default."
+        ),
+        remediation=(
+            "Add @permission_classes([IsAuthenticated]) beneath @api_view, or convert "
+            "the function to a class view where the ancestry carries the policy."
+        ),
+        references=(
+            "https://www.django-rest-framework.org/api-guide/views/#function-based-views",
+            OWASP_ACCESS,
+        ),
+        limitations=(
+            "The function may be a deliberately public endpoint, such as a health "
+            "check or a login handler, which has no permission class by design.",
+        ),
+    )
+
+
 def _all_open(classes: object) -> bool:
     if not isinstance(classes, list | tuple):
         return False

@@ -2109,6 +2109,15 @@ building it here pays for itself twice.
   exploitable override does not. That view was a false positive until this
   landed; both benchmarks are now silent.
 - **2.3.6** — `DJA-006` `@api_view` function view with no permission decorator.
+  **Done.** A function view carries its configuration in decorators, and a
+  missing decorator looks exactly like a view that needs no configuration —
+  class views at least inherit from a base somebody chose. Fires on a routed
+  `@api_view` with no `@permission_classes` under a permissive default.
+
+  Silent on both benchmarks and verified to be a real zero rather than a broken
+  rule: neither project routes a single function view. NetBox is 143 viewsets,
+  13 `APIView` subclasses and 1 generic; pretix is 62, 14 and 1. Recall for
+  this one rests entirely on the fixtures until 2.7.1 plants a defect.
 - **2.3.7** — `DJA-007` authentication classes permitting session auth only on an endpoint routed as a public API.
 
 ### Step 2.4 — Data exposure rules

@@ -394,3 +394,46 @@ class NoteViewSet(viewsets.ModelViewSet):
             "",
         )
         assert not run(make_project, "DJA-005", source)
+
+
+class TestFunctionView:
+    """DJA-006 -- the decorator nobody added."""
+
+    NAKED = """
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+
+@api_view(['GET', 'POST'])
+def notes(request):
+    return Response({})
+"""
+    URLS = """
+from django.urls import path
+from shop.api import notes
+
+urlpatterns = [path('notes/', notes)]
+"""
+
+    def test_reports_a_function_with_no_permission_decorator(self, make_project) -> None:
+        found = run(make_project, "DJA-006", self.NAKED, settings=OPEN_DEFAULT, urls=self.URLS)
+        assert len(found) == 1
+        assert "@permission_classes" in found[0].message
+
+    def test_silent_when_the_decorator_is_present(self, make_project) -> None:
+        source = self.NAKED.replace(
+            "@api_view(['GET', 'POST'])",
+            "@api_view(['GET', 'POST'])\n@permission_classes([IsAuthenticated])",
+        ).replace(
+            "from rest_framework.response import Response",
+            "from rest_framework.response import Response\n"
+            "from rest_framework.decorators import permission_classes\n"
+            "from rest_framework.permissions import IsAuthenticated",
+        )
+        assert not run(make_project, "DJA-006", source, settings=OPEN_DEFAULT, urls=self.URLS)
+
+    def test_silent_under_a_strict_default(self, make_project) -> None:
+        assert not run(make_project, "DJA-006", self.NAKED, settings=STRICT, urls=self.URLS)
+
+    def test_silent_on_a_class_view(self, make_project) -> None:
+        naked = TestViewWithoutPermissions.NAKED
+        assert not run(make_project, "DJA-006", naked, settings=OPEN_DEFAULT)
