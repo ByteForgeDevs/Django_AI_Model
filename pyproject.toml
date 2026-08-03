@@ -33,6 +33,10 @@ dev = [
     "pytest>=8.3",
     "ruff>=0.8",
     "mypy>=1.13",
+    # Not a runtime dependency: djaudit never imports the target's Django.
+    # Installed so tests can check our defaults table against the real
+    # django.conf.global_settings instead of trusting a transcription.
+    "django>=5.2",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -41,7 +45,10 @@ packages = ["src/djaudit"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["tests/fixtures"]
+# Fixtures are deliberately broken Django code -- linting them defeats the point.
+# Docs contain illustrative snippets whose alignment carries meaning, and ruff
+# formats fenced Python blocks inside markdown.
+extend-exclude = ["tests/fixtures", "docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ANN", "PTH", "C4", "TID", "PL"]
@@ -53,6 +60,7 @@ ignore = ["ANN401", "PLR0911", "PLR0912", "PLR2004"]
 "src/djaudit/cli.py" = ["PLR0913", "PLR0917"]
 "src/djaudit/engine.py" = ["PLR0913", "PLR0917"]
 "src/djaudit/registry.py" = ["PLR0913", "PLR0917"]
+"src/djaudit/rules/_base.py" = ["PLR0913", "PLR0917"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -66,6 +74,19 @@ module = "tests.*"
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 disallow_untyped_calls = false
+
+# jsonschema is deliberately not a project dependency. The SARIF conformance
+# check runs it via `uv run --with`, so it stays out of what users install.
+[[tool.mypy.overrides]]
+module = "jsonschema.*"
+ignore_missing_imports = true
+
+# Django is a dev-only dependency, used so tests can cross-check our defaults
+# table against the real global_settings. It ships no stubs, and pulling in
+# django-stubs purely for that would be disproportionate.
+[[tool.mypy.overrides]]
+module = "django.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

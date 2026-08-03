@@ -1,0 +1,70 @@
+{
+  "triage_version": 1,
+  "fingerprint_version": "djaudit/v1",
+  "target": "netbox",
+  "repo": "https://github.com/netbox-community/netbox",
+  "sha": "4877d1167f4e20c0507bc902ee4c708e20f92e36",
+  "max_false_positive_rate": 0.1,
+  "findings": [
+    {
+      "fingerprint": "60882482a7c33223",
+      "rule_id": "DJS-009",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 219,
+      "note": "SESSION_COOKIE_SECURE at settings.py:219. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "a1ef84b11c682b77",
+      "rule_id": "DJS-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 100,
+      "note": "CSRF_COOKIE_SECURE at settings.py:100. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "745b70a3b644900f",
+      "rule_id": "DJS-006",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 205,
+      "note": "SECURE_SSL_REDIRECT at settings.py:205. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason. NetBox additionally documents running behind nginx or Apache, which is the usual place for this redirect.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "2ddc67e5415029ff",
+      "rule_id": "DJS-007",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 204,
+      "note": "Correct, and quiet on purpose. NetBox exposes SECURE_HSTS_SECONDS at settings.py:204 as a documented operator knob defaulting to 0, alongside SECURE_HSTS_INCLUDE_SUBDOMAINS and SECURE_HSTS_PRELOAD, so enabling it is a deliberate operator decision. HSTS is the one security header whose absence from the Django settings is weak evidence: nginx, a load balancer and every CDN can send Strict-Transport-Security, it is extremely common to set it there, and none of that is visible from inside the repository. The rule reports this at low/tentative for exactly that reason, which is why it does not appear in a default run. Recorded as accepted rather than a false positive because the statement is true -- Django is not sending the header -- and because a project that assumes the proxy is doing it and is wrong has no way to find out except by being attacked.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "47a5c85aea75a78f",
+      "rule_id": "DJS-012",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 601,
+      "note": "Correct, well-formed, and exactly what the rule is designed to say quietly rather than loudly. netbox/netbox/settings.py:601 is the textbook ('HTTP_X_FORWARDED_PROTO', 'https'), which is the right configuration for the nginx or Apache deployment NetBox documents, and the line immediately below it sets USE_X_FORWARDED_HOST = True for the same reason. There is no misspelling and no alternative NetBox could sensibly choose. What the finding records is the invariant this creates -- that every route to the application must pass through a proxy which overwrites the header -- and that invariant is a deployment property we cannot see from the repository, which is why the rule caps itself at low/tentative and stays out of a default run. Accepted rather than a false positive because the statement is true and worth one review; it is the kind of finding a reader is meant to confirm once and then suppress.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "fbf3831f58a6089b",
+      "rule_id": "DJS-025",
+      "verdict": "accepted_risk",
+      "file": "base_requirements.txt",
+      "line": 15,
+      "note": "django-debug-toolbar in base_requirements.txt:15, pinned through to requirements.txt:4. NetBox handles this about as well as it can be handled with a single distribution: settings.py:472 lists debug_toolbar in INSTALLED_APPS and settings.py:511 removes it again under `if not DEBUG and 'collectstatic' not in sys.argv`, so the app is not installed on a normal production run. That is precisely why DJS-024 stays silent here and why this rule speaks instead: the package is still on the machine, and what keeps the toolbar off is the value of DEBUG rather than the absence of the code. NetBox is a self-hosted product whose operators are told to enable DEBUG when troubleshooting -- shipping the toolbar so that it works when they do is a deliberate product decision, not an oversight, and splitting the image in two to avoid it would cost their users more than it saves. Accepted rather than false positive because the statement is true and the exposure is real: an operator who leaves DEBUG on after an incident gets a SQL panel, and NetBox's own threat model would rather they knew that. The rule is low severity for exactly this reason -- it is a fact about the deployment, not an accusation.",
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03"
+    }
+  ]
+}

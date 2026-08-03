@@ -1,13 +1,23 @@
 """CLI contract: exit codes and output routing are what CI depends on."""
 
 import json
+from dataclasses import replace
 
+import pytest
 from typer.testing import CliRunner
 
+from djaudit import engine
 from djaudit.baseline import Baseline
 from djaudit.cli import EXIT_ERROR, EXIT_FINDINGS, EXIT_OK, app
+from djaudit.triage import Triage, Verdict
 
 runner = CliRunner()
+
+ONLY_DEBUG = ["--select", "DJS-001"]
+"""CLI mechanics -- exit codes, output files, baselines -- are the subject of
+these tests; the fixtures are only a source of findings. Pinning the run to one
+rule keeps the assertions about the mechanism rather than about how many rules
+the catalogue happens to contain."""
 
 
 class TestExitCodes:
@@ -16,13 +26,25 @@ class TestExitCodes:
         assert result.exit_code == EXIT_FINDINGS
 
     def test_raising_fail_on_above_the_worst_finding_exits_zero(self, overridden_project):
-        result = runner.invoke(app, ["run", str(overridden_project)])
+        result = runner.invoke(app, ["run", str(overridden_project), *ONLY_DEBUG])
         assert result.exit_code == EXIT_OK
 
-    def test_findings_below_fail_on_still_exit_zero(self, vulnerable_project):
+    def test_findings_below_fail_on_still_exit_zero(self, overridden_project):
         result = runner.invoke(
-            app, ["run", str(vulnerable_project), "--ignore", "DJS-001"]
+            app,
+            [
+                "run",
+                str(overridden_project),
+                *ONLY_DEBUG,
+                "--min-severity",
+                "info",
+                "--min-confidence",
+                "tentative",
+                "--fail-on",
+                "high",
+            ],
         )
+        assert "DJS-001" in result.output, result.output
         assert result.exit_code == EXIT_OK
 
     def test_a_bad_path_is_a_tool_error_not_a_finding(self, tmp_path):
@@ -38,9 +60,7 @@ class TestExitCodes:
     def test_an_unreadable_baseline_is_a_tool_error(self, vulnerable_project, tmp_path):
         bad = tmp_path / "baseline.json"
         bad.write_text("{nope")
-        result = runner.invoke(
-            app, ["run", str(vulnerable_project), "--baseline", str(bad)]
-        )
+        result = runner.invoke(app, ["run", str(vulnerable_project), "--baseline", str(bad)])
         assert result.exit_code == EXIT_ERROR
 
 
@@ -48,23 +68,33 @@ class TestOutputFormats:
     def test_json_output_is_parseable(self, vulnerable_project, tmp_path):
         out = tmp_path / "out.json"
         runner.invoke(
-            app, ["run", str(vulnerable_project), "-f", "json", "-o", str(out)]
+            app, ["run", str(vulnerable_project), *ONLY_DEBUG, "-f", "json", "-o", str(out)]
         )
         assert len(json.loads(out.read_text())["findings"]) == 2
 
     def test_sarif_output_is_parseable(self, vulnerable_project, tmp_path):
         out = tmp_path / "out.sarif"
-        runner.invoke(
-            app, ["run", str(vulnerable_project), "-f", "sarif", "-o", str(out)]
-        )
+        runner.invoke(app, ["run", str(vulnerable_project), "-f", "sarif", "-o", str(out)])
         assert json.loads(out.read_text())["version"] == "2.1.0"
 
-    def test_output_parent_directories_are_created(self, vulnerable_project, tmp_path):
-        out = tmp_path / "reports" / "nested" / "out.sarif"
-        runner.invoke(
-            app, ["run", str(vulnerable_project), "-f", "sarif", "-o", str(out)]
-        )
+    @pytest.mark.parametrize("fmt", ["terminal", "json", "sarif"])
+    def test_output_parent_directories_are_created(self, vulnerable_project, tmp_path, fmt):
+        """Every format must behave the same here.
+
+        Terminal previously opened the file directly while JSON and SARIF
+        created parents first, so `-o reports/out.txt` failed on a fresh
+        checkout for one format out of three.
+        """
+        out = tmp_path / "reports" / "nested" / f"out.{fmt}"
+        result = runner.invoke(app, ["run", str(vulnerable_project), "-f", fmt, "-o", str(out)])
+        assert result.exit_code in {EXIT_OK, EXIT_FINDINGS}, result.output
         assert out.is_file()
+        assert out.read_text().strip()
+
+    def test_terminal_file_output_names_the_rule(self, vulnerable_project, tmp_path):
+        out = tmp_path / "reports" / "out.txt"
+        runner.invoke(app, ["run", str(vulnerable_project), "-f", "terminal", "-o", str(out)])
+        assert "DJS-001" in out.read_text()
 
     def test_terminal_output_names_the_rule_and_location(self, vulnerable_project):
         result = runner.invoke(app, ["run", str(vulnerable_project)])
@@ -83,9 +113,7 @@ class TestBaselineWorkflow:
         )
         assert written.exit_code == EXIT_OK
 
-        second = runner.invoke(
-            app, ["run", str(vulnerable_project), "--baseline", str(baseline)]
-        )
+        second = runner.invoke(app, ["run", str(vulnerable_project), "--baseline", str(baseline)])
         assert second.exit_code == EXIT_OK
         assert "No findings" in second.output
 
@@ -95,16 +123,15 @@ class TestBaselineWorkflow:
         """Otherwise lowering a threshold later resurfaces old findings as 'new'."""
         baseline = tmp_path / "baseline.json"
         runner.invoke(
-            app, ["run", str(overridden_project), "--write-baseline", str(baseline)]
+            app,
+            ["run", str(overridden_project), *ONLY_DEBUG, "--write-baseline", str(baseline)],
         )
         assert len(Baseline.load(baseline)) == 1
 
 
 class TestRuleSelection:
     def test_select_restricts_to_named_rules(self, vulnerable_project):
-        result = runner.invoke(
-            app, ["run", str(vulnerable_project), "--select", "DJS-001"]
-        )
+        result = runner.invoke(app, ["run", str(vulnerable_project), "--select", "DJS-001"])
         assert "DJS-001" in result.output
 
     def test_family_filter_can_silence_everything(self, vulnerable_project):
@@ -132,8 +159,136 @@ class TestOtherCommands:
     def test_eval_fails_loudly_on_a_regression(self, vulnerable_project, tmp_path):
         manifest = tmp_path / "expected.json"
         manifest.write_text(json.dumps({"expected": []}))
-        result = runner.invoke(
-            app, ["eval", str(vulnerable_project), "--manifest", str(manifest)]
-        )
+        result = runner.invoke(app, ["eval", str(vulnerable_project), "--manifest", str(manifest)])
         assert result.exit_code == EXIT_FINDINGS
         assert "UNEXPECTED" in result.output
+
+
+class TestBenchmarkCommand:
+    """The precision gate's CLI surface. CI reads only the exit code."""
+
+    def seed(self, tmp_path, entries=(), rate=0.10):
+        path = tmp_path / "triage.json"
+        Triage(target="fixture", entries=tuple(entries), max_false_positive_rate=rate).save(path)
+        return path
+
+    def test_untriaged_findings_exit_one(self, vulnerable_project, tmp_path):
+        path = self.seed(tmp_path)
+        result = runner.invoke(app, ["benchmark", str(vulnerable_project), "--triage", str(path)])
+        assert result.exit_code == EXIT_FINDINGS
+        assert "untriaged" in result.output
+
+    def test_a_missing_triage_file_is_a_tool_error(self, vulnerable_project, tmp_path):
+        result = runner.invoke(
+            app, ["benchmark", str(vulnerable_project), "--triage", str(tmp_path / "nope.json")]
+        )
+        assert result.exit_code == EXIT_ERROR
+
+    def test_a_bad_project_path_is_a_tool_error(self, tmp_path):
+        path = self.seed(tmp_path)
+        result = runner.invoke(app, ["benchmark", str(tmp_path / "nope"), "--triage", str(path)])
+        assert result.exit_code == EXIT_ERROR
+
+    def test_update_seeds_untriaged_findings_as_false_positive(self, vulnerable_project, tmp_path):
+        # Unreviewed entries must never count in our favour.
+        path = self.seed(tmp_path)
+        result = runner.invoke(
+            app, ["benchmark", str(vulnerable_project), "--triage", str(path), "--update"]
+        )
+        assert result.exit_code == EXIT_FINDINGS
+
+        written = Triage.load(path)
+        # Counting findings here would only pin this test to the size of the
+        # rule catalogue, and it has already been bumped once per rule added.
+        # What --update promises is that every finding gets an entry and that
+        # none of them is seeded in our favour.
+        assert len(written) == len(engine.run(vulnerable_project).findings)
+        assert {e.verdict for e in written.entries} == {Verdict.FALSE_POSITIVE}
+
+    def test_update_never_overwrites_an_existing_verdict(self, vulnerable_project, tmp_path):
+        path = self.seed(tmp_path)
+        runner.invoke(
+            app, ["benchmark", str(vulnerable_project), "--triage", str(path), "--update"]
+        )
+
+        reviewed = Triage.load(path)
+        first = reviewed.entries[0]
+        reviewed.save(path)
+        Triage(
+            target="fixture",
+            entries=(
+                replace(first, verdict=Verdict.TRUE_POSITIVE, note="checked"),
+                *reviewed.entries[1:],
+            ),
+        ).save(path)
+
+        runner.invoke(
+            app, ["benchmark", str(vulnerable_project), "--triage", str(path), "--update"]
+        )
+
+        after = Triage.load(path).by_fingerprint[first.fingerprint]
+        assert after.verdict is Verdict.TRUE_POSITIVE
+        assert after.note == "checked"
+
+    def test_a_fully_triaged_project_exits_zero(self, vulnerable_project, tmp_path):
+        path = self.seed(tmp_path)
+        runner.invoke(
+            app, ["benchmark", str(vulnerable_project), "--triage", str(path), "--update"]
+        )
+
+        seeded = Triage.load(path)
+        Triage(
+            target="fixture",
+            entries=tuple(
+                replace(e, verdict=Verdict.TRUE_POSITIVE, note="planted") for e in seeded.entries
+            ),
+        ).save(path)
+
+        result = runner.invoke(app, ["benchmark", str(vulnerable_project), "--triage", str(path)])
+        assert result.exit_code == EXIT_OK
+        assert "precision 100.0%" in result.output
+
+
+class TestJobSummary:
+    """CI writes markdown to $GITHUB_STEP_SUMMARY so a red build explains itself."""
+
+    def test_eval_summary_reports_recall(self, vulnerable_project, tmp_path):
+        out = tmp_path / "summary.md"
+        runner.invoke(app, ["eval", str(vulnerable_project), "--summary", str(out)])
+
+        text = out.read_text()
+        assert "## Recall" in text
+        assert "| recall | 100.0% |" in text
+
+    def test_benchmark_summary_reports_untriaged(self, vulnerable_project, tmp_path):
+        triage = tmp_path / "triage.json"
+        Triage(target="fixture").save(triage)
+        out = tmp_path / "summary.md"
+
+        runner.invoke(
+            app,
+            ["benchmark", str(vulnerable_project), "--triage", str(triage), "--summary", str(out)],
+        )
+
+        text = out.read_text()
+        assert "## Precision — fixture" in text
+        assert "❌ fail" in text
+        assert f"Untriaged ({len(engine.run(vulnerable_project).findings)})" in text
+        assert "--update" in text
+
+    def test_summaries_append_rather_than_truncate(self, vulnerable_project, tmp_path):
+        # Several CI steps share one summary file; truncating loses the others.
+        out = tmp_path / "summary.md"
+        out.write_text("## Existing section\n\n")
+
+        runner.invoke(app, ["eval", str(vulnerable_project), "--summary", str(out)])
+        runner.invoke(app, ["eval", str(vulnerable_project), "--summary", str(out)])
+
+        text = out.read_text()
+        assert "## Existing section" in text
+        assert text.count("## Recall") == 2
+
+    def test_summary_path_parents_are_created(self, vulnerable_project, tmp_path):
+        out = tmp_path / "nested" / "deeper" / "summary.md"
+        runner.invoke(app, ["eval", str(vulnerable_project), "--summary", str(out)])
+        assert out.is_file()

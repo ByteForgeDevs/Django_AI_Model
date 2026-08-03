@@ -111,8 +111,9 @@ class TestProjectDiscovery:
     def test_reads_the_entrypoint_from_manage_py_without_executing_it(self, vulnerable_project):
         ctx = build_context(vulnerable_project)
         assert ctx.settings_entrypoint == "config.settings.production"
-        assert any(m.is_entrypoint and m.role is SettingsRole.PRODUCTION
-                   for m in ctx.settings_modules)
+        assert any(
+            m.is_entrypoint and m.role is SettingsRole.PRODUCTION for m in ctx.settings_modules
+        )
 
     def test_empty_settings_package_init_is_not_treated_as_settings(self, vulnerable_project):
         ctx = build_context(vulnerable_project)

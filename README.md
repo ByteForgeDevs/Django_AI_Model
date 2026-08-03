@@ -4,9 +4,35 @@ Django-aware static analysis. Audits an existing Django codebase and reports
 ranked, evidence-backed findings across settings hardening, injection, DRF
 authorization, ORM performance, migration safety and cross-database portability.
 
-**Status: Phase 0.** The engine, schema, fingerprinting, baseline, reporters and
-CLI are in place with one rule (`DJS-001`) proving the pipeline end to end. The
-rule catalogue is being built out next.
+**Status: Phase 1 complete.** 27 settings-hardening rules (`DJS-001`…`DJS-027`)
+on top of the Phase 0 engine — schema, fingerprinting, baseline, three
+reporters, CLI and eval harness.
+
+Measured, in CI, on every commit:
+
+| | Result |
+|---|---|
+| Recall, on five planted-defect fixtures | **100%** — 38 expected findings, 0 missed |
+| Precision, on the same fixtures | **100%** — 0 false positives |
+| Precision, on Healthchecks (653 files) | **100%** — 10 reported, all confirmed on review |
+| Precision, on NetBox (1213 files) | **100%** — 6 reported, all confirmed on review |
+| Crashes on either target | **0** rule errors |
+| Runtime | under a second on NetBox's 1213 files |
+
+Precision is measured against two mature, well-audited open-source Django
+projects pinned to a commit SHA and cloned in CI, never vendored. They cannot
+measure recall — we have no way to know what we missed in code we did not write
+— so recall comes from fixtures with a manifest of expected findings. Every
+finding reported on a real target is triaged in `benchmarks/`, with a written
+justification, a reviewer and a date; `scripts/check_triage.py` fails the build
+if an entry is unreviewed, because scoring your own precision benchmark is
+otherwise how a project ends up with 100% and no credibility.
+
+Ten of the sixteen are `accepted_risk`: the setting really is off, and the
+project has a reason — a redirect handled at the proxy, a value supplied by the
+deployment. That verdict counts as a true positive here, because the rule
+correctly reported what it can see. What it cannot see is written down for
+every rule in [`docs/rules/DJS.md`](docs/rules/DJS.md).
 
 ## What it is, and what it is not
 
@@ -76,14 +102,14 @@ linter, and honouring them would silently hide security findings.
 
 ## Rule families
 
-| Prefix | Family |
-|---|---|
-| `DJS` | Settings & deployment hardening |
-| `DJI` | Injection & untrusted input |
-| `DJA` | API / DRF authorization & data exposure |
-| `DJP` | Performance & ORM efficiency |
-| `DJM` | Migration safety |
-| `DJX` | Cross-database portability |
+| Prefix | Family | Status |
+|---|---|---|
+| `DJS` | Settings & deployment hardening | **27 rules** — [reference](docs/rules/DJS.md) |
+| `DJI` | Injection & untrusted input | Phase 3 |
+| `DJA` | API / DRF authorization & data exposure | Phase 2 |
+| `DJP` | Performance & ORM efficiency | Phase 3 |
+| `DJM` | Migration safety | Phase 4 |
+| `DJX` | Cross-database portability | Phase 5 |
 
 ## Analysis tiers
 
@@ -103,10 +129,24 @@ understood as a source of dev/prod divergence.
 ## Development
 
 ```bash
-uv run pytest
+uv run pytest              # 1031 tests
 uv run ruff check .
-uv run mypy
+uv run mypy                # strict, on our own code only
+
+# recall, against fixtures with a manifest of expected findings
+uv run djaudit eval tests/fixtures/vulnerable_project
+
+# precision, against a real project, scored by the triage file
+uv run djaudit benchmark /path/to/netbox --triage benchmarks/netbox.json
 ```
 
 Fixtures under `tests/fixtures/` contain deliberately vulnerable code and are
-excluded from linting and type checking.
+excluded from linting and type checking. Two of the five contain no defects at
+all: `overridden_project` checks that a safe override silences a rule, and
+`near_miss_project` is a correct project written entirely in shapes a sloppy
+rule would flag — it is the guard against precision decaying as rules are added.
+
+`docs/rules/DJS.md` is generated from the rule registry by
+`scripts/gen_rule_docs.py`; edit the rule, not the page. CI checks the two
+agree, along with the plan's own arithmetic (`scripts/check_plan.py`) and the
+completeness of the triage files (`scripts/check_triage.py`).

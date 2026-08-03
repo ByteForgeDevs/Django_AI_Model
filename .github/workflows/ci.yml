@@ -2,8 +2,17 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # Phase branches too, so every substep gets a gate result rather than the
+    # whole phase discovering breakage at pull request time.
+    branches: [main, 'phase-*']
   pull_request:
+
+env:
+  UV_VERSION: "0.12.1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   quality:
@@ -14,18 +23,62 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
         with:
+          # Pinned, not floating. Resolving "latest" costs an anonymous GitHub
+          # API call from a shared runner IP, which has already rate-limited
+          # and failed a green commit; and an unpinned toolchain means CI can
+          # break on a morning when nobody changed anything.
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - run: uv sync
 
       - name: ruff
         run: uv run ruff check .
 
+      # Checked separately from `ruff check`, which does not police formatting.
+      # Without this the tree drifts out of format silently and the first person
+      # to run `ruff format` sweeps unrelated files into their diff.
+      - name: ruff format
+        run: uv run ruff format --check .
+
       - name: mypy
         run: uv run mypy
 
+      # The plan states its own counts. They were wrong the first time they
+      # were written by hand, and a plan that miscounts itself is one nobody
+      # checks against.
+      - name: project plan is self-consistent
+        run: uv run python scripts/check_plan.py
+
+      # A verdict is worth the reasoning behind it, and nothing in the tool can
+      # tell a considered `accepted_risk` from a rubber stamp. A rubber stamp
+      # on a precision benchmark is how a project ends up with a 100% score and
+      # no credibility, so the standard is enforced on our own files.
+      - name: benchmark verdicts are a completed review
+        run: uv run python scripts/check_triage.py
+
+      # The rule reference is generated from the registry, so an edit to a
+      # rule's grade or wording that never reaches the page turns published
+      # security documentation into a description of a tool we no longer ship.
+      - name: rule reference matches the registry
+        run: uv run python scripts/gen_rule_docs.py --check
+
       - name: pytest
         run: uv run pytest
+
+      # SARIF is the entire CI integration story. If the structure drifts,
+      # GitHub silently stops ingesting findings and no other gate notices.
+      - name: SARIF conforms to the OASIS 2.1.0 schema
+        run: |
+          uv run djaudit run tests/fixtures/vulnerable_project \
+            --format sarif --output /tmp/report.sarif \
+            --min-severity info --min-confidence tentative || [ $? -eq 1 ]
+          curl -sfL --retry 3 --max-time 60 \
+            "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json" \
+            -o /tmp/sarif-schema.json
+          uv run --with jsonschema python scripts/validate_sarif.py \
+            /tmp/report.sarif /tmp/sarif-schema.json
 
   evaluation:
     name: recall gate (planted-defect fixtures)
@@ -35,7 +88,13 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
         with:
+          # Pinned, not floating. Resolving "latest" costs an anonymous GitHub
+          # API call from a shared runner IP, which has already rate-limited
+          # and failed a green commit; and an unpinned toolchain means CI can
+          # break on a morning when nobody changed anything.
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - run: uv sync
 
@@ -43,8 +102,16 @@ jobs:
       # existing one's grading and nobody notices until a user does.
       - name: score against fixture manifests
         run: |
-          uv run djaudit eval tests/fixtures/vulnerable_project
-          uv run djaudit eval tests/fixtures/overridden_project
+          uv run djaudit eval tests/fixtures/vulnerable_project \
+            --summary "$GITHUB_STEP_SUMMARY"
+          uv run djaudit eval tests/fixtures/overridden_project \
+            --summary "$GITHUB_STEP_SUMMARY"
+          uv run djaudit eval tests/fixtures/api_project \
+            --summary "$GITHUB_STEP_SUMMARY"
+          uv run djaudit eval tests/fixtures/env_settings_project \
+            --summary "$GITHUB_STEP_SUMMARY"
+          uv run djaudit eval tests/fixtures/near_miss_project \
+            --summary "$GITHUB_STEP_SUMMARY"
 
   false_positives:
     name: precision gate (${{ matrix.target.name }})
@@ -64,7 +131,13 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
         with:
+          # Pinned, not floating. Resolving "latest" costs an anonymous GitHub
+          # API call from a shared runner IP, which has already rate-limited
+          # and failed a green commit; and an unpinned toolchain means CI can
+          # break on a morning when nobody changed anything.
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - run: uv sync
 
@@ -75,18 +148,25 @@ jobs:
           git clone --quiet https://github.com/${{ matrix.target.repo }}.git target
           git -C target checkout --quiet ${{ matrix.target.sha }}
 
-      # These repositories are mature and well audited, so essentially anything
-      # we report is a false positive. That makes them a precision benchmark and
-      # a crash-resistance test, not a recall benchmark -- recall is what the
-      # planted-defect fixtures measure.
-      - name: audit and require zero findings
+      # These repositories are mature and well audited, so they measure
+      # precision and crash-resistance, not recall -- we cannot know what they
+      # contain that we missed. Recall is what the planted-defect fixtures
+      # measure. Every finding carries a recorded verdict in benchmarks/, so
+      # the gate tracks a false-positive rate instead of asserting zero.
+      - name: precision gate
         run: |
+          # Exit 1 means "findings exist", which is the normal case here and
+          # not the gate's verdict -- `djaudit benchmark` decides that against
+          # the recorded verdicts. Exit 2 means the tool broke, which is a real
+          # failure, so the two are handled separately rather than with `|| true`.
           uv run djaudit run target \
             --format json \
             --output report.json \
             --min-severity info \
-            --min-confidence tentative
-          uv run python scripts/check_precision.py report.json
+            --min-confidence tentative || [ $? -eq 1 ]
+          uv run djaudit benchmark target \
+            --triage benchmarks/${{ matrix.target.name }}.json \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       - name: upload report
         if: always()

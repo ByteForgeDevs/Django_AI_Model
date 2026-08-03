@@ -23,9 +23,11 @@ def build(tmp_path: Path, files: dict[str, str]) -> Path:
 
 
 def audit(root: Path):
-    return engine.run(
+    """Only DJS-001. Other rules fire on these projects and are not the subject."""
+    findings = engine.run(
         root, min_severity=Severity.INFO, min_confidence=Confidence.TENTATIVE
     ).findings
+    return [f for f in findings if f.rule_id == "DJS-001"]
 
 
 class TestProductionReachable:
@@ -127,6 +129,13 @@ class TestGradingModifiers:
         assert "override" in finding.message
 
     def test_base_is_not_downgraded_when_the_override_is_conditional(self, tmp_path):
+        """An override that might not run does not make the base module safe.
+
+        Production is reported here as well, because it inherits DEBUG=True and
+        only conditionally switches it off, so it really can deploy with DEBUG
+        on. Matching a literal `DEBUG = True` statement never saw that -- there
+        is no such statement in production.py.
+        """
         root = build(
             tmp_path,
             {
@@ -136,8 +145,25 @@ class TestGradingModifiers:
                 ),
             },
         )
-        (finding,) = audit(root)
-        assert finding.severity is Severity.HIGH
+        findings = {f.properties["settings_module"]: f for f in audit(root)}
+
+        assert findings["config.settings.base"].severity is Severity.HIGH
+        assert findings["config.settings.production"].severity is Severity.CRITICAL
+        assert findings["config.settings.production"].confidence is Confidence.TENTATIVE
+
+    def test_an_inherited_debug_names_the_module_it_came_from(self, tmp_path):
+        root = build(
+            tmp_path,
+            {
+                "config/settings/base.py": MARKERS + "DEBUG = True\n",
+                "config/settings/production.py": "from .base import *\n",
+            },
+        )
+        production = next(
+            f for f in audit(root) if f.properties["settings_module"].endswith("production")
+        )
+        assert "inherited from config.settings.base" in production.message
+        assert production.location.file == "config/settings/base.py"
 
 
 class TestEvidence:

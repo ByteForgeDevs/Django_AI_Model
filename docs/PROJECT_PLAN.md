@@ -161,6 +161,7 @@ Four gates run in CI on every push. All are blocking.
 | **Lint** — `ruff check .` | Consistency, common bug classes | Style or correctness lint violated |
 | **Types** — `mypy --strict` | Interface integrity across 30+ modules | A contract was broken silently |
 | **Tests** — `pytest` | Behaviour of every unit | A regression |
+| **SARIF conformance** | The CI integration itself | Code scanning would silently stop ingesting findings |
 | **Recall** — `djaudit eval` on fixtures | We still detect what we claim to | A rule stopped firing, or grading drifted |
 | **Precision** — real-repo benchmark | We do not cry wolf | A new rule produces false positives |
 
@@ -340,10 +341,19 @@ rules, backed by a settings resolver that can see through the environment
 variable indirection every production Django project uses.
 
 **Entry criteria.** Phase 0 merged to `main`.
-
 **Exit criteria.** Real, triaged findings on both benchmark repositories; false
 positive rate measured and below 10% for the family; recall gate covering every
 new rule.
+
+**Outcome.** All three met, with room. 27 rules shipped, `DJS-001`…`DJS-027`.
+Precision is **100%** on both targets — 10 findings on Healthchecks (653 files),
+6 on NetBox (1213 files), all sixteen individually reviewed against the source
+and recorded in `benchmarks/` with a justification, a reviewer and a date.
+Recall is **100%** across five fixtures, 38 expected findings, none missed. Zero
+rule errors and zero crashes on either target; NetBox audits in under a second.
+1031 tests, `ruff` and `mypy --strict` clean, and four self-consistency gates in
+CI: the plan's arithmetic, the triage files' completeness, the generated rule
+reference, and the five fixture evaluations.
 
 ### Why this phase is not simply "write twenty rules"
 
@@ -367,11 +377,29 @@ So Phase 1 front-loads two pieces of infrastructure — a partial evaluator and 
 settings resolver — and only then writes rules. Steps 1.1 to 1.3 are the phase's
 real engineering; steps 1.4 to 1.9 are comparatively mechanical.
 
+### Step 1.0 — Phase 0 review follow-ups
+
+Three correctness defects raised by code review on the Phase 0 pull request.
+Folded into this phase rather than a separate hotfix branch because all three
+are small, verified, and block nothing — but each is a genuine bug, and two of
+them fail in the direction of silently hiding findings, which is the failure
+mode this project cares about most.
+
+- **1.0.1** — `# djaudit: ignore[]` acted as a blanket suppression, because an empty code set was conflated with "no code list given". A mistyped bracket pair silently hid every rule on that line. Empty brackets now suppress nothing.
+- **1.0.2** — SARIF `associatedRule` referenced rule IDs absent from `tool.driver.rules` when a rule crashed without producing findings, leaving a dangling reference some consumers reject. Descriptors are now built from `RuleMeta` and cover crashed rules too.
+- **1.0.3** — `--output` with `--format terminal` did not create missing parent directories, unlike JSON and SARIF, so `-o reports/out.txt` failed on a fresh checkout.
+- **1.0.4** — Found while verifying 1.0.2: the `$schema` URL emitted in every SARIF file returned 404, and nothing validated our SARIF against the spec. Points at the canonical OASIS URL now, with schema *and* reference-resolution checks wired into CI.
+
 ### Step 1.1 — Rebuild the precision benchmark
 
 The current zero-findings gate stops working the moment this phase lands.
 
-- **1.1.1** — Triage file format: per-target YAML mapping fingerprint to verdict (`true_positive` / `false_positive` / `accepted_risk`), with reviewer note and date. *Done when:* schema is defined and round-trips.
+- **1.1.1** — Triage file format: per-target JSON mapping fingerprint to verdict (`true_positive` / `false_positive` / `accepted_risk`), with reviewer note and date. *Done when:* schema is defined and round-trips.
+
+  *Amended 1.1.1: JSON, not YAML.* Reviewers edit these files by hand, which is
+  the case for YAML, but the per-entry `note` field covers what comments would
+  have carried and JSON keeps runtime dependencies at two packages. Also lets
+  the module reuse the baseline's I/O shape rather than inventing a second one.
 - **1.1.2** — `djaudit benchmark` command: run against a target, diff against its triage file, report new/resolved/untriaged counts.
 - **1.1.3** — Gate logic: fail on untriaged findings, on family false-positive rate above threshold, or on the disappearance of a known true positive.
 - **1.1.4** — Replace `scripts/check_precision.py` in CI; seed empty triage files for both targets.
@@ -389,6 +417,15 @@ Static resolution of the expression forms that actually appear in Django setting
 - **1.2.6** — Comprehensions, `if`/`else` expressions, and boolean operators, producing `CONDITIONAL` with both branch values.
 - **1.2.7** — Call safety: a hard recursion and node budget so a pathological file cannot hang the evaluator.
 
+*Done when:* the evaluator resolves a majority of real settings on both
+benchmark targets. **Measured on completion: 93% of Healthchecks settings
+(95/102) and 67% of NetBox settings (134/199), in 3ms per module.** Spot-checked
+for correctness rather than count: Healthchecks resolves `DEBUG` to `True` and
+`SECRET_KEY` to its `"---"` placeholder, NetBox resolves `DEBUG`,
+`SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE` and `SECURE_SSL_REDIRECT` to
+`False`, and NetBox's two `# Required` settings stay unresolved rather than
+being guessed.
+
 ### Step 1.3 — Settings resolver with provenance
 
 - **1.3.1** — `ResolvedSetting`: name, effective value, defining module, line, whether conditional, and the full override chain.
@@ -398,55 +435,1007 @@ Static resolution of the expression forms that actually appear in Django setting
 - **1.3.5** — Confidence policy: a single, documented mapping from resolution quality to `Confidence`, applied uniformly by all rules.
 - **1.3.6** — Migrate `DJS-001` onto the resolver; delete its bespoke override logic. *Done when:* existing tests pass unchanged and DJS-001 now fires on env-var-defaulted DEBUG at `tentative`.
 
+*Step 1.3 done.* The resolver covers 93% of Healthchecks' settings and 67% of
+NetBox's, and grades them 16/77/14 and 27/103/72 across
+certain/firm/tentative — the bulk at `firm`, which is the default gate, and
+`tentative` reserved for values that genuinely cannot be determined.
+
+Two amendments, both from measuring rather than reasoning:
+
+- **1.3.4 as written pruned too hard.** Taking only the branch whose guard
+  resolves is right for `if False:` and wrong for `if os.getenv("DEBUG"):` —
+  resolving a guard for our environment says nothing about the deployment's,
+  and the discarded branch is the one a misconfigured deployment takes.
+  Pruning now requires the guard to be provable from source alone, and a
+  conditional assignment merges with the value it might not replace. Precision
+  is protected by grading the result `tentative`, not by deleting it.
+- **1.3.6's "existing tests pass unchanged" did not hold, and should not
+  have.** One test changed: a base module enabling DEBUG whose production
+  module only conditionally disables it now reports production as well. The
+  old rule matched a literal `DEBUG = True` statement and there is none in
+  that file, so it missed a module that really can deploy with DEBUG on.
+  Detecting it is the reason for the migration.
+
 ### Step 1.4 — Secret management rules
 
+Amendment: **1.4.0** was added while starting this step. Steps 1.4 to 1.8 add
+twenty-six settings rules, and writing the fourth copy of the same
+resolve-and-grade loop made it clear the copies would drift — most damagingly
+in confidence, which CI gates on. Extracting it before the rules exist, rather
+than after twenty-six of them disagree, is cheaper.
+
+- **1.4.0** — `SettingsRule` base: the production-reachable module loop, resolution, shared grading and provenance evidence, with `DJS-001` migrated onto it as its first user.
 - **1.4.1** — `DJS-002` hardcoded `SECRET_KEY` literal.
 - **1.4.2** — `DJS-003` weak or placeholder `SECRET_KEY` (`django-insecure-` prefix, `changeme`, entropy below threshold).
+
+  **Done.** Built as a classifier — `weakness(secret)` — rather than as a rule
+  body, because it is a pure function over a string and deserves to be tested
+  as one. Four signals, ordered most specific first so the reported reason is
+  the most useful one that applies: Django's own `django-insecure-` marker;
+  a placeholder, matched case- and punctuation-insensitively; length below 32
+  (where a hex-encoded 128-bit key sits, and clear of `token_hex(16)` at
+  exactly 32, `token_urlsafe(32)` at 43, and Django's 50); and fewer than 6
+  distinct characters over a long value, which catches padding that length
+  alone would pass.
+
+  *Amendment — Shannon entropy was dropped.* The plan said "entropy below
+  threshold", which does not survive contact with short strings: entropy is
+  measured per character, so `"changeme"` scores about 2.75 bits/char, higher
+  than a hex key's 2.0, and a threshold that catches it also catches every real
+  hex key. Length and character-class diversity say the intended thing
+  directly.
+
+  *Amendment — placeholder matching is length-dependent.* Words under six
+  characters (`dev`, `test`, `abc`, `xxx`) match only the whole normalised
+  value; longer phrases (`changeme`, `yoursecretkey`) match anywhere inside it.
+  A random 50-character key over Django's alphabet contains a given three-letter
+  run about once in 2,500, so substring-matching short words would have traded
+  a real defect class for a stream of nonsense.
+
+  *DJS-002 defers to this rule.* A guessable key is everything DJS-002 describes
+  and worse, so reporting both would leave the reader deciding which to act on.
+  The fixtures were split to keep a recall case for each: `vulnerable_project`
+  now carries a strong committed key (DJS-002), `overridden_project` the
+  `django-insecure-` one (DJS-003).
+
+  *Measured:* healthchecks' `envsecret("SECRET_KEY", "---")` moves from DJS-002
+  to DJS-003 — correctly, since `Default: ---` is published in its own
+  configuration docs and so needs no repository access to guess. Recorded as an
+  accepted risk. NetBox unchanged at zero findings.
 - **1.4.3** — `DJS-004` credentials hardcoded in `DATABASES`.
+
+  **Done.** The interesting part was not the rule but reaching the value. A
+  dict collapses to `unknown` as soon as any single entry does, and every real
+  `DATABASES` block takes its host or name from the environment — so reading
+  the resolved setting finds nothing, anywhere, while looking like it worked.
+  Confirmed by measurement: healthchecks' `DATABASES` resolves to `unknown`
+  entirely because of `os.getenv("DB_HOST", "")`.
+
+  So `_base.py` gained `entries()`, which walks the assignment's AST and
+  evaluates each entry independently, and `SettingGroup.narrow()`, which grades
+  a finding on the part rather than the whole. `SettingsView` now carries the
+  `Scope` the module left behind, which is what makes re-evaluating a
+  sub-expression possible. The AST is also the only thing that has line
+  numbers, so this is what lets a finding point at the `"PASSWORD"` line rather
+  than at `DATABASES = {`.
+
+  *Amendment — `entries()` falls back to the resolved value.* NetBox writes
+  every setting as `getattr(configuration, 'NAME', <default>)`, so there is no
+  dict literal in the source to walk. A rule that only handled literals would
+  report nothing on an entire configuration idiom and look like it had checked.
+  Such entries carry no node, so the finding points at the assignment.
+
+  *Measured:* no findings on either target, and verified to be silent for the
+  right reason rather than by accident — the rule reaches healthchecks'
+  `default` alias, reads all seven of its keys, and finds
+  `envsecret("DB_PASSWORD", "")`, whose empty fallback is not a disclosure.
+  Recall comes from the fixture, where the planted password sits beside an
+  unresolvable `HOST` on purpose.
 - **1.4.4** — `DJS-005` secrets in other well-known settings (`AWS_SECRET_ACCESS_KEY`, `STRIPE_SECRET_KEY`, `EMAIL_HOST_PASSWORD`, `*_API_KEY`, `*_TOKEN`) by name pattern plus literal value.
+
+  **Done.** The first rule that matches settings by name rather than by knowing
+  them, so nearly all the work is in *not* firing. Two conditions, both
+  necessary:
+
+  - the credential word must **end** the name. `PASSWORD_HASHERS`,
+    `AUTH_PASSWORD_VALIDATORS` and `PASSWORD_RESET_TIMEOUT` all contain
+    `PASSWORD` and all hold policy. Requiring the word to come last separates
+    them without a list of exceptions to maintain.
+  - bare `_KEY` never matches. `CACHE_KEY_PREFIX`, `EMAIL_SSL_KEYFILE` and
+    healthchecks' own `TRELLO_APP_KEY` are ordinary configuration, so the word
+    in front is what gets matched: `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`,
+    `SIGNING_KEY`, `CLIENT_SECRET` and so on.
+
+  The value must also be a non-empty string that is not an import path, since
+  `FOO_TOKEN = "myapp.tokens.Backend"` names a class. `SECRET_KEY` is excluded
+  outright — DJS-002 and DJS-003 own it and say more.
+
+  *Severity is split.* `HIGH` by default, `CRITICAL` for key material
+  (`PRIVATE_KEY`, `SIGNING_KEY`, `ENCRYPTION_KEY`). A leaked service token is
+  bounded by that service's permissions and can be revoked there; key material
+  compromises everything it ever protected, including data already at rest.
+  `ACCESS_KEY` stays `HIGH` deliberately — an access key *id* is an identifier,
+  not the credential beside it.
+
+  *Measured before it was written, which is what set the thresholds.* Surveying
+  every secret-shaped setting on both targets found 23: healthchecks resolves
+  all of its real ones (`GITHUB_PRIVATE_KEY`, `TELEGRAM_TOKEN`, `S3_SECRET_KEY`
+  …) to `None` via `os.getenv` with no default, `EMAIL_HOST_PASSWORD` to `""`,
+  and `PASSWORD_HASHERS` to a list of dotted paths; NetBox's `API_TOKEN_PEPPERS`
+  is `{}` and its `EMAIL_SSL_KEYFILE` is `None`. **Zero findings on both
+  targets**, and the exclusion list is drawn from those names rather than
+  invented.
+
+  *Supporting change:* `SettingsRule.selects()` lets a rule match a family of
+  settings. A rule naming one setting still goes through `view.get`, so Django's
+  default applies and an absent setting can be the finding; a family rule sees
+  only what the project assigns, since there is no default for a setting nobody
+  has heard of.
 
 ### Step 1.5 — Transport and cookie security rules
 
 - **1.5.1** — `DJS-006` `SECURE_SSL_REDIRECT` not enabled.
+
+  **Done.** `FlagRule` in `rules/_base.py` now carries the whole family: a flag
+  that must be `True`, ships `False`, and is worth reporting when absent. Three
+  things had to be got right before the first rule was worth having.
+
+  *An unset flag is the insecure state, so absence must be reportable.* That is
+  new — every rule before this one needed an assignment to point at. `report()`
+  gained an `at:` override and `groups()` now buckets a setting that is absent
+  everywhere into a single group keyed `(name, "", 0)`, because the first
+  version reported once per settings module and produced six findings on a
+  fixture with three defects.
+
+  *A base module that merely omits the flag is not a defect.* Every environment
+  that matters sets it, and the value in the base is not wrong, it is absent.
+  This is deliberately different from `DJS-001`, where the base writes
+  `DEBUG = True` down and is overridden anyway: a wrong value is worth saying
+  even when something later corrects it. `overridden_project` pins both halves.
+
+  *Confidence is where honesty about a proxy lives.* `SECURE_SSL_REDIRECT` is
+  capped at `firm`, never `certain`, because nginx or a load balancer may be
+  doing the redirect and no amount of reading the source will reveal it. Relying
+  on Django's default costs a further step, so an unset flag lands at
+  `tentative`. This is the difference between a useful rule and a reimplementation
+  of `check --deploy`'s noise.
+
+  `DJS-001`'s private `_overridden` was generalised onto `SettingsRule` and the
+  duplicate deleted; its fingerprint `204f74697636c950` is unchanged, so the
+  recorded healthchecks verdict still applies.
+
+  Triaged on both targets: healthchecks reads `SECURE_PROXY_SSL_HEADER` from the
+  environment, which says the redirect belongs to the proxy — `accepted_risk`.
+  NetBox exposes the setting as a documented operator knob — `accepted_risk`.
+  Precision stays 100% on both.
 - **1.5.2** — `DJS-007` `SECURE_HSTS_SECONDS` absent or below one year.
+
+  **Done.** The first numeric rule, so `FlagRule`'s body was lifted into
+  `InsecureDefaultRule` — the split-settings handling is the part that is easy
+  to get subtly wrong and not worth debugging twice — leaving `FlagRule` as
+  `insecure = could_be_off`. `DJS-001`'s fingerprint and all recorded verdicts
+  survived the move.
+
+  The threshold is one year because that is the HSTS preload list's published
+  requirement, not a number we picked. `could_be_under` treats anything that is
+  not an `int` at or above it as too short, which folds in `None`, strings and
+  the `True` trap — `True` is an `int` in Python and is not a duration.
+
+  This rule is deliberately the quietest in the step: `low` severity, ceiling
+  `firm`, so an unset value lands at `tentative` and stays out of a default run.
+  HSTS is the one header whose absence from Django settings is genuinely weak
+  evidence — nginx, load balancers and every CDN can send it, doing so is
+  common, and none of it is visible from here.
+
+  Two messages, not one. Absent or `0` means HSTS is off; a non-zero value under
+  a year is described as a ramp-up that was started and never finished, because
+  Django's own advice is to ramp. The remediation says plainly that the header
+  is sticky and cannot be recalled early — this is the only advice we ship that
+  can take a site offline if followed carelessly, and a test pins that wording.
+
+  Both targets `accepted_risk`: healthchecks mentions HSTS nowhere at all,
+  NetBox exposes it as a documented operator knob. Precision 100% on both.
+
+  Also fixed a test that had broken twice as the family grew, each time because
+  a new rule needed the shared fixture to set whatever setting the test had
+  picked as its example of "unset". It now builds its own project.
 - **1.5.3** — `DJS-008` `SECURE_HSTS_INCLUDE_SUBDOMAINS` disabled while HSTS is on.
+
+  **Done.** The first rule whose answer depends on a *different* setting, so
+  `InsecureDefaultRule` gained an `applies()` hook. Off is the correct value
+  for this flag while HSTS is switched off — there is no policy to extend — so
+  a rule that fired regardless would be telling people to change a setting that
+  does nothing. An unresolvable duration counts as off for the same reason:
+  guessing costs noise on every project that reads it from the environment.
+
+  NetBox is the control that proves this, and it is a real one rather than a
+  contrived fixture: it sets `SECURE_HSTS_INCLUDE_SUBDOMAINS = False` at
+  settings.py:202 *and* `SECURE_HSTS_SECONDS = 0` at 204. A naive rule reports
+  it; this one is silent, and both targets stayed at their existing finding
+  counts when it was added.
+
+  Recall therefore needed a planted defect, so `vulnerable_project` now carries
+  an HSTS ramp that was started and never finished — one hour with
+  includeSubDomains still off. That single change exercises `DJS-007`'s
+  unfinished-ramp branch and `DJS-008` together, which is the only state in
+  which `DJS-008` has anything to say.
+
+  Adding it surfaced the one-defect-one-finding rule in a new guise: `DJS-007`
+  fired twice, once at production's real value and once at the base for never
+  mentioning it. The base check now returns early when every production heir
+  *assigns* the setting, not only when every heir assigns it safely — each heir
+  is judged on the value it actually sets, so blaming the base for staying
+  silent reports one missing setting twice.
+
+  Also derived the fixture line numbers in `tests/test_evaluation.py` instead of
+  pinning them. Planting this defect shifted `DEBUG = True` down six lines and
+  broke three tests that had nothing to do with it.
 - **1.5.4** — `DJS-009` `SESSION_COOKIE_SECURE` disabled.
+
+  **Done.** The first rule where we can say `certain` and mean it. Nothing in
+  front of Django changes a cookie attribute: if `Secure` is not set, the
+  browser sends the session cookie over plain HTTP, and no proxy, load balancer
+  or CDN alters that. So where `DJS-006` is capped at `firm` because the
+  redirect may be someone else's job, this one is capped at `certain` — the
+  ceiling is where each rule records how much of the story it can actually see.
+
+  Severity is `high` rather than `DJS-006`'s `medium`, because the thing on the
+  wire is the session itself. Reading it is the attack; there is no second step.
+
+  Healthchecks is the interesting target. It never sets this and, unlike `DEBUG`
+  or `SECRET_KEY`, offers no environment variable for it either, so an operator
+  cannot turn it on without patching `settings.py`. It clearly expects a
+  TLS-terminating proxy — it reads `SECURE_PROXY_SSL_HEADER` from the
+  environment — but a proxy does not set this flag. Recorded as
+  `true_positive`, the first one in the benchmark. NetBox exposes it as a
+  documented operator knob and stays `accepted_risk`.
 - **1.5.5** — `DJS-010` `CSRF_COOKIE_SECURE` disabled.
+
+  **Done.** Mechanically identical to `DJS-009` — same `certain` ceiling, same
+  reasoning about what a proxy cannot change — and deliberately a step lower in
+  severity. Reading a CSRF token is not itself an attack; it is the first half of
+  one, and the attacker still needs a way to make the victim's browser send the
+  forged request. `medium` rather than `high` keeps that distinction visible in a
+  sorted report, which matters more than it sounds: a family of rules that all
+  shout equally loudly is a family nobody reads.
+
+  Both targets behave exactly as they did for `DJS-009` and both stay
+  `accepted_risk`; precision is unchanged at 100%.
 - **1.5.6** — `DJS-011` `SESSION_COOKIE_HTTPONLY` disabled.
+
+  **Done.** The one rule of the four where doing nothing is the right answer:
+  Django ships `SESSION_COOKIE_HTTPONLY` as `True`, so this fires only when a
+  project has gone out of its way to turn it off. That makes it silent on both
+  benchmark targets and on both fixtures, and it is the only rule in this step
+  that added no triage entries at all.
+
+  It is worth having anyway, and worth having as `certain`. Turning it off is
+  never incidental — it means some JavaScript wanted to read the session cookie
+  — and it converts any cross-site scripting flaw anywhere on the origin into
+  full session theft. A rule that only speaks when someone made a deliberate
+  choice is exactly the kind that keeps a report readable.
 - **1.5.7** — `DJS-012` `SECURE_PROXY_SSL_HEADER` trusting a client-controllable header.
+
+  **Done.** This rule fires on correctly configured deployments by design,
+  which made "not being noise" the whole design problem. Three answers:
+
+  *Absent is safe and silent.* Unlike the rest of the step, Django's default
+  here is the secure one, so the rule only speaks when a project opted in.
+  Unresolvable is silent too — healthchecks builds the value from an
+  environment variable and we learned nothing.
+
+  *A well-formed value is `low`/`tentative`.* We can read the setting; we cannot
+  see the proxy, and the proxy is the entire question. That keeps it out of a
+  default run while leaving it in SARIF and the baseline, which is where a
+  "confirm this invariant once" finding belongs. The message names the header
+  the way a person would write it in an nginx config, not as the WSGI key.
+
+  *One branch is escalated, and it is the reason the rule exists.* A header
+  spelled `X-Forwarded-Proto` rather than `HTTP_X_FORWARDED_PROTO` is not a
+  WSGI environment key, so Django looks it up in `request.META`, never finds
+  it, and falls back to the real connection scheme. The setting does nothing
+  and nothing anywhere reports it — the operator believes TLS termination is
+  being honoured and it is not. Reported at `medium`/`firm` with the working
+  spelling computed into the remediation. A bare string or a one-item tuple is
+  caught the same way, since Django raises `ImproperlyConfigured` on every
+  request.
+
+  NetBox has the textbook value at settings.py:601 and is `accepted_risk` —
+  correct configuration, worth exactly one review. `vulnerable_project` carries
+  the misspelling as a planted defect.
 
 ### Step 1.6 — Host, origin, and framing rules
 
 - **1.6.1** — `DJS-013` `ALLOWED_HOSTS` wildcard or empty while DEBUG is off.
+
+  **Done.** The first list-valued rule, so `hosts.py` opens with `entries_of`,
+  which returns every list a value could be rather than one. The distinction
+  that matters is *unreadable* versus *empty*: both benchmark targets drive
+  `ALLOWED_HOSTS` from configuration we cannot see, and a rule that treated
+  "cannot read" as "empty" would report both of them wrongly on its first run.
+
+  Two failures share the setting and are graded apart. A wildcard is `high`:
+  the Host header is client-controlled and Django builds absolute URLs from it,
+  so `django.contrib.auth` will put an attacker's hostname into a genuine
+  password-reset link and mail it to the victim. An empty list is `low` and
+  conditional on DEBUG — with DEBUG on Django allows localhost, which makes
+  empty the correct state of a module you only run locally; with DEBUG off it
+  is a deployment that 400s every request, which is a broken site rather than
+  an exposed one, and the message says so.
+
+  Both targets stay silent, so recall comes from `vulnerable_project`, which
+  now opens `ALLOWED_HOSTS` to `"*"`.
+
+  Two things measurement settled. Only a bare `"*"` disables the check, so
+  `"*.example.com"` is matched literally and reported by nobody — the
+  remediation names it, because it looks like it works. And a ternary collapses
+  to the environment's default value before a rule ever sees it, while an
+  `if`/`else` module stays conditional; the tests use the latter.
+
+  `could_be_true` moved from `rules/settings.py` to `_base.py` beside
+  `could_be_off`, and `InsecureDefaultRule` gained `severity_for()`.
 - **1.6.2** — `DJS-014` `CSRF_TRUSTED_ORIGINS` wildcard or scheme-less entry.
+
+  **Done.** This rule is a reading of four lines of `CsrfViewMiddleware`, so it
+  was written from those lines rather than from the documentation. Django takes
+  `urlsplit(origin).netloc`, strips leading asterisks, and gives the result to
+  `is_same_domain`, which treats a pattern as a subdomain wildcard only when it
+  begins with a dot. `csrf_pattern()` reproduces that derivation and everything
+  else follows from it, including a parametrised test that pins the derivation
+  itself so the rest of the rule cannot drift away from the framework.
+
+  Three verdicts come out. A wildcard whose base has one label — `https://*.com`
+  — trusts every host under a top-level domain, which is nobody's intention and
+  no one's infrastructure, so it is `high`/`firm`. A wildcard over your own
+  domain is `medium` but capped at `tentative`: whether every subdomain is
+  yours is precisely the question the source cannot answer, and a tenant host
+  or a stale CNAME turns it into a real one. And an entry the middleware
+  reduces to nothing — anything with no scheme, which is the spelling this
+  setting required before Django 4.0, or an asterisk with no dot after it — is
+  `medium`/`firm`, because that is a fact about the string rather than a guess
+  about a network.
+
+  That last branch is the same failure as `DJS-012`'s misspelled proxy header
+  and is worth as much: Django does flag it, as `4_0.E001`, but system checks do
+  not run under gunicorn, so a deployment that never invokes `manage.py` never
+  hears it. The message names what the entry reduces to, because the entry
+  looks correct and the derived value is the evidence that it is not.
+
+  Both targets set the list to `[]`, so `vulnerable_project` carries the
+  scheme-less entry beside a working one, and `overridden_project` carries the
+  same list written correctly.
+
+  `InsecureDefaultRule` gained `ceiling_for()` alongside `severity_for()`: one
+  value of a setting can be a fact and another a judgement, and grading the two
+  apart means grading their certainty apart too.
 - **1.6.3** — `DJS-015` `CORS_ALLOW_ALL_ORIGINS` enabled.
+
+  **Done.** Read from `corsheaders/conf.py` and `corsheaders/middleware.py`
+  rather than from the README, and both files changed the design. `conf.py`
+  reads `getattr(settings, "CORS_ALLOW_ALL_ORIGINS", getattr(settings,
+  "CORS_ORIGIN_ALLOW_ALL", False))`, so the pre-3.5 name is still live — which
+  matters immediately, because it is the only spelling NetBox uses. It also
+  means the modern name wins by being *assigned at all*, even when assigned
+  `False`, so a project part-way through the rename has a legacy `True` that
+  the package never reads and that we must not report.
+
+  That is a shape the base can own rather than one rule, so `SettingsRule`
+  gained `aliases` and `resolve()`, which walks the same chain the package
+  walks. `groups()` and `overridden()` both go through it. Rules without
+  aliases are unaffected.
+
+  Two preconditions keep it quiet. `CORS_ALLOW_CREDENTIALS` being on hands the
+  finding to `DJS-016`, because the middleware then stops sending `*` and
+  starts echoing the caller's origin — a different and much worse defect, and
+  one ticket is the right number. And the setting only produces a header if
+  `CorsMiddleware` is installed, so `installs_middleware()` answers in three
+  values: installed, definitely not installed, or unreadable. Only the middle
+  one buys silence; plenty of projects assemble `MIDDLEWARE` conditionally, and
+  reading "cannot tell" as "not installed" would lose every one of them.
+
+  Graded `medium`/`firm`, not higher: a wildcard is correct for an API whose
+  data is already public. The two readings worth having are in the message —
+  an internal service reachable through any browser inside the perimeter, and
+  what happens the day someone switches credentials on.
+
+  `vulnerable_project` uses the legacy spelling so the alias chain is exercised
+  by the recall gate itself; `overridden_project` names its front-end in
+  `CORS_ALLOWED_ORIGINS` instead.
 - **1.6.4** — `DJS-016` CORS wildcard combined with `CORS_ALLOW_CREDENTIALS`.
+
+  **Done.** One line of `CorsMiddleware.add_response_headers` is the whole
+  rule: `if CORS_ALLOW_ALL_ORIGINS and not CORS_ALLOW_CREDENTIALS` sends `*`,
+  and *otherwise* reflects the request's own `Origin` back. A wildcard is only
+  survivable because browsers refuse to send cookies to one; switching
+  credentials on makes the package stop sending the wildcard, and that refusal
+  goes with it. With allow-all on, no origin is checked against a list first,
+  so every origin is reflected and every one of them is told credentials are
+  welcome. `critical`/`certain`: both values are read directly and the
+  behaviour has no other input.
+
+  The precondition is the exact inverse of `DJS-015`'s, so between them an open
+  CORS policy is reported once and never twice — which the tests assert
+  directly, over every combination, rather than trusting the reading.
+
+  Neither existing fixture could host it: adding credentials to
+  `vulnerable_project` would have silenced the `DJS-015` case it was carrying.
+  So this substep adds **`tests/fixtures/api_project`**, a browser-facing API
+  in a *single* settings module. That shape is worth having on its own — it is
+  what most Django projects look like, and every rule so far had only ever been
+  run against an inheritance chain, so a rule that quietly assumes a base
+  module exists now has somewhere to fail. Everything in it is deliberately
+  correct except the planted pairing, which makes it a control for the whole
+  family as much as a recall case, and `DJS-015` is listed in `must_not_report`
+  so the deferral is enforced by the eval gate rather than only by unit tests.
+  It also pins `DJS-012`'s informational branch, which nothing else exercised.
 - **1.6.5** — `DJS-017` `X_FRAME_OPTIONS` permissive or `XFrameOptionsMiddleware` absent.
+
+  **Done.** First, the gap this exposed: `DJANGO_DEFAULTS` had no
+  `X_FRAME_OPTIONS`, so an unset one read as *absent* rather than as `DENY`.
+  Healthchecks never mentions the setting and was therefore invisible to a rule
+  that had not been written yet. Added, no version gate needed — Django moved
+  the default from `SAMEORIGIN` to `DENY` in 3.0, well below our 5.2 floor.
+
+  The header defines two values and browsers ignore anything else outright,
+  with no fallback, so `ALLOWALL` is worse than silence: framable, and the
+  settings file says otherwise. `ALLOW-FROM` sits in the same group and gets
+  its own sentence, since it reads like a precise policy and Chrome never
+  implemented it. `SAMEORIGIN` is not reported — NetBox sets exactly that, and
+  Django's own `W019` calls `DENY` a preference rather than a requirement.
+
+  The second way to be framable is to have no `XFrameOptionsMiddleware`, which
+  is a defect in a different setting with the same consequence and the same
+  fix, so it is one rule. `InsecureDefaultRule` gained `insecure_here()`, which
+  judges a situation where `insecure()` judges a value. It is suppressed when a
+  CSP is configured, because `frame-ancestors` supersedes this header and a
+  project that has moved on has not left anything switched off.
+
+  Grading that branch took a correction worth recording. It arrived at
+  `tentative`, because the shared policy charges a step of confidence when a
+  setting is at its Django default — but this branch does not depend on the
+  value at all; its evidence is `MIDDLEWARE`, read directly. Both branches have
+  the same consequence and the same single uncertainty (an edge proxy may send
+  the header itself), so `ceiling_for()` starts this one at `certain` and lets
+  the step land it beside its sibling at `firm`, rather than a grade below and
+  out of default runs.
+
+  `installs_middleware()` also needed fixing: it answered "not installed" for a
+  list where only some branches were readable. NetBox is exactly that shape,
+  so the bug was one conditional import away from a false positive.
+
+  Recall came free — `vulnerable_project` never had the middleware. The other
+  two fixtures now install it and list `DJS-017` as a control.
 - **1.6.6** — `DJS-018` `SECURE_CONTENT_TYPE_NOSNIFF` disabled.
+
+  **Done.** The only flag in this family Django already ships switched on,
+  which changes what the rule can say: there is no forgotten case, so reaching
+  a finding means someone wrote the line out and set it to `False`. Both
+  targets sit at the default and stay silent, as does the whole absent case.
+
+  Worth having anyway, because of what the header stops. Without nosniff a
+  browser inspects the body and decides for itself what a response is, so a
+  file uploaded as something harmless and served back can be sniffed into
+  HTML and run in the site's own origin — any upload feature becomes stored
+  XSS. The remediation answers the reason it actually gets switched off, which
+  is a download a browser insisted on rendering: `Content-Disposition` fixes
+  that one response instead of every response.
+
+  `firm` rather than `certain`: an edge proxy commonly adds the header itself,
+  and `SecurityMiddleware` has to be installed for the setting to mean
+  anything.
 
 ### Step 1.7 — Authentication and database rules
 
 - **1.7.1** — `DJS-019` weak `PASSWORD_HASHERS` (MD5, SHA1, or unsalted) in a production-reaching module.
+
+  **Done.** Django hashes with `PASSWORD_HASHERS[0]` and keeps the rest only to
+  verify hashes that already exist, so only the leading entry is reported. That
+  is the whole design of the rule: leaving a weak hasher further down the list
+  is Django's own documented migration path, and flagging it would flag the
+  fix. The blind spot is recorded rather than hidden — an account that has not
+  logged in since the migration still holds the old hash and we say nothing.
+
+  `PBKDF2SHA1PasswordHasher` is explicitly not weak: SHA1 there is the PRF
+  inside PBKDF2, iterated hundreds of thousands of times. Matching on the
+  substring rather than the class name would have made a real settings module a
+  false positive, so there is a test pinning it.
+
+  Measured first, as always. Healthchecks sets `PASSWORD_HASHERS` explicitly
+  with Argon2 first; NetBox never sets it and inherits Django's PBKDF2 default.
+  Both stay silent, so recall comes from the fixture: `base.py` now puts MD5
+  first with PBKDF2 below it — the shape a test-suite speed-up leaves behind,
+  which survives review precisely because every existing login keeps working.
+  Reported at `high`/`certain`, since the list is read directly with no proxy,
+  middleware or environment between it and what Django writes to the database.
+
+  The four hashers Django removed in 5.1 are still recognised. A settings
+  module naming one is describing what its database already holds, and reading
+  a repository is not the same as running it.
+
+  `entries_of`, `any_entry` and `definitely_empty` moved from `hosts.py` into
+  `_base.py`; they are generic list helpers and a second family now needs them.
 - **1.7.2** — `DJS-020` `AUTH_PASSWORD_VALIDATORS` empty or absent.
+
+  **Done.** This setting is the only password policy Django has — nothing else
+  in the framework looks at what a password contains, and every path that sets
+  one reaches the same `validate_password()`, which returns without checking
+  anything when the list is empty. The trap is that Django's default and
+  Django's project template disagree: `global_settings` ships `[]` while
+  `startproject` writes four validators into the generated file, so an empty
+  list looks like a configuration rather than the absence of one.
+
+  Graded at `medium`/`firm`, and the ceiling stayed at `CERTAIN` deliberately.
+  The doubt this rule carries is real — a project can enforce a policy in a
+  form and never touch the setting, which is exactly what Healthchecks does —
+  but it is doubt about the *consequence*, not about the value. Charging it to
+  the ceiling would double-count against the never-assigned case, which is the
+  normal shape of the defect and already pays a step for resolving to the
+  Django default; it would land at `tentative` and vanish below the default
+  output threshold. So a new `caveats` hook on `InsecureDefaultRule` carries it
+  onto the finding, where the reader sees it, instead of into a grade that
+  hides the finding. That distinction — ceiling for the value, caveat for the
+  consequence — is now written down in `_base.py`.
+
+  `applies()` requires `django.contrib.auth` to be installed, via a new generic
+  `lists_entry()` in `_base.py` that `installs_middleware()` now delegates to.
+  Three-valued, for the usual reason: an unreadable `INSTALLED_APPS` must not
+  be read as "auth is not installed".
+
+  Measured: Healthchecks never sets it and is a genuine finding, triaged
+  `true_positive` with the mitigation written down — `SetPasswordForm` declares
+  `min_length=8`, which still accepts `"12345678"`, does not reach
+  `createsuperuser` (which reimplements its own check), and has no equivalent
+  of `CommonPasswordValidator`. NetBox configures two validators and stays
+  silent. The vulnerable fixture carries the forgotten case; the other two
+  fixtures gained validators and are the controls.
 - **1.7.3** — `DJS-021` `CONN_MAX_AGE` at the default of 0, forcing a new connection per request.
+
+  **Done.** The first rule about the *contents* of a nested mapping, so most of
+  the work is a new `database.py` that two more rules will reuse. Two problems
+  had to be solved. A real `DATABASES` block always holds something from the
+  environment, so the setting resolves to unknown and a rule waiting on it
+  would never fire — `entries()` is applied twice, once per level. And projects
+  assign `DATABASES` more than once: Healthchecks writes it three times, once
+  plainly and twice inside `if` statements keyed on `DB`, so the value the
+  resolver settles on is the *last* branch. Reading only that would have
+  inspected the MySQL block of a project deployed on Postgres. `DatabaseAliasRule`
+  therefore walks every live assignment — everything from the last
+  unconditional one onward, since a plain reassignment makes what precedes it
+  dead code — and hands each rule one alias with all of its possible shapes.
+
+  The rule itself is deliberately the narrowest in the family. `CONN_MAX_AGE`
+  at 0 is Django's default, so stated broadly it fires on nearly every project
+  ever written. Three exclusions make it mean something: SQLite (opening a file
+  is not a handshake, and Django warns that persistent connections there cause
+  locking problems), a configured `OPTIONS['pool']` (Django refuses to start
+  with both, so a pool is a deliberate answer), and any branch that reuses
+  connections. A branch whose `ENGINE` is unreadable also suppresses it, since
+  that branch might be the one that runs.
+
+  Graded `low`, ceiling `FIRM`, with a permanent caveat: an external pooler
+  makes 0 correct and is invisible from the settings. Wiring that caveat up
+  moved the `caveats` hook from `InsecureDefaultRule` to `SettingsRule`, where
+  `report()` — the single funnel every rule passes through — applies it.
+
+  Measured: Healthchecks reports once, at the Postgres branch's
+  `envint("DB_CONN_MAX_AGE", "0")`, landing at `tentative` on its own because
+  the value is env-dependent *and* conditional; triaged `accepted_risk`, since
+  self-hosted software exposing the knob has handed the decision to the
+  operator. NetBox builds `DATABASES` from an unreadable `configuration` object
+  and stays silent, which is the correct answer rather than a lucky one.
 - **1.7.4** — `DJS-022` Postgres connection without `sslmode=require`.
-- **1.7.5** — `DJS-023` `ATOMIC_REQUESTS` disabled where the project otherwise implies it — informational, low severity.
+
+  **Done.** libpq's default `sslmode` is `prefer`, which is the worst default
+  to inherit by accident: it asks the server for TLS, accepts a refusal without
+  complaint, and reports nothing either way. A session that silently fell back
+  to plaintext is indistinguishable from an encrypted one from inside the
+  application, and what travels over it is the database password on the way in
+  and every row on the way back.
+
+  Three precision guards, each measured rather than assumed. Non-Postgres
+  engines are skipped, but the match is loose — `postgis`, `psqlextra` and the
+  gevent pool wrap the same libpq connection and take the same `OPTIONS`, and
+  a rule recognising only the stock backend would go quiet on the projects most
+  likely to be a real deployment. A `HOST` that is absent, empty, loopback or a
+  socket path is skipped, because libpq ignores `sslmode` on a Unix socket and
+  an attacker on loopback has already won; env-dependence defeats that guard on
+  purpose, since the literal we can see is the fallback and the deployment that
+  matters is the one that sets the variable. And an `OPTIONS` we cannot read
+  suppresses the finding entirely, because the `sslmode` might be in there.
+
+  `require` and above stay silent. `require` does not authenticate the server,
+  so this is a deliberate concession to precision over purity, and the
+  remediation says plainly that `verify-full` with `sslrootcert` is the setting
+  that actually checks who answered.
+
+  The branch logic is the inverse of DJS-021's, which is worth stating: that
+  rule asks whether anyone thought about a setting, so any branch answering it
+  settles the question; this one asks whether a deployment exists that talks to
+  the database in the clear, and a second branch doing it properly does not
+  un-expose the first. One bad branch is enough, one finding per alias.
+
+  Measured: Healthchecks reports at `medium`/`tentative` on
+  `os.getenv("DB_SSLMODE", "prefer")`, and `docker/.env.example` ships
+  `DB_SSLMODE=prefer` too, so the documented starting point is the downgradable
+  one; triaged `accepted_risk`, because self-hosted software exposing the knob
+  is doing the right thing and many self-hosters are on a Unix socket. NetBox
+  stays silent.
+- **1.7.5** — `DJS-023` a per-alias database key assigned at module level, where Django never reads it.
+
+  **Done.** This substep originally read "`ATOMIC_REQUESTS` disabled where the
+  project otherwise implies it — informational, low severity", and measuring it
+  killed it. `False` is Django's default *and* what Django's own documentation
+  recommends for most projects, so a rule reporting its absence would fire on
+  nearly every Django application ever written while telling each one to adopt
+  a setting the framework advises against. There was no version of it worth
+  shipping.
+
+  Reading Django's source turned up something much better in the same place.
+  `ATOMIC_REQUESTS`, `AUTOCOMMIT`, `CONN_MAX_AGE`, `CONN_HEALTH_CHECKS` and
+  `DISABLE_SERVER_SIDE_CURSORS` are **not settings**. They are keys inside a
+  `DATABASES` alias: `ConnectionHandler.configure_settings()` fills their
+  defaults in per connection and `django.core.handlers.base` reads
+  `settings_dict["ATOMIC_REQUESTS"]`. None appear in `global_settings.py` at
+  all, so assigning one at module level does not override anything — it invents
+  a setting nothing reads. Nothing warns, because there is no system check for
+  a setting that does not exist, and the application behaves exactly as it did
+  before the line was added. That is the danger: with `ATOMIC_REQUESTS = True`
+  the author now believes a view that raises halfway through rolls back.
+
+  So DJS-023 became the third member of this phase's "silently does nothing"
+  family, after DJS-012 and DJS-014 — the shape this analyzer is best at and
+  that no linter or deploy check covers. `medium`/`certain` for the two
+  transaction keys, `low` for the three connection keys, graded by what the
+  reader would wrongly believe.
+
+  The one false positive worth defending against is the module-level constant
+  that *is* referenced from inside the alias, which is a perfectly good way to
+  write it; `references()` walks the `DATABASES` assignments of every
+  production-reaching module looking for the name. `ENGINE`, `NAME` and the
+  credential keys are deliberately excluded — nobody writes them at module
+  level believing Django reads them, and they are far too common as ordinary
+  helper constants.
+
+  Measured: neither target assigns any of these at module level, so both stay
+  silent and recall comes from the fixture, where `production.py` now carries
+  `ATOMIC_REQUESTS = True`.
 
 ### Step 1.8 — Introspection exposure rules
 
 - **1.8.1** — `DJS-024` debug tooling in production `INSTALLED_APPS` (`debug_toolbar`, `django_extensions`, `silk`).
+
+  **Done.** Measuring NetBox before writing the rule changed its whole shape.
+  NetBox lists `debug_toolbar` in `INSTALLED_APPS` and then calls
+  `INSTALLED_APPS.remove('debug_toolbar')` unless `DEBUG` — which is exactly
+  right, and the obvious implementation would have reported it. So the rule
+  fires only on an app present on *every* branch it could read; a project that
+  removes it on some path has already thought about this.
+
+  The packages are graded separately rather than lumped together as "debug
+  tooling", because reading them shows they are not remotely equivalent.
+  `django-silk` is the dangerous one and gets talked about the least: no
+  `DEBUG` gate of any kind, `SILKY_INTERCEPT_PERCENT` of 100, request headers
+  and bodies and SQL parameters all stored, and `SILKY_AUTHENTICATION` and
+  `SILKY_AUTHORISATION` both defaulting to `False` — so `high`.
+  `django-debug-toolbar` is comparatively safe, because its default
+  `show_toolbar` returns `False` whenever `DEBUG` is off, so `medium` — but
+  overriding `SHOW_TOOLBAR_CALLBACK` removes the only thing keeping it off, and
+  that escalates to `high`. `django-extensions` exposes nothing by itself and
+  only puts `runserver_plus` — the Werkzeug debugger — within reach, so `low`.
+  Silk with both of its access controls switched on is downgraded to `low` in
+  turn: the objection has been answered.
+
+  Matching is on the first dotted component, so `debug_toolbar` and
+  `debug_toolbar.apps.DebugToolbarConfig` are the same package; a rule a
+  project's choice of spelling could switch off is not a rule. Ceiling `FIRM`
+  with a standing caveat, since what a package exposes also depends on the
+  urlconf, which this phase does not read.
+
+  Both targets stay silent. Recall comes from the fixture, which now carries
+  `silk` and `django_extensions` in `INSTALLED_APPS` — one `high`, one `low`,
+  from the same list.
 - **1.8.2** — `DJS-025` debug tooling in the production dependency manifest.
+
+  **Done.** Deliberately the complement of `DJS-024` rather than a second
+  opinion on it: if the app is unconditionally installed, that rule has already
+  said so at the severity a running profiler deserves, and this one stays quiet.
+  What is left is the case `DJS-024` cannot state, and it is the one worth
+  having — a package that is on the machine but not switched on, where the
+  guard is a *value* rather than the absence of the code. NetBox is the exact
+  shape: it ships `django-debug-toolbar` in `base_requirements.txt` and removes
+  the app unless `DEBUG`, which is correct, and leaves a deployment where an
+  operator debugging an incident turns the SQL panel on by accident. That is
+  `low`. A package nothing installs at all is `info` — image weight and a
+  better toolkit for anyone who gets a foothold.
+
+  Most of the work is in `manifest.py`, and all of the risk is in one decision:
+  which manifests count as production. Too permissive and the rule is silent on
+  real deployments; too strict and it reports every project that has correctly
+  separated its tooling. So classification reads names only, never contents —
+  a filename whose words include a development token, or a TOML table that
+  says so. Healthchecks is the control that proves it: its `mypy`, `pytest` and
+  `mysqlclient` all sit in `requirements-dev.txt`, and it stays silent.
+  NetBox's `base_requirements.txt` must *not* be read as development despite
+  the word "base", which is why matching is on whole words.
+
+  The reader covers pip requirements files including `-r`/`-e`/`--index-url`
+  lines, extras, environment markers, direct references and backslash
+  continuations; PEP 621 dependencies and optional-dependencies; PEP 735
+  dependency groups; Poetry's tables; and `Pipfile`. Names are compared per
+  PEP 503, and a project listing a package in both a `.in` source and its
+  compiled `.txt` is reported once, against the source, because editing the
+  output is how a dependency comes back on the next `pip-compile`.
+
+  Building the fixture found a real defect in `DJS-024`: a production module
+  that rebuilds the list — `INSTALLED_APPS = [*INSTALLED_APPS, "debug_toolbar"]`
+  — is a second decision site for every app the base module named, and the rule
+  reported those apps again at the rebuild's weaker confidence. It now reports
+  where an app is *named*, not where the setting is decided, so one line to
+  delete is one finding. Fixed and pinned.
 - **1.8.3** — `DJS-026` `ADMIN` mounted at the default path with no additional protection — informational.
+
+  **Done.** Reported at `info`, and the rationale says out loud why: this is
+  obscurity, not security. What the default path actually costs is *signal* —
+  every scanner on the internet tries `/admin/` continuously, so a Django site
+  there has a permanent background of credential stuffing in its logs and a
+  real attempt against a real account is indistinguishable from it. Move the
+  path and every request that arrives is worth reading.
+
+  Because the honest recommendation is "put something in front of it" rather
+  than "move it", the rule goes silent when the project has already done the
+  harder thing: `django-axes`, `django-otp`, `two_factor`, `defender` or a
+  honeypot in `INSTALLED_APPS` settles it. Telling someone who has added
+  lockout and a second factor that they should also rename a URL is how a tool
+  gets ignored.
+
+  This substep is really where the urlconf reader lands, and that is the part
+  Phase 2 needs: `urlconf.py` resolves `ROOT_URLCONF` to a file — matched as a
+  *suffix* of the discovered paths, because a project's importable root is
+  often below the repository root, as NetBox's `netbox/netbox/urls.py` is —
+  and reads every `path`/`re_path`/`url` call in it, wherever it sits.
+  Restricting to the `urlpatterns` assignment would miss routes added by
+  concatenation, inside `if` branches and through helpers, for no gain in
+  accuracy. `include()` is deliberately not followed: a route's real prefix
+  comes from wherever it was included, several files away and conditionally,
+  and guessing it would produce confident wrong URLs.
+
+  Patterns are read as far as they are knowable. Healthchecks writes
+  `path(f"{prefix}admin/", admin.site.urls)` with the prefix taken from
+  `SITE_ROOT`, so the tail is certain and the whole is not — reported, at
+  `tentative`, which is the honest grade. NetBox stays silent: it has no
+  `django.contrib.admin` and no admin route at all.
 - **1.8.4** — `DJS-027` logging configuration that emits request bodies or `Authorization` headers.
+
+  **Done, and reshaped by reading Django's source.** The obvious version of
+  this rule — `django.db.backends` at `DEBUG`, which logs every statement with
+  its bound parameters — was dropped, because `CursorDebugWrapper` only logs
+  when `connection.queries_logged`, and that is `force_debug_cursor or
+  settings.DEBUG`. In a production module with `DEBUG` off it emits nothing, so
+  the rule would have been a false-positive generator; and where `DEBUG` *is*
+  on, `DJS-001` and `DJS-002` already say so at critical. A rule whose
+  precondition is an existing critical finding is noise.
+
+  The second draft was going to be about the `Authorization` header and the
+  session cookie surviving into error emails. Reading
+  `SafeExceptionReporterFilter` killed that too: its pattern is
+  `API|AUTH|TOKEN|KEY|SECRET|PASS|SIGNATURE|HTTP_COOKIE`, so `HTTP_AUTHORIZATION`
+  and `HTTP_COOKIE` are both already redacted. Django has closed those.
+
+  What is left is the genuine article, and it is the two opt-in ways a project
+  removes that protection. `include_html: True` on an `AdminEmailHandler`
+  attaches the **full HTML debug page** — every local variable in every frame,
+  the request, a slice of the settings — and mails it over SMTP; that is the
+  page `DEBUG` exists to keep off the internet. And a
+  `DEFAULT_EXCEPTION_REPORTER_FILTER` (or per-handler `reporter_class`) that
+  does not extend `SafeExceptionReporterFilter` replaces the redaction rather
+  than adding to it.
+
+  That second one needs care, because almost everyone who sets it does so to
+  redact *more*, by subclassing — reporting them would punish the people who
+  thought hardest. So the rule resolves the dotted class inside the tree and
+  reads its bases: subclasses Django's filter, silent; does not, `firm`; not
+  found in the tree at all, `tentative` with a caveat saying why. The stock
+  `mail_admins` handler, which Django itself ships in `DEFAULT_LOGGING`, is
+  never reported.
+
+  Both targets are silent. `overridden_project` is the control for both halves.
 
 ### Step 1.9 — Harden, benchmark, and document
 
 - **1.9.1** — Fixture expansion: extend the vulnerable project to plant every new rule; add a realistic `env_settings_project` fixture using `django-environ`.
+
+  **Done.** Auditing the manifests against the registry turned up exactly one
+  rule with no recall coverage anywhere: `DJS-011`. It is the only member of
+  the cookie family that needs an explicit line, because Django's default for
+  `SESSION_COOKIE_HTTPONLY` is already `True` — absence is correct, so the
+  defect can only ever exist because somebody typed it. Planted in
+  `vulnerable_project`'s production module with the reason people actually type
+  it: an analytics snippet that wanted to read the session id out of
+  `document.cookie`. Every rule `DJS-001`…`DJS-027` now has at least one
+  fixture asserting it fires.
+
+  The larger half is **`tests/fixtures/env_settings_project`**. Every existing
+  fixture writes settings as literals, which is the shape Django had in 2013
+  and the shape almost nothing has now; a rule catalogue validated only against
+  literals is validated against a world that no longer exists. This fixture
+  reads everything through django-environ, including the schema form
+  (`Env(SECURE_SSL_REDIRECT=(bool, True))` with a bare `env("SECURE_SSL_REDIRECT")`
+  at the call site) that the README leads with.
+
+  What it actually guards is not that defects are still found — it is that they
+  are found *less certainly*. `DJS-001` and `DJS-013` are pinned at `tentative`
+  here and at `certain`/`firm` in `vulnerable_project`, and that gap is the
+  regression gate. `DJS-003` deliberately stays at `firm`, because the fallback
+  is `startproject`'s own `django-insecure-` placeholder: a specific published
+  value an attacker already has, not an inference, so the indirection cannot
+  make it better.
+
+  Fifteen of the manifest's entries are controls, which is the more valuable
+  half. `env.db()` parses a URL the repository does not contain, so `DJS-004`
+  and `DJS-022` must stay silent rather than guess; `EMAIL_HOST_PASSWORD` is
+  required with no default, which is the *correct* way to hold a credential and
+  must not be punished by a name match; and the two schema-form reads prove the
+  resolver follows `Env()` rather than the call site — without that, `DJS-006`
+  fires on a project that has the setting switched on.
+
+  Wired into the CI recall gate and `tests/conftest.py`, with
+  `tests/test_env_settings_fixture.py` asserting the confidence gap directly
+  rather than only through the manifest.
 - **1.9.2** — Near-miss fixtures: the correct-looking shapes each rule must *not* flag.
+
+  **Done.** Seven rules — `DJS-002`, `DJS-003`, `DJS-011`, `DJS-016`,
+  `DJS-019`, `DJS-023`, `DJS-027` — had no control case anywhere, and most of
+  the rest had one only incidentally. **`tests/fixtures/near_miss_project`**
+  closes that: a project with no defects in it at all, where every line is
+  present because a plausible implementation of some rule fires on it.
+
+  The entries are real deployment patterns rather than contrived strings.
+  `ALLOWED_HOSTS = [".example.test"]` uses Django's leading-dot subdomain
+  syntax, which `validate_host` treats nothing like the wildcard. `MD5` is in
+  `PASSWORD_HASHERS` but *last*, which is the correct way to keep verifying
+  legacy hashes on an Argon2 project — Django only ever hashes with the first
+  entry. `ATOMIC_REQUESTS` is inside the `DATABASES` alias, where Django reads
+  it, rather than at module level where `DJS-023` reports it. `PASSWORD` is the
+  empty string because the connection authenticates by client certificate.
+  Credentials are allowed against an explicit CORS origin list, which is
+  `DJS-016`'s precondition without `DJS-016`'s defect. `X_FRAME_OPTIONS` is at
+  Django's own `SAMEORIGIN` default. The toolbar is behind `if DEBUG` and in
+  `requirements-dev.txt`. The reporter filter *extends* Django's.
+
+  Two rules do speak, and pinning them is the second thing the fixture is for.
+  `DJS-012` and `DJS-014` each have a branch describing a configuration that is
+  correct on its face and whose safety depends on something the source cannot
+  see — who terminates TLS, and who is allowed to create a subdomain under the
+  trusted domain. Both are capped at `tentative` deliberately, which puts them
+  under the CLI's default confidence floor. **A default `djaudit run` over this
+  project reports nothing and exits zero**; the two are reachable only by
+  asking. `tests/test_near_miss_fixture.py` asserts that directly, so any
+  change that promotes an informational branch into a default-visible one
+  breaks the gate rather than quietly landing on users.
 - **1.9.3** — Full triage pass over Healthchecks and NetBox; every finding classified with a written justification.
+
+  **Done, and the pass was a coverage sweep rather than a re-read.** Every
+  finding already carried a verdict — `djaudit benchmark` refuses to pass with
+  an untriaged one, so that much was enforced substep by substep. What had
+  never been done was the inverse question: for each of the 27 rules, is the
+  target's silence *correct*?
+
+  Both settings modules were read against the full rule list, setting by
+  setting. Healthchecks: `PASSWORD_HASHERS` leads with Argon2 and contains no
+  fast hasher at all, so `DJS-019` is right to be quiet; `ALLOWED_HOSTS` is
+  built from the environment or derived from `SITE_ROOT` and is never a
+  wildcard; `X_FRAME_OPTIONS` and `SECURE_CONTENT_TYPE_NOSNIFF` are absent and
+  Django's defaults for both are already the safe value; `SECURE_PROXY_SSL_HEADER`
+  is assembled by splitting an environment string, so it is genuinely
+  unreadable rather than missed. NetBox: every security setting is a
+  `getattr(configuration, ...)` against a file outside the repository, and the
+  ones we report are exactly those whose *shipped fallback* is the unsafe
+  value — `SECURE_HSTS_INCLUDE_SUBDOMAINS` is `False` and correctly silent,
+  because excluding subdomains is the right value while HSTS is off. No rule
+  was found to be silent where it should have spoken.
+
+  The durable output is **`scripts/check_triage.py`**, wired into CI. The tool
+  can tell a triaged finding from an untriaged one; it cannot tell a considered
+  `accepted_risk` from a rubber stamp, and a rubber stamp on a precision
+  benchmark is how a project ends up with a 100% score and no credibility. The
+  script requires every entry to carry a real justification, a reviewer and a
+  date — which immediately found five entries written during 1.7 and 1.8 with
+  no review metadata at all.
+
+  It also cross-checks the SHA in each triage file against the SHA in the CI
+  matrix. Those are two independent copies of the same fact, and if they drift,
+  every note in the file describes a tree nobody is scanning any more — a
+  failure that would otherwise look exactly like success.
 - **1.9.4** — Tune severity and confidence based on the triage; document every downgrade.
+
+  **Done, and the honest result is that there were no downgrades to make.**
+  Both benchmarks sit at 100% precision and the near-miss project is silent at
+  default thresholds, so nothing in the evidence says any rule is too loud. What
+  the pass across the family did expose was the opposite failure, and it was a
+  serious one.
+
+  `django/middleware/security.py` reads `SECURE_SSL_REDIRECT`,
+  `SECURE_HSTS_SECONDS`, `SECURE_HSTS_INCLUDE_SUBDOMAINS` and
+  `SECURE_CONTENT_TYPE_NOSNIFF` in its `__init__`, and **nothing else in Django
+  reads any of them**. `DJS-006`, `DJS-007`, `DJS-008` and `DJS-018` all checked
+  the value and none of them checked whether anything was listening. So a
+  project that wrote every one of those settings down correctly and left
+  `SecurityMiddleware` out of `MIDDLEWARE` got silence from all four: no
+  redirect, no HSTS, no nosniff, and a settings file that says the opposite.
+  That is worse than the failure the rules were built for, because the ordinary
+  failure at least looks like what it is — a reader who greps for
+  `SECURE_SSL_REDIRECT` finds `True` and stops looking.
+
+  `DJS-017` already knew this about its own `XFrameOptionsMiddleware`, and
+  `_base.py` already had the `insecure_here()` hook for exactly this shape, so
+  the family was inconsistent with itself rather than short of a mechanism. The
+  four now share `SecurityMiddlewareSetting`, which reports the setting as inert
+  when the middleware is definitely absent.
+
+  Three deliberate limits keep it quiet where it should be. Only an *explicit*
+  safe value is reported this way — a setting nobody mentioned expresses no
+  intent, and where the default is already unsafe the value branch is firing
+  anyway, so the two branches are mutually exclusive and nothing is said twice.
+  A `MIDDLEWARE` we could not fully resolve counts as installed, because plenty
+  of projects assemble it conditionally. And a module that never assigns
+  `MIDDLEWARE` at all is left alone: Django's default really is the empty list,
+  but such a module is a fragment or a test harness rather than a deployment.
+
+  That last line is the one downgrade in the substep. `DJS-017` did not have it
+  and fired on any settings module with no `MIDDLEWARE`, so it has been narrowed
+  to match — the family has to answer the same question the same way or the
+  reasoning behind it is arbitrary.
+
+  One further wrinkle needed fixing underneath. `InsecureDefaultRule` downgrades
+  a base that every heir corrects, which is right for a *value* and wrong here:
+  an heir repeating the same safe value has repaired nothing. That predicate is
+  now the `corrected_downstream()` hook, and the inert branch declines it.
 - **1.9.5** — `docs/rules/DJS.md` — one section per rule: what, why, remediation, references, and known limitations.
+
+  **Done.** The page is generated from the registry by
+  `scripts/gen_rule_docs.py`, and CI fails if the committed copy is not what
+  the code currently says. Hand-written rule documentation drifts within a
+  release or two, and stale security documentation is worse than none: it
+  describes behaviour the tool no longer has, and the reader has no way to tell
+  which half is true. Four of the five sections — title, grade, rationale,
+  remediation, references — already existed on `RuleMeta` and were only ever a
+  copy away from being published.
+
+  The fifth needed adding. `RuleMeta` gained `limitations`, and all 27 rules
+  now carry one. Every rule in this phase reads source and none of them can see
+  a deployment, so each has a boundary where its claim stops — a redirect at
+  nginx, an HSTS header from a CDN, a connection pooler that makes `CONN_MAX_AGE
+  = 0` correct, a `PGSSLMODE` that overrides `sslmode`, a subdomain wildcard
+  that is only as safe as whoever can create a subdomain. Those boundaries were
+  already encoded in each rule's `ceiling`, but a confidence level is a number,
+  and a number does not tell somebody staring at a finding *why* it might not
+  apply to them. Writing them next to the rule means they go stale in the same
+  commit that makes them wrong.
+
+  `tests/test_rule_docs.py` holds the field to a standard rather than a
+  presence check: at least sixty characters, a capitalised sentence ending in a
+  full stop, not copied out of the rationale, and mandatory for any rule
+  shipping below `firm` — a rule that admits it is unsure owes the reader the
+  reason.
 - **1.9.6** — Update README and this plan with measured precision and recall.
+
+  **Done.** The README opened on "Status: Phase 0 … one rule proving the
+  pipeline", which was true and is now three months of work out of date, and a
+  reader has no way to tell a stale README from an abandoned project. It now
+  leads with the measured numbers: 100% recall over 38 expected findings in five
+  fixtures, 100% precision on both real targets, 0 rule errors, under a second
+  on NetBox's 1213 files.
+
+  The numbers are stated with what they are worth. Precision on a mature
+  open-source project is a real measurement; recall on one is impossible, since
+  we cannot know what we missed in code we did not write — so recall comes from
+  fixtures and the two are not averaged into a single figure. Ten of the sixteen
+  real-target findings are `accepted_risk` rather than defects, and the README
+  says so, because a precision score that quietly counts "the project has a
+  reason" as a hit is a score with a footnote missing.
+
+  §8's progress table and this phase's exit criteria were updated in the same
+  pass, and the phase's outcome recorded against the criteria it was set.
 
 ---
 
@@ -826,15 +1815,15 @@ conversation.
 
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
-| 0 | Engine skeleton | 10 | 28 | **Complete** |
-| 1 | Settings and deployment hardening | 9 | 50 | Not started |
+| 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
+| 1 | Settings and deployment hardening | 10 | 55 | **Complete** — `DJS-001`…`DJS-027`, 100% precision on both real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
 | 5 | Portability and external adapters | 4 | 20 | Not started |
 | 6 | LLM layer | 5 | 17 | Not started |
 | 7 | Distribution | 3 | 10 | Not started |
-| | **Total** | **50** | **225** | |
+| | **Total** | **51** | **230** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3.

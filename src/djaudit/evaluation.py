@@ -95,9 +95,7 @@ class Manifest:
             raise ManifestError(f"manifest is not valid JSON: {path}: {exc}") from exc
         return cls(
             expected=tuple(Expectation.from_dict(e) for e in raw.get("expected", [])),
-            must_not_report=tuple(
-                Expectation.from_dict(e) for e in raw.get("must_not_report", [])
-            ),
+            must_not_report=tuple(Expectation.from_dict(e) for e in raw.get("must_not_report", [])),
             description=str(raw.get("description", "")),
         )
 
@@ -162,21 +160,28 @@ class EvalReport:
         for expectation in self.missing:
             lines.append(f"MISSED {expectation.describe()}")
         for finding in self.unexpected:
-            lines.append(
-                f"UNEXPECTED {finding.rule_id} at {finding.location} -- {finding.message}"
-            )
+            lines.append(f"UNEXPECTED {finding.rule_id} at {finding.location} -- {finding.message}")
         return lines
 
 
-def evaluate(project: Path, manifest_path: Path | None = None) -> EvalReport:
+def evaluate(
+    project: Path, manifest_path: Path | None = None, include: set[str] | None = None
+) -> EvalReport:
     """Audit ``project`` and score the result against its manifest.
 
     Thresholds are opened all the way up: an evaluation must see everything the
     rules produce, including tentative findings that a normal run would hide.
+
+    ``include`` narrows the run to specific rule ids, which is how one rule's
+    recall is measured without the rest of the catalogue's findings counting
+    against it as false positives.
     """
     manifest = Manifest.load(manifest_path or project / MANIFEST_NAME)
     result = engine.run(
-        project, min_severity=Severity.INFO, min_confidence=Confidence.TENTATIVE
+        project,
+        include=include,
+        min_severity=Severity.INFO,
+        min_confidence=Confidence.TENTATIVE,
     )
 
     report = EvalReport(project=project)

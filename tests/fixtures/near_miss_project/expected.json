@@ -1,0 +1,121 @@
+{
+  "description": "Correct settings written in the shapes that look wrong. There are no defects in this project. Every line exists because a plausible implementation of some rule fires on it, and every one of those would be the kind of false positive that arrives on a team who did the work, gets dismissed, and takes the tool's credibility with it. The recall fixtures ask whether a rule fires, which is the easy half; this one asks the question that decides whether anybody keeps the tool installed. The entries are real deployment patterns, not contrived strings: ALLOWED_HOSTS with Django's leading-dot subdomain syntax, which is not the wildcard; PASSWORD_HASHERS with MD5 present but last, which is the correct way to keep verifying legacy hashes on an Argon2 project; ATOMIC_REQUESTS inside the DATABASES alias rather than at module level; an empty PASSWORD on a connection that authenticates by client certificate; CORS credentials allowed against an explicit origin list; X_FRAME_OPTIONS at Django's own SAMEORIGIN default; debug tooling behind `if DEBUG` and in requirements-dev.txt; and a reporter filter that extends Django's rather than replacing it. Two rules do speak here, and that is the second thing this fixture pins. DJS-012 and DJS-014 both have branches that describe a correct-looking configuration whose safety depends on something the source cannot see -- who terminates TLS, and who can create a subdomain. Both are capped at tentative on purpose, which puts them below the CLI's default confidence floor: a default `djaudit run` over this project reports nothing at all and exits zero, and the two findings are only reachable by asking for them. Pinning their grades here means any change that escalates an informational branch into a default-visible one breaks the gate.",
+  "expected": [
+    {
+      "rule_id": "DJS-014",
+      "file": "config/settings.py",
+      "line": 45,
+      "severity": "medium",
+      "confidence": "tentative"
+    },
+    {
+      "rule_id": "DJS-012",
+      "file": "config/settings.py",
+      "line": 143,
+      "severity": "low",
+      "confidence": "tentative"
+    }
+  ],
+  "must_not_report": [
+    {
+      "rule_id": "DJS-001",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-002",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-003",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-004",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-005",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-006",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-007",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-008",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-009",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-010",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-011",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-013",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-015",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-016",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-017",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-018",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-019",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-020",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-021",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-022",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-023",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-024",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-025",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-027",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-026",
+      "file": "config/urls.py"
+    }
+  ]
+}

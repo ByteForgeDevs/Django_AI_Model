@@ -1,0 +1,685 @@
+"""DJS -- host, origin, and framing.
+
+These settings decide which requests Django is willing to answer and who is
+allowed to embed or call the result. They share a shape that the transport
+family does not: the value is a *list*, so the question is not "is this on" but
+"what is in it", and one bad entry is enough.
+"""
+
+from __future__ import annotations
+
+from urllib.parse import urlsplit
+
+from djaudit.context import ProjectContext
+from djaudit.models import Confidence, Family, Severity, Tier
+from djaudit.registry import RuleMeta, register
+from djaudit.rules._base import (
+    InsecureDefaultRule,
+    SecurityMiddlewareSetting,
+    SettingGroup,
+    any_entry,
+    could_be_off,
+    could_be_true,
+    definitely_empty,
+    entries_of,
+    lists_entry,
+)
+from djaudit.settings import ResolvedSetting, SettingsView
+from djaudit.values import Value
+
+_HOSTS_DOCS = "https://docs.djangoproject.com/en/stable/ref/settings/#allowed-hosts"
+
+
+@register
+class AllowedHostsUnrestricted(InsecureDefaultRule):
+    """``ALLOWED_HOSTS`` accepts any Host header, or answers nothing at all."""
+
+    setting = "ALLOWED_HOSTS"
+    ceiling = Confidence.FIRM
+    """A proxy can enforce the Host header before Django ever sees it, and we
+    cannot see the proxy. The list really does say what it says; whether
+    anything else is filtering is the part we are inferring."""
+
+    corrected_as = "names its own hosts"
+
+    def insecure(self, value: Value) -> bool:
+        return any_entry(value, lambda entry: entry == "*") or definitely_empty(value)
+
+    def _wildcarded(self, resolved: ResolvedSetting) -> bool:
+        return any_entry(resolved.value, lambda entry: entry == "*")
+
+    def severity_for(self, resolved: ResolvedSetting) -> Severity | None:
+        # An open host list is an attack surface; an empty one is a site that
+        # answers nothing. Both are worth saying and they are not the same size.
+        return Severity.HIGH if self._wildcarded(resolved) else Severity.LOW
+
+    def applies(self, ctx: ProjectContext, group: SettingGroup) -> bool:
+        """An empty list is only a problem once DEBUG is off.
+
+        With DEBUG on, Django quietly allows localhost and its variants, which
+        is what makes an empty list the normal and correct state of a settings
+        module you only ever run locally.
+        """
+        if self._wildcarded(group.setting):
+            return True
+        view = self.views.get(group.module.dotted)
+        return view is not None and not could_be_true(view.get("DEBUG").value)
+
+    def describe_state(self, resolved: ResolvedSetting) -> str:
+        if self._wildcarded(resolved):
+            return 'contains "*"'
+        return "is empty" if resolved.is_assigned else "is never set, so it is empty"
+
+    def consequence_for(self, resolved: ResolvedSetting) -> str:
+        if self._wildcarded(resolved):
+            return (
+                "Django answers a request whatever Host header it carries, and it then "
+                "builds absolute URLs from that header -- including the ones in password "
+                "reset emails, which is how an attacker turns this into a link to their "
+                "own server that arrives in your user's inbox from you"
+            )
+        return (
+            "Django rejects every request with a 400 once DEBUG is off, so this is a "
+            "deployment that serves nothing rather than one that is exposed -- but it "
+            "fails at the first request in production and passes every test locally"
+        )
+
+    meta = RuleMeta(
+        id="DJS-013",
+        title="ALLOWED_HOSTS is a wildcard or empty",
+        family=Family.DJS,
+        severity=Severity.HIGH,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "ALLOWED_HOSTS is the only thing that ties a Django response to the hostname "
+            'it was asked for. With "*" in the list the check is off, and the Host header '
+            "-- which the client controls -- flows into every absolute URL Django builds. "
+            "The consequence people underestimate is password reset poisoning: "
+            "django.contrib.auth builds the reset link from the request, so an attacker "
+            "who submits a reset for someone else's account with their own Host header "
+            "gets a genuine reset token delivered to the victim as a link pointing at the "
+            "attacker's server. Cache poisoning against a shared cache is the other. An "
+            "empty list is the opposite failure and still worth reporting: it is correct "
+            "while DEBUG is on and returns 400 for everything the moment it is not."
+        ),
+        remediation=(
+            "List the hostnames the site actually answers to. A leading dot is the "
+            'subdomain wildcard Django understands -- ".example.com" matches '
+            'example.com and everything under it -- while "*.example.com" is not '
+            "special-cased and will simply never match. If the hostname genuinely varies "
+            "at deployment time, read it from the environment rather than opening the "
+            "list, and remember that a proxy enforcing the Host header is a good second "
+            "layer but not a substitute, because it does not stop anything that reaches "
+            "Django by another route."
+        ),
+        references=(
+            _HOSTS_DOCS,
+            "https://docs.djangoproject.com/en/stable/topics/security/#host-header-validation",
+        ),
+        limitations=(
+            "A proxy can enforce the Host header before Django sees it. The list says what it "
+            "says; whether anything else filters first is the inference.",
+            "Silent while DEBUG is on, because Django then allows localhost and its variants "
+            "and an empty list is the normal state of a module you only run locally.",
+        ),
+    )
+
+
+_CSRF_DOCS = "https://docs.djangoproject.com/en/stable/ref/settings/#csrf-trusted-origins"
+
+
+def csrf_pattern(entry: str) -> str:
+    """The host pattern Django actually derives from one trusted origin.
+
+    ``CsrfViewMiddleware`` does not compare the configured string to anything.
+    It takes ``urlsplit(origin).netloc`` and strips leading asterisks, and that
+    result is what is matched -- so this function, not the entry, is what the
+    setting means.
+    """
+    return urlsplit(entry).netloc.lstrip("*")
+
+
+def csrf_reduction(entry: str) -> str:
+    """What ``entry`` ends up being compared against, for a message."""
+    pattern = csrf_pattern(entry)
+    return repr(pattern) if pattern else "nothing"
+
+
+def csrf_verdict(entry: object) -> str:
+    """Classify one entry as ``"fine"``, ``"broad"``, ``"tld"`` or ``"inert"``.
+
+    ``is_same_domain`` treats a pattern as a subdomain wildcard only when it
+    begins with a dot, and as an exact hostname otherwise. Everything follows
+    from that one line of Django.
+    """
+    if not isinstance(entry, str):
+        return "fine"
+    pattern = csrf_pattern(entry)
+    if "://" not in entry:
+        # Origin and Referer headers both arrive as scheme://host, and both of
+        # Django's comparisons go through netloc, which an entry with no scheme
+        # does not have. It matches nothing at either end.
+        return "inert"
+    if "*" not in entry:
+        return "fine"
+    if not pattern.startswith("."):
+        # The asterisk only widens anything when a dot follows it. Anywhere
+        # else it is left in the hostname, or stripped to nothing, and either
+        # way the entry stops meaning what it was written to mean.
+        return "inert"
+    labels = [label for label in pattern.strip(".").split(".") if label]
+    return "broad" if len(labels) > 1 else "tld"
+
+
+def csrf_entries(value: Value, verdict: str) -> tuple[str, ...]:
+    """Every entry of ``value``, on any branch, carrying ``verdict``."""
+    seen: dict[str, None] = {}
+    for entries in entries_of(value):
+        for entry in entries or ():
+            if isinstance(entry, str) and csrf_verdict(entry) == verdict:
+                seen[entry] = None
+    return tuple(seen)
+
+
+@register
+class CsrfTrustedOriginsTooBroad(InsecureDefaultRule):
+    """``CSRF_TRUSTED_ORIGINS`` trusts too much, or silently trusts nothing."""
+
+    setting = "CSRF_TRUSTED_ORIGINS"
+    ceiling = Confidence.FIRM
+    corrected_as = "narrows it"
+
+    def insecure(self, value: Value) -> bool:
+        return any_entry(value, lambda entry: csrf_verdict(entry) != "fine")
+
+    def _worst(self, resolved: ResolvedSetting) -> str:
+        for verdict in ("tld", "inert", "broad"):
+            if csrf_entries(resolved.value, verdict):
+                return verdict
+        return "fine"
+
+    def severity_for(self, resolved: ResolvedSetting) -> Severity | None:
+        # Trusting every host under a TLD is not a judgement call about anyone's
+        # infrastructure, so it outranks both of the others.
+        return {
+            "tld": Severity.HIGH,
+            "inert": Severity.MEDIUM,
+            "broad": Severity.MEDIUM,
+        }.get(self._worst(resolved))
+
+    def ceiling_for(self, resolved: ResolvedSetting) -> Confidence | None:
+        # Whether an entry does anything is a fact about the string. Whether
+        # trusting your own subdomains is safe depends on who can put content
+        # on them, which is the one thing the source cannot tell us -- so that
+        # branch stays out of a default run and waits to be asked for.
+        return Confidence.TENTATIVE if self._worst(resolved) == "broad" else None
+
+    def describe_state(self, resolved: ResolvedSetting) -> str:
+        worst = self._worst(resolved)
+        entries = csrf_entries(resolved.value, worst)
+        quoted = ", ".join(repr(entry) for entry in entries)
+        if worst == "tld":
+            return f"trusts every host under a top-level domain via {quoted}"
+        if worst == "broad":
+            return f"trusts every subdomain via {quoted}"
+        # Naming the pattern Django ends up with is the whole point of this
+        # branch: the entry looks right, and the derived value is the evidence
+        # that it is not.
+        if len(entries) == 1:
+            return f"lists {quoted}, which Django reduces to {csrf_reduction(entries[0])}"
+        pairs = ", ".join(f"{entry!r} to {csrf_reduction(entry)}" for entry in entries)
+        return f"lists entries Django reduces to something that matches no origin: {pairs}"
+
+    def consequence_for(self, resolved: ResolvedSetting) -> str:
+        worst = self._worst(resolved)
+        if worst == "tld":
+            return (
+                "any site on the internet whose name ends that way can post a "
+                "state-changing request to this one and have the CSRF check wave it "
+                "through, which is the protection removed rather than relaxed"
+            )
+        if worst == "inert":
+            return (
+                "the cross-origin requests it was added to allow are still rejected -- "
+                "the setting looks configured, the CSRF failures look unrelated to it, "
+                "and the usual next step is to widen the list further"
+            )
+        return (
+            "anything that can serve a page from any subdomain -- a tenant, a "
+            "docs host, a stale CNAME someone else has claimed -- can make "
+            "authenticated state-changing requests on behalf of a logged-in user"
+        )
+
+    meta = RuleMeta(
+        id="DJS-014",
+        title="CSRF_TRUSTED_ORIGINS is too broad or has no effect",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "CSRF_TRUSTED_ORIGINS is the list of origins allowed to make state-changing "
+            "requests from somewhere other than this site, so every entry is a hostname "
+            "whose compromise becomes this site's compromise. Django derives the pattern "
+            "it matches by taking urlsplit(origin).netloc and stripping leading "
+            "asterisks, then treating the result as a subdomain wildcard only if it "
+            "begins with a dot. Two failures follow. A wildcard over a domain whose "
+            "subdomains are not all yours trusts whoever holds them. And an entry with "
+            "no scheme -- the spelling this setting required before Django 4.0 -- has no "
+            "netloc at all, so it matches nothing, in both the Origin and the Referer "
+            "check. Django reports that second one as 4_0.E001, but system checks do not "
+            "run under gunicorn or uvicorn, so a deployment that never invokes manage.py "
+            "will not hear about it."
+        ),
+        remediation=(
+            "Write each origin as a full scheme://host, and prefer naming hosts to "
+            "wildcarding them. A wildcard needs the dot -- 'https://*.example.com' works, "
+            "'https://*' and 'https://*example.com' do not do what they look like. Keep "
+            "https:// entries rather than http://: a trusted plaintext origin can be "
+            "forged by anyone on the network path. If a wildcard is genuinely needed, it "
+            "is only as trustworthy as your control over every name under it, so it does "
+            "not belong on a domain where customers or a hosting provider can create "
+            "subdomains."
+        ),
+        references=(
+            _CSRF_DOCS,
+            "https://docs.djangoproject.com/en/stable/ref/csrf/",
+        ),
+        limitations=(
+            "Whether trusting your own subdomains is safe depends on who can create one -- a "
+            "tenant, a docs host, a stale CNAME -- and that is the one thing the source cannot "
+            "say. The subdomain-wildcard branch is capped at tentative for that reason and "
+            "stays out of a default run.",
+        ),
+    )
+
+
+_CORS_DOCS = "https://github.com/adamchainz/django-cors-headers#configuration"
+CORS_MIDDLEWARE = "corsheaders.middleware.CorsMiddleware"
+
+
+def installs_middleware(view: SettingsView, dotted: str) -> bool | None:
+    """Whether ``MIDDLEWARE`` contains ``dotted``, or ``None`` if unreadable.
+
+    The three-valued answer is the point. A setting that configures middleware
+    which is not installed does nothing, so silence is right -- but only when we
+    genuinely read the whole list and it was not there. Plenty of projects build
+    ``MIDDLEWARE`` conditionally, and treating "could not read" as "not
+    installed" would turn every one of those into a missed finding. NetBox is
+    the case that pins the shape: its ``MIDDLEWARE`` resolves to three branches
+    of which one is unreadable, so a partial read has to answer ``None`` unless
+    the entry turned up in a branch we could see.
+    """
+    return lists_entry(view, "MIDDLEWARE", dotted)
+
+
+@register
+class CorsAllowsAllOrigins(InsecureDefaultRule):
+    """``django-cors-headers`` is configured to answer every origin."""
+
+    setting = "CORS_ALLOW_ALL_ORIGINS"
+    aliases = ("CORS_ORIGIN_ALLOW_ALL",)
+    ceiling = Confidence.FIRM
+    corrected_as = "turns it off"
+
+    consequence = (
+        "every response the middleware touches carries "
+        "Access-Control-Allow-Origin: *, which lets any page on the internet read "
+        "it -- intended behaviour for an API whose data is already public, and a "
+        "way out of the network for anything reachable only from inside it, "
+        "because a browser on the corporate LAN is a route to an intranet service "
+        "that no firewall rule covers"
+    )
+
+    def insecure(self, value: Value) -> bool:
+        return could_be_true(value)
+
+    def applies(self, ctx: ProjectContext, group: SettingGroup) -> bool:
+        view = self.views.get(group.module.dotted)
+        if view is None:
+            return False
+        # Credentials plus a wildcard is a different and far worse defect, and
+        # DJS-016 reports it. Saying it twice would be one mistake, two tickets.
+        if could_be_true(view.get("CORS_ALLOW_CREDENTIALS").value):
+            return False
+        # The setting is read by middleware. Without the middleware there is no
+        # header, no matter what the setting says.
+        return installs_middleware(view, CORS_MIDDLEWARE) is not False
+
+    meta = RuleMeta(
+        id="DJS-015",
+        title="CORS is open to every origin",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "The same-origin policy stops one site reading another's responses, and CORS "
+            "is how a site waives that. Waiving it for every origin is deliberate and "
+            "correct for an API whose data is already public, so this is reported at "
+            "medium rather than treated as a breach. It is worth reading twice in two "
+            "cases. The first is an internal service: a wildcard means any page an "
+            "employee visits can read it through their browser, which sits inside the "
+            "network perimeter, and no firewall rule sees that request. The second is a "
+            "site that later switches CORS_ALLOW_CREDENTIALS on -- at that point "
+            "django-cors-headers stops sending '*' and starts echoing the caller's own "
+            "origin back, which turns this setting into cross-origin account access. "
+            "django-cors-headers still honours the pre-3.5 name CORS_ORIGIN_ALLOW_ALL, "
+            "so both spellings are read the way the package reads them."
+        ),
+        remediation=(
+            "Replace it with CORS_ALLOWED_ORIGINS listing the front-ends that call this "
+            "API, each as a full scheme://host. If the set is genuinely open-ended, "
+            "CORS_ALLOWED_ORIGIN_REGEXES will narrow it further than a wildcard, and "
+            "CORS_URLS_REGEX will confine CORS to the API paths rather than applying it "
+            "to the whole site. If the wildcard is intentional, make sure it stays paired "
+            "with CORS_ALLOW_CREDENTIALS left off, because that pairing is the only thing "
+            "keeping browsers from sending cookies with these requests."
+        ),
+        references=(
+            _CORS_DOCS,
+            "https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS",
+        ),
+        limitations=(
+            "Reads the setting and the middleware list, not the response. A CORS policy "
+            "enforced at an edge proxy, or a project that swaps in its own middleware, is not "
+            "modelled.",
+            "Silent when CORS_ALLOW_CREDENTIALS is also on, because that pairing is DJS-016 and "
+            "reporting both would be one mistake and two tickets.",
+        ),
+    )
+
+
+@register
+class CorsWildcardWithCredentials(InsecureDefaultRule):
+    """Every origin is allowed *and* credentials are sent with the response."""
+
+    setting = "CORS_ALLOW_ALL_ORIGINS"
+    aliases = ("CORS_ORIGIN_ALLOW_ALL",)
+    ceiling = Confidence.CERTAIN
+    corrected_as = "turns it off"
+
+    consequence = (
+        "django-cors-headers stops sending the wildcard and echoes the caller's "
+        "own origin back with Access-Control-Allow-Credentials: true instead, "
+        "which lets any page a signed-in user visits read this site's "
+        "authenticated responses as them -- their data, and any CSRF token those "
+        "responses carry"
+    )
+
+    def insecure(self, value: Value) -> bool:
+        return could_be_true(value)
+
+    def applies(self, ctx: ProjectContext, group: SettingGroup) -> bool:
+        view = self.views.get(group.module.dotted)
+        if view is None:
+            return False
+        # The exact inverse of DJS-015's precondition, so between the two of
+        # them an open CORS policy is reported once and never twice.
+        if not could_be_true(view.get("CORS_ALLOW_CREDENTIALS").value):
+            return False
+        return installs_middleware(view, CORS_MIDDLEWARE) is not False
+
+    meta = RuleMeta(
+        id="DJS-016",
+        title="CORS allows every origin and sends credentials",
+        family=Family.DJS,
+        severity=Severity.CRITICAL,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "Browsers refuse to send cookies to a response that answers "
+            "Access-Control-Allow-Origin: *, and that refusal is the only thing making a "
+            "CORS wildcard survivable. django-cors-headers knows it, so when "
+            "CORS_ALLOW_CREDENTIALS is on it stops sending the wildcard: "
+            "add_response_headers reads 'if CORS_ALLOW_ALL_ORIGINS and not "
+            "CORS_ALLOW_CREDENTIALS' and otherwise reflects the request's Origin header "
+            "verbatim. With the allow-all flag on, no origin is ever checked against a "
+            "list first, so every origin is reflected and every one of them is told "
+            "credentials are welcome. The same-origin policy is then off for this site "
+            "in every browser: any page a logged-in user visits can read their data and "
+            "lift the CSRF token out of the response, which makes writes reachable too. "
+            "This is the pairing OWASP describes as the classic CORS misconfiguration, "
+            "and it is usually reached by adding credentials to a wildcard that was "
+            "harmless the day before."
+        ),
+        remediation=(
+            "Keep the credentials and drop the wildcard: list the front-end origins in "
+            "CORS_ALLOWED_ORIGINS, or CORS_ALLOWED_ORIGIN_REGEXES if they are generated, "
+            "each as a full scheme://host. Never build that list by reflecting "
+            "request.headers['Origin'], which is the same hole written by hand. If the "
+            "data is genuinely public, the other direction works instead -- turn "
+            "CORS_ALLOW_CREDENTIALS off and let the wildcard stand, which restores the "
+            "browser's own refusal to send cookies."
+        ),
+        references=(
+            _CORS_DOCS,
+            "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Credentials",
+            "https://owasp.org/www-community/attacks/CORS_OriginHeaderScrutiny",
+        ),
+        limitations=(
+            "Requires both halves to be readable. A credentials flag or an origin policy "
+            "assembled at runtime leaves this quiet, and the weaker DJS-015 does not fire "
+            "either when credentials could be on.",
+        ),
+    )
+
+
+FRAMING_MIDDLEWARE = "django.middleware.clickjacking.XFrameOptionsMiddleware"
+HONOURED_FRAME_OPTIONS = ("DENY", "SAMEORIGIN")
+
+
+def framing_values(value: Value) -> tuple[str, ...]:
+    """Every ``X_FRAME_OPTIONS`` string this value could be, as written."""
+    if value.is_conditional:
+        return tuple(item for branch in value.branches for item in framing_values(branch))
+    return (value.literal,) if isinstance(value.literal, str) else ()
+
+
+def framing_honoured(item: str) -> bool:
+    """Whether a browser acts on this value.
+
+    Django uppercases the setting before sending it, so a lowercase ``deny``
+    works and is not a finding -- but the comparison is the only place that
+    should uppercase anything, since a message quoting a mangled version of
+    what someone wrote is harder to act on than one quoting their own line.
+    """
+    return item.upper() in HONOURED_FRAME_OPTIONS
+
+
+@register
+class ClickjackingProtectionOff(InsecureDefaultRule):
+    """The site can be framed: no ``X-Frame-Options`` header, or one browsers ignore."""
+
+    setting = "X_FRAME_OPTIONS"
+    ceiling = Confidence.FIRM
+    corrected_as = "sets a value browsers honour"
+
+    def insecure(self, value: Value) -> bool:
+        values = framing_values(value)
+        return bool(values) and any(not framing_honoured(item) for item in values)
+
+    def _missing_middleware(self, group: SettingGroup) -> bool:
+        view = self.views.get(group.module.dotted)
+        if view is None or not view.get("MIDDLEWARE").is_assigned:
+            # A module that never mentions MIDDLEWARE has not told us the
+            # middleware is absent, only that this is not where it is decided.
+            # Django's empty default agrees on the letter of it, but a settings
+            # module with no middleware at all is a fragment or a harness
+            # rather than something serving requests, and reporting that its
+            # headers are missing is true, useless and loud. The four settings
+            # SecurityMiddleware implements are held to the same line.
+            return False
+        if installs_middleware(view, FRAMING_MIDDLEWARE) is not False:
+            return False
+        # Content-Security-Policy frame-ancestors supersedes X-Frame-Options
+        # wherever both are understood, and it is the direction the web is
+        # going, so a project that has moved to it has not left anything off.
+        # django-csp names it CSP_FRAME_ANCESTORS before 4.0 and puts it inside
+        # CONTENT_SECURITY_POLICY after; Django 6.0 ships SECURE_CSP.
+        return not any(
+            view.get(name).is_assigned
+            for name in ("CONTENT_SECURITY_POLICY", "CSP_FRAME_ANCESTORS", "SECURE_CSP")
+        )
+
+    def insecure_here(self, ctx: ProjectContext, group: SettingGroup) -> bool:
+        return self.insecure(group.setting.value) or self._missing_middleware(group)
+
+    def ceiling_for(self, resolved: ResolvedSetting) -> Confidence | None:
+        """Raise the ceiling on the branch the shared policy misjudges.
+
+        Both branches deserve the same grade: they have the same consequence
+        and the same single uncertainty, which is that an edge proxy might send
+        the header itself. The value branch gets it, because an explicit
+        X_FRAME_OPTIONS costs nothing. The middleware branch does not, because
+        the setting is at its default and the policy charges a step for that --
+        but that step is measuring confidence in a value this branch does not
+        depend on. Its evidence is MIDDLEWARE, read directly. Starting from
+        certain lets the step land it beside its sibling instead of a grade
+        below, and out of a default run.
+        """
+        if all(framing_honoured(item) for item in framing_values(resolved.value)):
+            return Confidence.CERTAIN
+        return None
+
+    def describe_state(self, resolved: ResolvedSetting) -> str:
+        rejected = [
+            item for item in framing_values(resolved.value) if item not in HONOURED_FRAME_OPTIONS
+        ]
+        if not rejected:
+            return "is never sent, because XFrameOptionsMiddleware is not installed"
+        listed = ", ".join(repr(item) for item in rejected)
+        if any(item.upper().startswith("ALLOW-FROM") for item in rejected):
+            return f"is {listed}, which every current browser has dropped support for"
+        return f"is {listed}, which is not a value the X-Frame-Options header defines"
+
+    def consequence_for(self, resolved: ResolvedSetting) -> str:
+        if not any(item not in HONOURED_FRAME_OPTIONS for item in framing_values(resolved.value)):
+            return (
+                "no browser is told anything about framing this site and every one of "
+                "them will allow it"
+            )
+        return (
+            "browsers ignore the header rather than falling back to a safe default, "
+            "which leaves the site framable by anyone while the setting reads as though "
+            "framing had been considered"
+        )
+
+    meta = RuleMeta(
+        id="DJS-017",
+        title="Clickjacking protection is off",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "X-Frame-Options decides whether another site may load this one in a frame "
+            "and trick a signed-in user into clicking something inside it. The header "
+            "defines exactly two values, DENY and SAMEORIGIN, and browsers ignore "
+            "anything else outright -- there is no falling back to a safe default. That "
+            "makes the invented values people copy from answers online, ALLOWALL in "
+            "particular, worse than leaving the setting alone: the site is framable and "
+            "the settings file says otherwise. ALLOW-FROM belongs in the same group; "
+            "Chrome never implemented it and Firefox dropped it in 70, so it is now a "
+            "policy that reads precisely and does nothing. The other way to end up "
+            "unprotected is to have no XFrameOptionsMiddleware, since the setting alone "
+            "sends no header. SAMEORIGIN is not reported: framing your own pages is a "
+            "normal thing to need, and Django's own check calls DENY a preference rather "
+            "than a requirement."
+        ),
+        remediation=(
+            "Set X_FRAME_OPTIONS to 'DENY', or to 'SAMEORIGIN' if the site frames its own "
+            "pages, and keep "
+            "'django.middleware.clickjacking.XFrameOptionsMiddleware' in MIDDLEWARE. To "
+            "allow one specific external site to frame you, X-Frame-Options cannot "
+            "express that at all -- use a Content-Security-Policy frame-ancestors "
+            "directive, which is what replaced ALLOW-FROM and is honoured in preference "
+            "to this header wherever both are present. Individual views that must be "
+            "framable are better handled with the xframe_options_exempt decorator than "
+            "by loosening the site-wide setting."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/clickjacking/",
+            "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options",
+        ),
+        limitations=(
+            "An edge proxy can send X-Frame-Options itself, which is invisible here.",
+            "A module that never assigns MIDDLEWARE at all is left alone: Django's default is "
+            "the empty list, but such a module is a fragment or a test harness rather than a "
+            "deployment.",
+            "Content-Security-Policy frame-ancestors supersedes this header and is checked for, "
+            "but only under the three setting names in current use.",
+        ),
+    )
+
+
+@register
+class ContentTypeSniffingAllowed(SecurityMiddlewareSetting):
+    """``SECURE_CONTENT_TYPE_NOSNIFF`` has been turned off."""
+
+    setting = "SECURE_CONTENT_TYPE_NOSNIFF"
+    ceiling = Confidence.FIRM
+    corrected_as = "turns it back on"
+
+    consequence = (
+        "SecurityMiddleware stops sending X-Content-Type-Options: nosniff and "
+        "browsers go back to guessing what a response really is from its bytes, "
+        "which is how a file a user uploaded gets executed as something other "
+        "than what it was served as"
+    )
+
+    inert_consequence = (
+        "no X-Content-Type-Options header is sent regardless -- the middleware that "
+        "sends it is not installed -- so browsers sniff every response, and the one "
+        "line in the settings file that mentions the problem says it is handled"
+    )
+
+    def insecure(self, value: Value) -> bool:
+        # Django already ships this on. Reaching this rule means somebody wrote
+        # the line to switch it off, so the interesting question is only ever
+        # "did they", not "did they forget".
+        return could_be_off(value)
+
+    meta = RuleMeta(
+        id="DJS-018",
+        title="MIME type sniffing is allowed",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "X-Content-Type-Options: nosniff tells a browser to believe the Content-Type "
+            "it was given instead of inspecting the body and deciding for itself. Without "
+            "it, a file uploaded as a harmless type and served back can be sniffed into "
+            "HTML or JavaScript and run in the site's own origin, which turns any upload "
+            "feature into stored XSS -- and it also lets a JSON endpoint be pulled into a "
+            "<script> tag, which is the old JSON hijacking route to reading a signed-in "
+            "user's data. This is the only DJS flag Django already ships switched on, so "
+            "unlike its neighbours it can never be reported for being forgotten: the "
+            "setting has to have been written out and set to False, which usually happens "
+            "while chasing a download that a browser insisted on rendering. The fix for "
+            "that is Content-Disposition, not this."
+        ),
+        remediation=(
+            "Remove the assignment, or set SECURE_CONTENT_TYPE_NOSNIFF back to True, and "
+            "keep 'django.middleware.security.SecurityMiddleware' in MIDDLEWARE, since "
+            "that is what sends the header. If it was turned off to make a particular "
+            "response display in the browser, send that response with an explicit "
+            "Content-Type and a Content-Disposition of inline instead -- that fixes the "
+            "one response rather than every response. Serve user uploads from a separate "
+            "domain where you can, so a sniffed file lands outside this site's origin "
+            "whatever the header says."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/settings/#secure-content-type-nosniff",
+            "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options",
+        ),
+        limitations=(
+            "Django ships this on, so it can only fire where somebody wrote the line to switch "
+            "it off, or where SecurityMiddleware is missing.",
+            "Cannot see whether the responses in question are ones a browser would sniff. The "
+            "risk is concentrated in user-uploaded content, and nothing in the settings says "
+            "whether the project serves any.",
+        ),
+    )

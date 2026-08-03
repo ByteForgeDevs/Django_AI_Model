@@ -1,0 +1,6 @@
+# Control for DJS-025: the development tooling is here, in the file the
+# production image never installs, which is where it belongs.
+-r requirements.txt
+django-debug-toolbar==6.0.0
+django-extensions==4.1
+pytest-django==4.11.1
