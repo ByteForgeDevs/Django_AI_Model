@@ -40,7 +40,9 @@ from djaudit.rules._api import ApiRule, Endpoint, production_settings
 from djaudit.settings import assignment_value, entries
 
 if TYPE_CHECKING:
+    from djaudit.api.querysets import QuerysetNode
     from djaudit.context import ProjectContext
+    from djaudit.graph.nodes import ModelNode
 
 DRF_DOCS = "https://www.django-rest-framework.org/api-guide/permissions/"
 OWASP_ACCESS = "https://owasp.org/Top10/A01_2021-Broken_Access_Control/"
@@ -259,6 +261,92 @@ class OpenWritableEndpoint(ApiRule):
     )
 
 
+@register
+class UnscopedUserOwnedQueryset(ApiRule):
+    """A list endpoint returning every row of a per-user model."""
+
+    def inspect(self, ctx: ProjectContext, endpoint: Endpoint) -> Iterator[Finding]:
+        queryset = endpoint.queryset
+        if queryset is None or not queryset.unfiltered or not endpoint.lists:
+            return
+        if queryset.model is None:
+            return
+        model = ctx.model_graph.get(queryset.model)
+        if model is None:
+            return
+        owners = _ownership_fields(model)
+        if not owners:
+            return
+        # An authenticated-only endpoint still shows every user their
+        # neighbours' rows, so authentication is not the answer here -- but a
+        # guard we could not read might be, and claiming otherwise would be a
+        # guess presented as a finding.
+        if not endpoint.guard.certain:
+            return
+        yield self.finding(
+            location=self.at(ctx, endpoint.view, queryset.lineno),
+            message=(
+                f"{endpoint.view.name} lists every {model.name} row without consulting "
+                f"the request, and {model.name} is per-user through "
+                f"{', '.join(sorted(owners))} -- so every caller sees everyone's records"
+            ),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.AST,
+                    content=(
+                        f"{queryset.declared_by or endpoint.label}: "
+                        f"{queryset.expression or _returns_text(queryset)}"
+                    ),
+                    source="djaudit API surface",
+                ),
+                Evidence(
+                    kind=EvidenceKind.AST,
+                    content=(
+                        f"{model.label} relates to the user model through "
+                        f"{', '.join(sorted(owners))}"
+                    ),
+                    source="djaudit model graph",
+                ),
+                self.guard_evidence(endpoint.guard),
+            ),
+            severity=Severity.CRITICAL if endpoint.guard.is_open else Severity.HIGH,
+        )
+
+    meta = RuleMeta(
+        id="DJA-004",
+        title="List endpoint not scoped to the requesting user",
+        family=Family.DJA,
+        severity=Severity.HIGH,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "The model holds rows belonging to particular users and the endpoint "
+            "returns all of them. Authentication does not help: every logged-in "
+            "caller sees every other caller's records. This is broken object-level "
+            "authorization at the collection rather than the object, which is worse "
+            "than an IDOR because no id has to be guessed."
+        ),
+        remediation=(
+            "Override get_queryset to filter by the requesting user -- "
+            "return Model.objects.filter(owner=self.request.user) -- rather than "
+            "relying on a permission class, which cannot narrow rows."
+        ),
+        references=(
+            OWASP_ACCESS,
+            "https://www.django-rest-framework.org/api-guide/filtering/",
+        ),
+        limitations=(
+            "A filter backend listed in filter_backends is not counted as scoping, "
+            "because a backend filtering on a query parameter narrows only what the "
+            "caller chose to narrow.",
+            "Row-level security enforced by the database is invisible to a static read "
+            "of the application source, and would make this finding a false positive.",
+            "A generic ListAPIView routed by a plain path() entry is not reported, "
+            "because only a router states outright that a URL returns a collection.",
+        ),
+    )
+
+
 def _all_open(classes: object) -> bool:
     if not isinstance(classes, list | tuple):
         return False
@@ -270,3 +358,22 @@ def _all_open(classes: object) -> bool:
 
 def _methods(endpoint: Endpoint) -> str:
     return ", ".join(sorted(endpoint.methods)) or "every routed method"
+
+
+def _returns_text(queryset: QuerysetNode) -> str:
+    return "; ".join(r.expression for r in queryset.returns) or "queryset"
+
+
+def _ownership_fields(model: ModelNode) -> set[str]:
+    """Fields tying a model's rows to individual users.
+
+    Both halves have to hold: the relation has to reach the user model *and*
+    be named like ownership. A ``ForeignKey`` to the user model called
+    ``approved_by`` records who signed something off; it does not make the row
+    theirs, and filtering by it would be wrong as well as noisy.
+    """
+    return {
+        edge.field_name
+        for edge in model.relations
+        if edge.points_at_user and edge.field_name in OWNERSHIP_FIELDS
+    }

@@ -259,3 +259,80 @@ class NoteViewSet(viewsets.ReadOnlyModelViewSet):
 
     def test_silent_when_a_permission_restricts(self, make_project) -> None:
         assert not run(make_project, "DJA-003", VIEWSET)
+
+
+class TestUnscopedQueryset:
+    """DJA-004 -- every caller sees everyone's rows."""
+
+    UNSCOPED = """
+from rest_framework import viewsets
+from rest_framework.permissions import IsAuthenticated
+from shop.models import Note
+
+class NoteViewSet(viewsets.ModelViewSet):
+    queryset = Note.objects.all()
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Note.objects.all()
+"""
+
+    def test_reports_a_list_endpoint_over_a_user_owned_model(self, make_project) -> None:
+        found = run(make_project, "DJA-004", self.UNSCOPED)
+        assert len(found) == 1
+        assert "everyone's records" in found[0].message
+        assert found[0].severity is Severity.HIGH
+
+    def test_silent_when_the_queryset_is_scoped(self, make_project) -> None:
+        assert not run(make_project, "DJA-004", VIEWSET)
+
+    def test_silent_when_scoping_goes_through_a_local(self, make_project) -> None:
+        source = self.UNSCOPED.replace(
+            "        return Note.objects.all()",
+            "        qs = Note.objects.all()\n        return qs.filter(owner=self.request.user)",
+        )
+        assert not run(make_project, "DJA-004", source)
+
+    def test_silent_when_the_model_has_no_owner(self, make_project) -> None:
+        source = self.UNSCOPED.replace("Note", "Region")
+        urls = ROUTED.replace("NoteViewSet", "RegionViewSet")
+        found = run(
+            make_project,
+            "DJA-004",
+            source.replace("class RegionViewSet", "class RegionViewSet"),
+            urls=urls,
+        )
+        assert not found
+
+    def test_silent_when_the_user_link_is_not_ownership(self, make_project) -> None:
+        """An ``approved_by`` foreign key records a signature, not ownership."""
+        source = self.UNSCOPED.replace("Note", "Tag")
+        urls = ROUTED.replace("NoteViewSet", "TagViewSet")
+        assert not run(make_project, "DJA-004", source, urls=urls)
+
+    def test_severity_rises_when_the_endpoint_is_also_open(self, make_project) -> None:
+        source = self.UNSCOPED.replace(
+            "permission_classes = [IsAuthenticated]", "permission_classes = []"
+        )
+        found = run(make_project, "DJA-004", source)
+        assert found[0].severity is Severity.CRITICAL
+
+    def test_silent_on_a_detail_only_view(self, make_project) -> None:
+        source = """
+from rest_framework.generics import GenericAPIView
+from rest_framework.permissions import IsAuthenticated
+from shop.models import Note
+
+class NoteDetail(GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Note.objects.all()
+"""
+        urls = """
+from django.urls import path
+from shop.api import NoteDetail
+
+urlpatterns = [path('notes/<int:pk>/', NoteDetail.as_view())]
+"""
+        assert not run(make_project, "DJA-004", source, urls=urls)

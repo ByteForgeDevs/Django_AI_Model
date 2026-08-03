@@ -2063,6 +2063,32 @@ building it here pays for itself twice.
   until these two disappear would cost the next such endpoint, which will not
   be deliberate.
 - **2.3.4** — `DJA-004` **IDOR** — `get_queryset` on a user-owned model not scoped to `request.user`. The flagship rule of this phase.
+  **Done.** The flagship, joining all three passes: an unfiltered queryset from
+  2.2.5, a list route from 2.2.3, and a model the graph says is per-user.
+  Authentication is no defence here and the rule says so — every logged-in
+  caller sees every other caller's rows — so it fires regardless of enforcement
+  and grades `CRITICAL` only when the endpoint is also open.
+
+  "Per-user" is the `points_at_user` edge from 2.1 *and* an ownership name.
+  Both halves are needed: a foreign key to the user model called `approved_by`
+  records who signed something off and does not make the row theirs, and
+  filtering by it would be wrong as well as noisy. `Tag.approved_by` in the
+  fixtures exists to hold that line.
+
+  Two corrections, both from measuring. The first was a silent one — a patch
+  that stopped applying after `ruff format` reflowed the line it matched, so
+  `collection_methods` was never passed and the rule could not fire at all
+  while every unit test still passed, because they exercised `inspect` and the
+  break was in the loop above it. The second was the fix revealing a false
+  positive: counting a plain `path()` route as a collection put NetBox's
+  `DashboardView` on the list, and it is a single-object view at
+  `dashboard/`. A router states outright that a URL returns a collection; a
+  `path()` entry does not, so those now require the view to claim the `list`
+  action itself. That is a recall gap for generic `ListAPIView` subclasses
+  routed by hand, and it is written into the rule's limitations rather than
+  guessed at. Silent on both benchmarks, which 2.2.5 predicted: pretix has zero
+  unfiltered querysets and NetBox's two are a detail-only view and a test
+  plugin.
 - **2.3.5** — `DJA-005` object-level permissions declared but `check_object_permissions` never reached on a custom `get_object`.
 - **2.3.6** — `DJA-006` `@api_view` function view with no permission decorator.
 - **2.3.7** — `DJA-007` authentication classes permitting session auth only on an endpoint routed as a public API.
