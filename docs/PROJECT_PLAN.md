@@ -345,6 +345,16 @@ variable indirection every production Django project uses.
 positive rate measured and below 10% for the family; recall gate covering every
 new rule.
 
+**Outcome.** All three met, with room. 27 rules shipped, `DJS-001`…`DJS-027`.
+Precision is **100%** on both targets — 10 findings on Healthchecks (653 files),
+6 on NetBox (1213 files), all sixteen individually reviewed against the source
+and recorded in `benchmarks/` with a justification, a reviewer and a date.
+Recall is **100%** across five fixtures, 38 expected findings, none missed. Zero
+rule errors and zero crashes on either target; NetBox audits in under a second.
+1031 tests, `ruff` and `mypy --strict` clean, and four self-consistency gates in
+CI: the plan's arithmetic, the triage files' completeness, the generated rule
+reference, and the five fixture evaluations.
+
 ### Why this phase is not simply "write twenty rules"
 
 Both benchmark repositories hide their settings behind indirection:
@@ -1409,6 +1419,24 @@ than after twenty-six of them disagree, is cheaper.
   reason.
 - **1.9.6** — Update README and this plan with measured precision and recall.
 
+  **Done.** The README opened on "Status: Phase 0 … one rule proving the
+  pipeline", which was true and is now three months of work out of date, and a
+  reader has no way to tell a stale README from an abandoned project. It now
+  leads with the measured numbers: 100% recall over 38 expected findings in five
+  fixtures, 100% precision on both real targets, 0 rule errors, under a second
+  on NetBox's 1213 files.
+
+  The numbers are stated with what they are worth. Precision on a mature
+  open-source project is a real measurement; recall on one is impossible, since
+  we cannot know what we missed in code we did not write — so recall comes from
+  fixtures and the two are not averaged into a single figure. Ten of the sixteen
+  real-target findings are `accepted_risk` rather than defects, and the README
+  says so, because a precision score that quietly counts "the project has a
+  reason" as a hit is a score with a footnote missing.
+
+  §8's progress table and this phase's exit criteria were updated in the same
+  pass, and the phase's outcome recorded against the criteria it was set.
+
 ---
 
 # Phase 2 — Model graph and DRF authorization
@@ -1788,7 +1816,7 @@ conversation.
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
-| 1 | Settings and deployment hardening | 10 | 55 | In progress — Steps 1.0–1.6 done (`DJS-001`…`DJS-018`) |
+| 1 | Settings and deployment hardening | 10 | 55 | **Complete** — `DJS-001`…`DJS-027`, 100% precision on both real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
