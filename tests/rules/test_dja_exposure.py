@@ -223,3 +223,121 @@ class TestOpenFieldList:
             """,
         )
         assert len(found) == 1
+
+
+class TestExcludeFieldList:
+    """DJA-009 -- `Meta.exclude`, which reads as careful and is not."""
+
+    def test_reports_exclude(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJA-009",
+            """
+            from rest_framework import serializers
+            from shop.models import Note
+
+            class NoteSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Note
+                    exclude = ['body']
+            """,
+        )
+        assert len(found) == 1
+        assert "NoteSerializer" in found[0].message
+
+    def test_names_the_hidden_fields(self, make_project) -> None:
+        """The denylist is the whole argument, so quote it back."""
+        found = run(
+            make_project,
+            "DJA-009",
+            """
+            from rest_framework import serializers
+            from shop.models import Note
+
+            class NoteSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Note
+                    exclude = ['body', 'owner']
+            """,
+        )
+        blob = " ".join(e.content for e in found[0].evidence)
+        assert "exclude = [body, owner]" in blob
+
+    def test_silent_on_an_explicit_list(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJA-009",
+            """
+            from rest_framework import serializers
+            from shop.models import Note
+
+            class NoteSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Note
+                    fields = ['id', 'title']
+            """,
+        )
+        assert found == []
+
+    def test_all_fields_is_not_reported_here(self, make_project) -> None:
+        """DJA-008 owns that spelling; two findings on one line is one too many."""
+        found = run(
+            make_project,
+            "DJA-009",
+            """
+            from rest_framework import serializers
+            from shop.models import Note
+
+            class NoteSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Note
+                    fields = '__all__'
+            """,
+        )
+        assert found == []
+
+    def test_exclude_and_all_fields_do_not_both_report(self, make_project) -> None:
+        ids: set[tuple[str, int]] = set()
+        for rule_id in ("DJA-008", "DJA-009"):
+            ids.update(
+                (f.rule_id, f.location.line)
+                for f in run(
+                    make_project,
+                    rule_id,
+                    """
+                    from rest_framework import serializers
+                    from shop.models import Note
+
+                    class OpenSerializer(serializers.ModelSerializer):
+                        class Meta:
+                            model = Note
+                            fields = '__all__'
+
+                    class DenySerializer(serializers.ModelSerializer):
+                        class Meta:
+                            model = Note
+                            exclude = ['body']
+                    """,
+                )
+            )
+        assert len(ids) == 2
+        assert len({line for _, line in ids}) == 2
+
+    def test_silent_on_an_abstract_mixin(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJA-009",
+            """
+            from rest_framework import serializers
+            from shop.models import Note
+
+            class BaseSerializer(serializers.ModelSerializer):
+                pass
+
+            class NoteSerializer(BaseSerializer):
+                class Meta:
+                    model = Note
+                    fields = ['id', 'title']
+            """,
+        )
+        assert found == []

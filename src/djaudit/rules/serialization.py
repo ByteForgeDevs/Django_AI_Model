@@ -152,3 +152,64 @@ class OpenFieldList(SerializerRule):
             ),
             evidence=tuple(evidence),
         )
+
+
+@register
+class ExcludeFieldList(SerializerRule):
+    meta = RuleMeta(
+        id="DJA-009",
+        title="Serializer names what to hide instead of what to show",
+        family=Family.DJA,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "Meta.exclude publishes every field the model has except the named ones, "
+            "so the list is a denylist and the default is exposure. It reads as more "
+            "careful than '__all__' because somebody clearly thought about which "
+            "fields to hide, but the reasoning only covers the columns that existed "
+            "when it was written: a column added later is published by default, and "
+            "the file that decides it was last edited before that column existed."
+        ),
+        remediation=(
+            "Switch to Meta.fields with the columns this endpoint should return. The "
+            "two spellings look interchangeable and are not -- one fails open on "
+            "every future migration and the other fails closed, which matters most "
+            "for the column nobody has thought of yet."
+        ),
+        references=(
+            "https://www.django-rest-framework.org/api-guide/serializers/#specifying-which-fields-to-include",
+            "https://cwe.mitre.org/data/definitions/213.html",
+        ),
+        limitations=(
+            "Whether any routed view uses this serializer is not checked, so one "
+            "reached only by a management command reads the same as a public one.",
+            "The excluded names are reported as written and not checked against the "
+            "model, so a typo in an exclude entry silently publishes the field it "
+            "was meant to hide and is not distinguished from a correct entry.",
+        ),
+    )
+
+    def inspect(self, ctx: ProjectContext, node: SerializerNode) -> Iterator[Finding]:
+        if node.mode != "exclude":
+            return
+        model = node.model or node.model_ref or "its model"
+        hidden = ", ".join(node.exclude) if node.exclude else "(unreadable)"
+        evidence = [
+            Evidence(
+                kind=EvidenceKind.AST,
+                content=f"{node.name}.Meta.exclude = [{hidden}]",
+                source=ctx.rel(node.path),
+            )
+        ]
+        columns = self.model_evidence(ctx, node)
+        if columns is not None:
+            evidence.append(columns)
+        yield self.finding(
+            location=self.at(ctx, node),
+            message=(
+                f"{node.name} hides {len(node.exclude)} field(s) and publishes the "
+                f"rest of {model}, including any column added to it later."
+            ),
+            evidence=tuple(evidence),
+        )

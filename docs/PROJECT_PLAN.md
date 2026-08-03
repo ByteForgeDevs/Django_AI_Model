@@ -2177,6 +2177,25 @@ building it here pays for itself twice.
   tests, including one where the serializer's base is a package we cannot read,
   which is how pretix spells all of its.
 - **2.4.2** — `DJA-009` serializer using `exclude`, which silently exposes every field added later.
+
+  **Done.** `DJA-009` in `src/djaudit/rules/serialization.py`. `Meta.exclude`
+  is a denylist, so the default is exposure and the author's reasoning covers
+  only the columns that existed when they wrote it. It is the more dangerous of
+  the two open-ended spellings precisely because it reads as *more* careful
+  than `'__all__'` — somebody visibly thought about which fields to hide, which
+  is exactly the signal that stops a reviewer looking further.
+
+  The finding quotes the denylist back verbatim, because the list is the whole
+  of the author's argument and seeing it next to the model's current columns is
+  what makes the gap obvious. A documented limitation: excluded names are not
+  checked against the model, so a typo in an `exclude` entry publishes the field
+  it was meant to hide and reads here as a correct entry.
+
+  **Zero on all three benchmarks, verified against source** — neither project
+  uses `exclude` anywhere. Six tests, including one asserting that `'__all__'`
+  and `exclude` never both report on the same class: they are alternative
+  spellings of one mistake, and two findings sharing one fix is one finding too
+  many.
 - **2.4.3** — `DJA-010` serializer exposing sensitive fields (`password`, `is_staff`, `is_superuser`, `token`, `secret`).
 - **2.4.4** — `DJA-011` writable field that should be read-only (`id`, `user`, `owner`, `created_by`) — mass assignment.
 - **2.4.5** — `DJA-012` nested serializer reaching a sensitive field through a relation.
