@@ -30,6 +30,10 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "corsheaders",
     "rest_framework",
+    # Control for DJS-026: the admin stays at the default path, and django-axes
+    # answers what that actually costs -- unlimited automated login attempts --
+    # which is a better answer than moving the URL, so the rule must stay quiet.
+    "axes",
 ]
 
 MIDDLEWARE = [

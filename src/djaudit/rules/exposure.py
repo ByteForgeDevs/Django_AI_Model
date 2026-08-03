@@ -32,8 +32,11 @@ from djaudit.rules._base import (
     assignment_value,
     entries,
     entries_of,
+    lists_entry,
+    literal_text,
 )
 from djaudit.settings import ResolvedSetting, SettingsView, resolve_all
+from djaudit.urlconf import routes, urlconfs
 
 
 @dataclass(frozen=True)
@@ -411,3 +414,124 @@ _GRADES: dict[Presence, tuple[Severity, Confidence, str]] = {
         "unknown from the source alone",
     ),
 }
+
+
+ADMIN_GUARDS = ("django_otp", "two_factor", "allauth_2fa", "axes", "defender", "admin_honeypot")
+"""Apps whose presence means the project has already answered this rule.
+
+Not one of them moves the admin, and that is the point: each of them addresses
+what the default path actually costs -- unlimited automated login attempts
+against a URL every scanner knows -- which is a better answer than moving it.
+"""
+
+
+def mounts_admin(view: str) -> bool:
+    """Whether a route's view argument is a Django admin site.
+
+    Deliberately broader than ``admin.site.urls``. Projects import the site
+    directly, subclass ``AdminSite`` for a second one, and name the result
+    whatever they like, so what is matched is the shape rather than one
+    spelling.
+    """
+    text = view.replace(" ", "")
+    if text.endswith(("site.urls", "site.get_urls()")):
+        return True
+    return "admin" in text.lower() and text.endswith(".urls")
+
+
+def at_default_path(pattern: str) -> bool:
+    """Whether a route pattern puts its view at ``/admin/``.
+
+    Handles the regex spelling too, since ``re_path(r'^admin/')`` is the same
+    URL and a rule that only understood ``path()`` would be silent on every
+    project that has not migrated.
+    """
+    return pattern.lstrip("^/").rstrip("$") in {"admin/", "admin"}
+
+
+@register
+class AdminAtDefaultPath(Rule):
+    """The admin is mounted where every scanner already looks."""
+
+    def check(self, ctx: ProjectContext) -> Iterator[Finding]:
+        views = resolve_all(ctx)
+        production = [
+            views[module.dotted]
+            for module in ctx.settings_modules
+            if module.role.reaches_production and module.dotted in views
+        ]
+        if not production:
+            return
+        if any(
+            any(lists_entry(view, "INSTALLED_APPS", guard) for guard in ADMIN_GUARDS)
+            for view in production
+        ):
+            return
+
+        names = (literal_text(view.get("ROOT_URLCONF").value) or "" for view in production)
+        for path in urlconfs(ctx, names):
+            for route in routes(ctx, path):
+                if not mounts_admin(route.view) or not at_default_path(route.pattern):
+                    continue
+                yield self.finding(
+                    location=Location(
+                        file=ctx.rel(path),
+                        line=route.line,
+                        snippet=ctx.snippet(path, route.line),
+                    ),
+                    confidence=Confidence.FIRM if route.literal else Confidence.TENTATIVE,
+                    message=(
+                        f"{route.view} is mounted at /{route.pattern}"
+                        + (
+                            ", so the admin is at the path every scanner tries first"
+                            if route.literal
+                            else " under a prefix we could not read, so this is the default "
+                            "path unless that prefix is non-empty"
+                        )
+                    ),
+                    evidence=(
+                        Evidence(
+                            kind=EvidenceKind.AST,
+                            content=f"{route.router}({route.pattern!r}, {route.view})",
+                            source=f"{ctx.rel(path)}:{route.line}",
+                        ),
+                    ),
+                    properties={"router": route.router, "view": route.view},
+                )
+
+    meta = RuleMeta(
+        id="DJS-026",
+        title="the admin is mounted at the default path",
+        family=Family.DJS,
+        severity=Severity.INFO,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "This is obscurity, not security, and it is reported at info because that "
+            "is what it is worth -- an attacker who wants the admin will find it, and a "
+            "project that moves it and changes nothing else has gained nothing. What "
+            "the default path actually costs is signal. Every scanner on the internet "
+            "tries /admin/ continuously, so the logs of a Django site at the default "
+            "path contain a permanent background of credential stuffing, and a real "
+            "attempt against a real account is indistinguishable from it. Move the "
+            "path and every request that arrives is worth reading. The rule stays "
+            "silent when the project has already answered the underlying problem some "
+            "other way -- django-axes, django-otp, two-factor auth, a honeypot -- "
+            "because each of those is a better answer than moving the URL, and telling "
+            "someone who has done the harder thing to also do the easier one is how a "
+            "tool gets ignored."
+        ),
+        remediation=(
+            "Mount the admin somewhere unguessable and, more importantly, put "
+            "something in front of it: rate limiting and lockout via django-axes, a "
+            "second factor via django-otp, or network-level restriction to a VPN or an "
+            "allowlist. If the admin is not used at all, remove django.contrib.admin "
+            "from INSTALLED_APPS and drop the route, which is what NetBox does. Moving "
+            "the path is worth doing for the log quality alone, but it should be the "
+            "last of these changes, not the only one."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/contrib/admin/",
+            "https://docs.djangoproject.com/en/stable/howto/deployment/checklist/",
+        ),
+    )

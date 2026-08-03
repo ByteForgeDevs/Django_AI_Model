@@ -1163,6 +1163,37 @@ than after twenty-six of them disagree, is cheaper.
   where an app is *named*, not where the setting is decided, so one line to
   delete is one finding. Fixed and pinned.
 - **1.8.3** — `DJS-026` `ADMIN` mounted at the default path with no additional protection — informational.
+
+  **Done.** Reported at `info`, and the rationale says out loud why: this is
+  obscurity, not security. What the default path actually costs is *signal* —
+  every scanner on the internet tries `/admin/` continuously, so a Django site
+  there has a permanent background of credential stuffing in its logs and a
+  real attempt against a real account is indistinguishable from it. Move the
+  path and every request that arrives is worth reading.
+
+  Because the honest recommendation is "put something in front of it" rather
+  than "move it", the rule goes silent when the project has already done the
+  harder thing: `django-axes`, `django-otp`, `two_factor`, `defender` or a
+  honeypot in `INSTALLED_APPS` settles it. Telling someone who has added
+  lockout and a second factor that they should also rename a URL is how a tool
+  gets ignored.
+
+  This substep is really where the urlconf reader lands, and that is the part
+  Phase 2 needs: `urlconf.py` resolves `ROOT_URLCONF` to a file — matched as a
+  *suffix* of the discovered paths, because a project's importable root is
+  often below the repository root, as NetBox's `netbox/netbox/urls.py` is —
+  and reads every `path`/`re_path`/`url` call in it, wherever it sits.
+  Restricting to the `urlpatterns` assignment would miss routes added by
+  concatenation, inside `if` branches and through helpers, for no gain in
+  accuracy. `include()` is deliberately not followed: a route's real prefix
+  comes from wherever it was included, several files away and conditionally,
+  and guessing it would produce confident wrong URLs.
+
+  Patterns are read as far as they are knowable. Healthchecks writes
+  `path(f"{prefix}admin/", admin.site.urls)` with the prefix taken from
+  `SITE_ROOT`, so the tail is certain and the whole is not — reported, at
+  `tentative`, which is the honest grade. NetBox stays silent: it has no
+  `django.contrib.admin` and no admin route at all.
 - **1.8.4** — `DJS-027` logging configuration that emits request bodies or `Authorization` headers.
 
 ### Step 1.9 — Harden, benchmark, and document
