@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from djaudit.api.permissions import (
     DEFAULT_PERMISSION_SETTING,
     DRF_SETTING,
+    Enforcement,
     Source,
 )
 from djaudit.models import (
@@ -473,6 +474,72 @@ class UnprotectedFunctionView(ApiRule):
         limitations=(
             "The function may be a deliberately public endpoint, such as a health "
             "check or a login handler, which has no permission class by design.",
+        ),
+    )
+
+
+@register
+class NoAuthenticationConfigured(ApiRule):
+    """An endpoint with every authentication class removed."""
+
+    def inspect(self, ctx: ProjectContext, endpoint: Endpoint) -> Iterator[Finding]:
+        guard = endpoint.guard
+        if not guard.unauthenticated or guard.authentication_source is not Source.VIEW:
+            return
+        # Removing authentication is only a defect when something still expects
+        # a user. Paired with a permissive permission it is how a deliberately
+        # public endpoint is spelled -- pretix's device-enrolment and
+        # idempotency-query views both do exactly this, correctly -- and
+        # DJA-002 and DJA-003 already report those from the permission side.
+        if guard.enforcement < Enforcement.AUTHENTICATED:
+            return
+        yield self.finding(
+            location=self.at(ctx, endpoint.view),
+            message=(
+                f"{endpoint.view.name} sets authentication_classes to nothing, so "
+                f"request.user is always anonymous, while its permissions require "
+                f"{guard.enforcement.name.lower()} -- no request can satisfy both"
+            ),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.AST,
+                    content=(
+                        f"authentication_classes declared empty in "
+                        f"{endpoint.view.authentication_source or endpoint.label}"
+                    ),
+                    source="djaudit API surface",
+                ),
+                self.guard_evidence(guard),
+            ),
+        )
+
+    meta = RuleMeta(
+        id="DJA-007",
+        title="Endpoint disables authentication but still requires a user",
+        family=Family.DJA,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "An empty authentication_classes means DRF never populates request.user, "
+            "so it is AnonymousUser on every request no matter what credentials were "
+            "presented. When the permission classes still demand an authenticated user "
+            "the endpoint can only ever refuse -- the two settings contradict each "
+            "other, and one of them is not what the author meant."
+        ),
+        remediation=(
+            "Decide which half is right: remove the authentication_classes override to "
+            "inherit DEFAULT_AUTHENTICATION_CLASSES, or relax the permission to AllowAny "
+            "if the endpoint is meant to be public."
+        ),
+        references=(
+            "https://www.django-rest-framework.org/api-guide/authentication/",
+            OWASP_ACCESS,
+        ),
+        limitations=(
+            "An endpoint that authenticates by hand inside the view, such as a signed "
+            "webhook or a device enrolment token, correctly has no authentication class "
+            "and is not reported unless its permissions still demand a user.",
         ),
     )
 

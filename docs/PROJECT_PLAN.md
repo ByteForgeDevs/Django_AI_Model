@@ -2119,6 +2119,30 @@ building it here pays for itself twice.
   13 `APIView` subclasses and 1 generic; pretix is 62, 14 and 1. Recall for
   this one rests entirely on the fixtures until 2.7.1 plants a defect.
 - **2.3.7** — `DJA-007` authentication classes permitting session auth only on an endpoint routed as a public API.
+  **Done, narrowed deliberately.** The plan asked for session-only
+  authentication on a public endpoint. Measuring that first showed why it
+  cannot be written as stated: DRF's default *is* session plus basic auth, so
+  the rule would fire on essentially every endpoint of every project that never
+  touched the setting, and "routed as a public API" has no static definition
+  that distinguishes it from "routed".
+
+  What is reportable is the contradiction. An empty `authentication_classes`
+  means DRF never populates `request.user`, so it is `AnonymousUser` on every
+  request no matter what credentials arrived; when the permission classes still
+  demand an authenticated user, the endpoint can only ever refuse. The two
+  settings disagree and one of them is not what the author meant. Paired with a
+  permissive permission it is instead how a deliberately public endpoint is
+  spelled — pretix's `InitializeView` and `IdempotencyQueryView` both do
+  exactly this, correctly — so that case is left to `DJA-002` and `DJA-003`,
+  which already report it from the permission side and would otherwise put
+  three findings on one line.
+
+  Both of those pretix views were findings before the narrowing and are silent
+  after it, which is the whole argument for it.
+
+  Step 2.3 totals: 7 rules, 44 tests, 1417 passing. Three benchmarks at 100%
+  precision with 2 new triaged verdicts, 22 in total. `docs/rules/DJA.md`
+  remains 2.7.5's job; the generator is `DJS`-only until then.
 
 ### Step 2.4 — Data exposure rules
 

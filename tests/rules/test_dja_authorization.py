@@ -437,3 +437,63 @@ urlpatterns = [path('notes/', notes)]
     def test_silent_on_a_class_view(self, make_project) -> None:
         naked = TestViewWithoutPermissions.NAKED
         assert not run(make_project, "DJA-006", naked, settings=OPEN_DEFAULT)
+
+
+class TestAuthenticationDisabled:
+    """DJA-007 -- the endpoint that can only ever refuse."""
+
+    CONTRADICTORY = """
+from rest_framework import viewsets
+from rest_framework.permissions import IsAuthenticated
+from shop.models import Note
+
+class NoteViewSet(viewsets.ModelViewSet):
+    queryset = Note.objects.all()
+    permission_classes = [IsAuthenticated]
+    authentication_classes = []
+"""
+
+    def test_reports_authentication_removed_under_a_strict_permission(self, make_project) -> None:
+        found = run(make_project, "DJA-007", self.CONTRADICTORY)
+        assert len(found) == 1
+        assert "no request can satisfy both" in found[0].message
+
+    def test_silent_when_the_permission_is_also_open(self, make_project) -> None:
+        """pretix's device-enrolment view: deliberately public, correctly spelled."""
+        source = self.CONTRADICTORY.replace(
+            "permission_classes = [IsAuthenticated]", "permission_classes = []"
+        )
+        assert not run(make_project, "DJA-007", source)
+
+    def test_silent_when_authentication_is_inherited(self, make_project) -> None:
+        source = self.CONTRADICTORY.replace("    authentication_classes = []\n", "")
+        assert not run(make_project, "DJA-007", source)
+
+    def test_silent_when_authentication_is_declared_non_empty(self, make_project) -> None:
+        source = self.CONTRADICTORY.replace(
+            "authentication_classes = []", "authentication_classes = [SessionAuthentication]"
+        ).replace(
+            "from shop.models import Note",
+            "from shop.models import Note\n"
+            "from rest_framework.authentication import SessionAuthentication",
+        )
+        assert not run(make_project, "DJA-007", source)
+
+
+class TestFamilyRegistration:
+    def test_all_seven_rules_are_registered(self) -> None:
+        ids = {r.meta.id for r in all_rules() if r.meta.id.startswith("DJA-")}
+        assert {f"DJA-00{n}" for n in range(1, 8)} <= ids
+
+    def test_none_of_them_crash_on_a_project_without_drf(self, make_project) -> None:
+        ctx: ProjectContext = make_project(
+            {
+                "manage.py": "",
+                "shop/__init__.py": "",
+                "shop/models.py": MODELS,
+                "shop/settings.py": SETTINGS_MARKERS,
+            }
+        )
+        for rule in all_rules():
+            if rule.meta.id.startswith("DJA-"):
+                assert list(rule().check(ctx)) == []
