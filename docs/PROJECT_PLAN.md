@@ -2628,6 +2628,41 @@ their own. Substep 2.6.1 extends `RULE_ID_PATTERN` to admit `DJD`.
   `GenericForeignKey` as unresolved had invented 19 NetBox failures out of
   nothing.
 - **2.7.4** — Triage pass on both benchmarks.
+
+  **Done.** Re-read all 62 verdicts across the three targets, looking for the
+  failure mode a triage file has that a test does not: verdicts that were
+  reasonable when written and have quietly stopped being true.
+
+  The cross-target splits held up. `DJS-009`/`DJS-010` are `true_positive` on
+  Healthchecks and `accepted_risk` on NetBox, which looks inconsistent and is
+  not: Healthchecks assigns neither flag and exposes no environment variable
+  for either, so there is no supported way to turn them on, while NetBox's
+  `False` is the documented fallback for a value the operator sets in a
+  `configuration.py` that lives outside the repository. `DJA-011` splits 5/3 on
+  NetBox along a single line — the accepted three each have a guard the rule
+  cannot see (`validate()` raising `PermissionDenied`, or a workflow where
+  naming another user is the feature), the reported five have nothing at all.
+  `DJD-002` splits 1/8 on pretix on whether the two spellings of empty are ever
+  reconciled. `DJA-014` reports a signing key as a query parameter and accepts
+  three bearer credentials that the endpoints exist to redeem. Every one of
+  these is a distinction a reader can check, so none needed changing.
+
+  What the pass did change is that the citations are now checked by machine.
+  Fingerprints deliberately ignore line numbers — that is what keeps a verdict
+  attached to its defect when the file around it moves — but it also means the
+  `file`/`line` recorded beside each verdict can rot in silence, and every note
+  in `benchmarks/` argues from that citation. Their comment said "recorded for
+  reviewability only", which is another way of saying nothing verified them.
+  `djaudit benchmark` now reports **misfiled** entries: a verdict whose
+  recorded rule, file or line disagrees with the finding it matched. Since
+  targets are pinned by SHA, a disagreement is never innocent drift — either
+  the pin moved without a re-read, or the entry was wrong when it was written.
+  Both should stop the build; neither did before.
+
+  It is deliberately not the same signal as `regressed`. A verdict whose
+  finding stopped firing entirely is a different event with a different remedy,
+  and reporting both would double-count it. All three targets are at 0 misfiled
+  today, which is the point: the check was added while it was cheap to satisfy.
 - **2.7.5** — `docs/rules/DJA.md`, plus an architecture note on the model graph.
 
 ---

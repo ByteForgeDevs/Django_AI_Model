@@ -369,6 +369,12 @@ def _print_benchmark(console: Console, report: BenchmarkReport) -> None:
             f"[dim]known false positive, no longer reported[/dim]"
         )
 
+    for misfiled in report.misfiled:
+        console.print(
+            f"[red]misfiled[/red] {misfiled.recorded} "
+            f"[dim]is now {misfiled.actual} -- re-read the note before trusting it[/dim]"
+        )
+
     if report.scores:
         table = Table(title=f"{report.target} precision", header_style="bold")
         table.add_column("family")
