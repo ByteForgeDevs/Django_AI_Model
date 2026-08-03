@@ -43,6 +43,11 @@ DATABASES = {
         # report this alias.
         "CONN_MAX_AGE": 60,
         "CONN_HEALTH_CHECKS": True,
+        # Control for DJS-022: a networked Postgres connection that verifies
+        # the server it reached. HOST is spelled out rather than left empty, so
+        # this exercises the reported path and not the Unix socket shortcut.
+        "HOST": "db.internal.example",
+        "OPTIONS": {"sslmode": "verify-full", "sslrootcert": "/etc/ssl/certs/ca.pem"},
     }
 }
 

@@ -1014,6 +1014,42 @@ than after twenty-six of them disagree, is cheaper.
   operator. NetBox builds `DATABASES` from an unreadable `configuration` object
   and stays silent, which is the correct answer rather than a lucky one.
 - **1.7.4** — `DJS-022` Postgres connection without `sslmode=require`.
+
+  **Done.** libpq's default `sslmode` is `prefer`, which is the worst default
+  to inherit by accident: it asks the server for TLS, accepts a refusal without
+  complaint, and reports nothing either way. A session that silently fell back
+  to plaintext is indistinguishable from an encrypted one from inside the
+  application, and what travels over it is the database password on the way in
+  and every row on the way back.
+
+  Three precision guards, each measured rather than assumed. Non-Postgres
+  engines are skipped, but the match is loose — `postgis`, `psqlextra` and the
+  gevent pool wrap the same libpq connection and take the same `OPTIONS`, and
+  a rule recognising only the stock backend would go quiet on the projects most
+  likely to be a real deployment. A `HOST` that is absent, empty, loopback or a
+  socket path is skipped, because libpq ignores `sslmode` on a Unix socket and
+  an attacker on loopback has already won; env-dependence defeats that guard on
+  purpose, since the literal we can see is the fallback and the deployment that
+  matters is the one that sets the variable. And an `OPTIONS` we cannot read
+  suppresses the finding entirely, because the `sslmode` might be in there.
+
+  `require` and above stay silent. `require` does not authenticate the server,
+  so this is a deliberate concession to precision over purity, and the
+  remediation says plainly that `verify-full` with `sslrootcert` is the setting
+  that actually checks who answered.
+
+  The branch logic is the inverse of DJS-021's, which is worth stating: that
+  rule asks whether anyone thought about a setting, so any branch answering it
+  settles the question; this one asks whether a deployment exists that talks to
+  the database in the clear, and a second branch doing it properly does not
+  un-expose the first. One bad branch is enough, one finding per alias.
+
+  Measured: Healthchecks reports at `medium`/`tentative` on
+  `os.getenv("DB_SSLMODE", "prefer")`, and `docker/.env.example` ships
+  `DB_SSLMODE=prefer` too, so the documented starting point is the downgradable
+  one; triaged `accepted_risk`, because self-hosted software exposing the knob
+  is doing the right thing and many self-hosters are on a Unix socket. NetBox
+  stays silent.
 - **1.7.5** — `DJS-023` `ATOMIC_REQUESTS` disabled where the project otherwise implies it — informational, low severity.
 
 ### Step 1.8 — Introspection exposure rules

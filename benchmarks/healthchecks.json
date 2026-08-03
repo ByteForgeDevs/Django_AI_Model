@@ -81,6 +81,14 @@
       "file": "hc/settings.py",
       "line": 229,
       "note": "Correctly identified and correctly graded low/tentative, which is the point of this entry. hc/settings.py:229 is `\"CONN_MAX_AGE\": envint(\"DB_CONN_MAX_AGE\", \"0\")` inside the Postgres branch, so an instance that does not set DB_CONN_MAX_AGE opens and closes a connection per request. That is real and it is what the rule says. It is accepted_risk rather than true_positive because Healthchecks is self-hosted software rather than one deployment: the setting is deliberately exposed as an environment variable and documented, so the project has handed the decision to the operator, which is the correct thing for it to do. The value of the finding is for the operator reading their own deployment, not for the project. The confidence lands at tentative on its own -- the value is env-dependent and the assignment sits inside an `if`, and the shared policy charges for both -- which keeps it below the default output threshold, exactly where a performance nudge with an invisible mitigation belongs."
+    },
+    {
+      "fingerprint": "4348a03c883c5b4a",
+      "rule_id": "DJS-022",
+      "verdict": "accepted_risk",
+      "file": "hc/settings.py",
+      "line": 233,
+      "note": "Real and precisely located. hc/settings.py:233 is `\"sslmode\": os.getenv(\"DB_SSLMODE\", \"prefer\")`, and docker/.env.example ships `DB_SSLMODE=prefer` as well, so the documented starting point for a Docker deployment is the mode that will accept a plaintext session without saying so. An instance whose database is on another host and whose operator never changed the variable sends the database password and every row in the clear, and nothing anywhere reports it, because libpq downgrades silently. accepted_risk rather than true_positive for the same reason as DJS-021: Healthchecks is self-hosted software, not a deployment, and it has exposed the setting as a documented environment variable, which is the correct thing for it to do -- many self-hosters run the database on the same host over a Unix socket, where sslmode genuinely does not matter, and forcing `require` there would break them. The finding is for the operator, not the project, and medium/tentative is the right size for that: worth reading, not worth failing a build over. Whether the connection is local is exactly what the rule cannot see here, since HOST is os.getenv(\"DB_HOST\", \"\") -- an empty default that means Unix socket, overridden at deployment time by a value we cannot read. That env-dependence is also what puts the confidence at tentative rather than firm, which is the honest answer."
     }
   ]
 }

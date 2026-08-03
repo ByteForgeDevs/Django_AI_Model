@@ -53,6 +53,8 @@ DATABASES = {
         "HOST": os.environ["DB_HOST"],
         # Control for DJS-021: an alias that reuses connections.
         "CONN_MAX_AGE": 600,
+        # Control for DJS-022: the session is encrypted and the server checked.
+        "OPTIONS": {"sslmode": "verify-full"},
     }
 }
 

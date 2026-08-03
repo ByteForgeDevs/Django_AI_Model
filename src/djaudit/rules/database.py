@@ -275,3 +275,164 @@ class ConnectionsNotReused(DatabaseAliasRule):
             "https://docs.djangoproject.com/en/stable/ref/databases/#connection-pool",
         ),
     )
+
+
+_SSL_DOCS = "https://www.postgresql.org/docs/current/libpq-ssl.html"
+
+POSTGRES_ENGINES = ("postgresql", "postgis", "psqlextra", "postgres")
+"""Substrings that mark a Postgres backend.
+
+Matched loosely on purpose. django.contrib.gis.db.backends.postgis,
+django_db_geventpool and psqlextra all wrap the same libpq connection and take
+the same OPTIONS, and a rule that only recognised the stock backend would go
+quiet on exactly the projects most likely to be running a real deployment.
+"""
+
+UNPROTECTED_SSLMODES = {"disable", "allow", "prefer"}
+"""libpq modes that will speak plaintext.
+
+`prefer` is the default and the dangerous one: it asks for TLS, accepts a
+refusal without complaint, and reports nothing either way, so a downgrade is
+indistinguishable from a working connection.
+"""
+
+LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
+
+
+def definitely_local(entry: Entry | None) -> bool:
+    """Whether the connection certainly never crosses a network.
+
+    An absent or empty HOST means a Unix domain socket, where libpq ignores
+    sslmode entirely, and a leading slash is the socket directory spelled out.
+    Loopback is included because an attacker positioned to read it has already
+    won. Anything env-dependent is not "certainly" anything: the literal we can
+    see is the fallback, and the deployment that matters is the one that sets
+    the variable.
+    """
+    if entry is None:
+        return True
+    if entry.value.env_dependent:
+        return False
+    text = literal_text(entry.value)
+    if text is None:
+        return False
+    return text in LOCAL_HOSTS or text.startswith("/")
+
+
+@register
+class PostgresWithoutTls(DatabaseAliasRule):
+    """A Postgres connection that will accept an unencrypted session.
+
+    Unlike DJS-021, one bad branch is enough. That rule asks whether anyone
+    thought about a setting, so any branch answering it settles the question.
+    This one asks whether a deployment exists that talks to the database in the
+    clear, and a second branch doing it properly does not un-expose the first.
+    """
+
+    ceiling = Confidence.FIRM
+    """libpq also reads sslmode from PGSSLMODE and from a service file, and the
+    network between the application and the database might be one nobody else
+    can reach. The setting is read exactly; what it means for a given
+    deployment is the inference."""
+
+    caveats = (
+        "libpq also honours PGSSLMODE and ~/.pg_service.conf, which could raise this "
+        "at run time without appearing in the settings",
+    )
+
+    def judge(
+        self,
+        ctx: ProjectContext,
+        group: SettingGroup,
+        alias: str,
+        configs: tuple[DatabaseConfig, ...],
+    ) -> Iterator[Finding]:
+        view = self.views[group.module.dotted]
+        for config in configs:
+            engine = config.engine
+            if engine is None or not any(name in engine for name in POSTGRES_ENGINES):
+                continue
+            if definitely_local(config.get("HOST")):
+                continue
+
+            options_entry = config.get("OPTIONS")
+            options = config.options(view)
+            if options_entry is not None and not options:
+                # OPTIONS built by a helper or spread from another dict. The
+                # sslmode could be in there and we would never know.
+                continue
+
+            mode_entry = options.get("sslmode")
+            mode = None if mode_entry is None else literal_text(mode_entry.value)
+            if mode is not None and mode not in UNPROTECTED_SSLMODES:
+                continue
+            if mode_entry is not None and mode is None:
+                continue
+
+            where = group.module.dotted or ctx.rel(group.module.path)
+            stated = (
+                f'sets sslmode to "{mode}"'
+                if mode
+                else 'never sets sslmode, so libpq defaults to "prefer"'
+            )
+            yield self.report(
+                ctx,
+                group.narrow(f'DATABASES["{alias}"]["OPTIONS"]["sslmode"]', group.setting.value),
+                at=(mode_entry.node if mode_entry is not None else config.at()),
+                severity=(Severity.HIGH if mode == "disable" else Severity.MEDIUM),
+                message=(
+                    f"the {alias!r} Postgres connection in {where}"
+                    f"{group.describe_reach()} {stated}, so the session can run "
+                    "unencrypted over the network -- and because libpq downgrades "
+                    "silently, a connection carrying the database password in the "
+                    "clear looks exactly like one that did not"
+                ),
+                evidence=(
+                    Evidence(
+                        kind=EvidenceKind.CONFIG,
+                        content=(
+                            f"ENGINE = {engine}\n"
+                            f"sslmode = {mode or 'unset (libpq default: prefer)'}"
+                        ),
+                        source="djaudit settings resolver",
+                    ),
+                ),
+            )
+            return
+
+    meta = RuleMeta(
+        id="DJS-022",
+        title="Postgres connection permits an unencrypted session",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "libpq defaults sslmode to `prefer`, which is the worst possible default "
+            "to inherit by accident: it asks the server for TLS, accepts a refusal "
+            "without complaint, and reports nothing either way. A connection that has "
+            "silently fallen back to plaintext is indistinguishable from an encrypted "
+            "one from inside the application, so nothing will ever surface the "
+            "problem -- and an attacker who can answer the connection first does not "
+            "need to break anything, only to say no. What travels over that session "
+            "is the database password on the way in and every row on the way back. "
+            "The reason this survives review is that it is invisible in development, "
+            "where the database is a Unix socket and sslmode genuinely does not "
+            "matter, and stays invisible in production because everything still works."
+        ),
+        remediation=(
+            "Set OPTIONS['sslmode'] on the alias. `require` encrypts the session and "
+            "is the minimum worth having, but it does not check who answered, so it "
+            "stops passive capture and not an active attacker; `verify-full` with "
+            "OPTIONS['sslrootcert'] pointed at the CA is the setting that actually "
+            "authenticates the server, and is what a managed Postgres provider's own "
+            "documentation will tell you to use. If the database is reached over a "
+            "Unix socket, say so by leaving HOST empty rather than pointing it at "
+            "localhost, which is a TCP connection and does need TLS."
+        ),
+        references=(
+            _SSL_DOCS,
+            "https://docs.djangoproject.com/en/stable/ref/databases/#postgresql-notes",
+            "https://cwe.mitre.org/data/definitions/319.html",
+        ),
+    )
