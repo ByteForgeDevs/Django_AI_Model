@@ -210,6 +210,55 @@ class EndpointWithoutPermissions(ApiRule):
     )
 
 
+@register
+class OpenWritableEndpoint(ApiRule):
+    """A view that permits anonymous writes."""
+
+    def inspect(self, ctx: ProjectContext, endpoint: Endpoint) -> Iterator[Finding]:
+        guard = endpoint.guard
+        if not endpoint.writes or not guard.is_open:
+            return
+        # DJA-002 already reports the endpoints that inherited their opening.
+        # Reporting them here too would put the same view on two lines of the
+        # same report with the same fix.
+        if guard.source in (Source.SETTING, Source.DRF_DEFAULT):
+            return
+        writes = sorted(endpoint.methods & {"POST", "PUT", "PATCH", "DELETE"})
+        declared = "an empty permission_classes" if not guard.classes else "AllowAny"
+        yield self.finding(
+            location=self.at(ctx, endpoint.view),
+            message=(
+                f"{endpoint.view.name} declares {declared} and is routed for "
+                f"{', '.join(writes)}, so anonymous callers can change data"
+            ),
+            evidence=(self.guard_evidence(guard),),
+            severity=Severity.CRITICAL,
+        )
+
+    meta = RuleMeta(
+        id="DJA-003",
+        title="Write methods reachable without authentication",
+        family=Family.DJA,
+        severity=Severity.CRITICAL,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "An unauthenticated read is an exposure; an unauthenticated write is an "
+            "invitation. The view names a permissive permission explicitly, so this "
+            "is a decision someone made rather than a default nobody changed."
+        ),
+        remediation=(
+            "Restrict the write methods -- IsAuthenticated at minimum, or "
+            "IsAuthenticatedOrReadOnly if the reads are genuinely public."
+        ),
+        references=(DRF_DOCS, OWASP_ACCESS),
+        limitations=(
+            "A credential check performed inside a view method rather than by a "
+            "permission class is not visible to this rule and will look like nothing.",
+        ),
+    )
+
+
 def _all_open(classes: object) -> bool:
     if not isinstance(classes, list | tuple):
         return False

@@ -2046,6 +2046,22 @@ building it here pays for itself twice.
   permissions" is a claim a reader will not believe about their own code and
   the useful reply is the chain that produced it. Silent on both benchmarks.
 - **2.3.3** — `DJA-003` `AllowAny` on a view exposing write methods.
+  **Done.** The view that said "anyone" out loud, on a route that changes data.
+  Deliberately declines the case where the opening came from the project
+  default: `DJA-002` owns that, and the same view on two lines of one report
+  with one fix between them is one line too many.
+
+  This is the only `DJA` rule that fires on the benchmarks, twice, and both are
+  true readings of intentionally public endpoints — NetBox's
+  `TokenProvisionView` and pretix's `InitializeView`. Both are credential
+  exchange: the caller presents a password or a one-time enrolment token in the
+  body and receives an API token, so both must precede the authentication they
+  exist to grant, and both check the credential by hand in the handler where no
+  permission class can see it. Recorded as `accepted_risk` rather than
+  suppressed. An endpoint that opens itself to anonymous POST should have to
+  justify itself once, and the rule asking is the rule working; narrowing it
+  until these two disappear would cost the next such endpoint, which will not
+  be deliberate.
 - **2.3.4** — `DJA-004` **IDOR** — `get_queryset` on a user-owned model not scoped to `request.user`. The flagship rule of this phase.
 - **2.3.5** — `DJA-005` object-level permissions declared but `check_object_permissions` never reached on a custom `get_object`.
 - **2.3.6** — `DJA-006` `@api_view` function view with no permission decorator.

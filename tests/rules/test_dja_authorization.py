@@ -209,3 +209,53 @@ class NoteViewSet(Guarded):
     def test_writable_endpoints_are_graded_higher(self, make_project) -> None:
         found = run(make_project, "DJA-002", self.NAKED, settings=OPEN_DEFAULT)
         assert found[0].severity is Severity.HIGH
+
+
+class TestOpenWritableEndpoint:
+    """DJA-003 -- the view that said 'anyone' out loud."""
+
+    EMPTY = """
+from rest_framework import viewsets
+from shop.models import Note
+
+class NoteViewSet(viewsets.ModelViewSet):
+    queryset = Note.objects.all()
+    permission_classes = []
+"""
+
+    def test_reports_an_empty_permission_list(self, make_project) -> None:
+        found = run(make_project, "DJA-003", self.EMPTY)
+        assert len(found) == 1
+        assert found[0].severity is Severity.CRITICAL
+        assert "POST" in found[0].message
+
+    def test_reports_an_explicit_allow_any(self, make_project) -> None:
+        source = self.EMPTY.replace(
+            "permission_classes = []",
+            "permission_classes = [AllowAny]",
+        ).replace(
+            "from shop.models import Note",
+            "from shop.models import Note\nfrom rest_framework.permissions import AllowAny",
+        )
+        found = run(make_project, "DJA-003", source)
+        assert len(found) == 1
+        assert "AllowAny" in found[0].message
+
+    def test_silent_when_the_opening_came_from_the_default(self, make_project) -> None:
+        """DJA-002 owns that case; two findings on one line is one too many."""
+        naked = TestViewWithoutPermissions.NAKED
+        assert not run(make_project, "DJA-003", naked, settings=OPEN_DEFAULT)
+
+    def test_silent_on_a_read_only_route(self, make_project) -> None:
+        source = """
+from rest_framework import viewsets
+from shop.models import Note
+
+class NoteViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Note.objects.all()
+    permission_classes = []
+"""
+        assert not run(make_project, "DJA-003", source)
+
+    def test_silent_when_a_permission_restricts(self, make_project) -> None:
+        assert not run(make_project, "DJA-003", VIEWSET)
