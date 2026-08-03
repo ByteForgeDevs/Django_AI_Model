@@ -8,7 +8,7 @@ migrations written the way Django writes them, and the attribution -- the part
 that decides whether a shortfall is explainable or a bug -- is tested against
 each shape it claims to recognise.
 
-The measurements against the real targets live in ``benchmarks/*-graph.json``
+The measurements against the real targets live in ``benchmarks/graph/*.json``
 and run in CI, where the projects are cloned. Nothing here needs them.
 """
 

@@ -2781,7 +2781,7 @@ We therefore build the dataflow foundation first, and we default this family to
 
 ### Step 3.6 — Benchmark and document
 
-- **3.6.1** — N+1 fixture project with true positives, correctly prefetched near-misses, and `Prefetch`-object cases.
+- **3.6.1** — N+1 fixture project with true positives, correctly prefetched near-misses, and `Prefetch`-object cases. It must also carry a paginated `ModelViewSet` over an unordered model, giving `DJD-003` its first end-to-end case: that rule ends Phase 2 firing in no fixture and on no benchmark target, so its zero is currently unexamined, and the shape it needs is one this fixture builds anyway.
 - **3.6.2** — Injection fixture project including sanitised near-misses.
 - **3.6.3** — Performance profiling: dataflow analysis must not push a NetBox-scale run beyond 10 seconds.
 
@@ -3015,7 +3015,7 @@ conversation.
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
 | 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
-| 2 | Model graph and DRF authorization | 7 | 37 | Not started |
+| 2 | Model graph and DRF authorization | 7 | 37 | **Complete** (PR #3) — `DJA-001`…`DJA-015`, `DJD-001`…`DJD-003`, 100% precision on three real targets |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
 | 5 | Portability and external adapters | 4 | 20 | Not started |
@@ -3024,11 +3024,34 @@ conversation.
 | | **Total** | **52** | **232** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
-`DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3.
+`DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
+document specifies, and most of it is still only specified: **45 rules are
+implemented** and registered today — every rule introduced by phases 0 through
+2, and none introduced after them.
 
-These counts are verified against the document itself, not asserted. Any
-amendment that adds or removes a substep must update this table in the same
-commit.
+The step and substep counts are verified against the document itself. The
+implemented count, and each phase's status, are verified against
+`djaudit.registry` — so a phase cannot be called *Not started* while its rules
+are running, a phase cannot be called *Complete* while any of its rules is
+missing, and a rule cannot be registered that this document never mentions.
+Any amendment that adds or removes a substep must update this table in the
+same commit.
+
+**Phase 2 outcome, measured.** The model graph is reconstructed for all three
+benchmark targets and checked against each target's own migrations by
+`scripts/graph_coverage.py`, which reads `AddField`/`CreateModel` operations as
+an independent oracle — Healthchecks resolves completely, NetBox and pretix
+leave only attributed gaps. 45 rules ship behind 1,634 tests. Six planted-defect
+fixtures score 100% precision and 100% recall over 56 expected findings, with 97
+`must_not_report` assertions pinning the near misses. The three real targets
+report 62 findings, every one triaged with a file and line that the benchmark
+harness now re-verifies on each run, at 100% precision, zero untriaged, zero
+regressed, zero misfiled and zero rule errors.
+
+`DJD-003` is the one rule with no end-to-end coverage: it fires in none of the
+six fixtures and none of the three targets, and its only positive evidence is
+unit tests. Recorded here rather than left as an unexamined zero — Substep
+3.6.1 gives it a fixture.
 
 ---
 
