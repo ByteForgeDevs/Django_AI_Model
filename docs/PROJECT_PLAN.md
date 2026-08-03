@@ -1912,6 +1912,59 @@ building it here pays for itself twice.
   `OrganizerViewSet(UpdateModelMixin, ReadOnlyModelViewSet)` reports list GET,
   detail GET/PUT/PATCH and nothing else, which is what pretix serves. 26 tests.
 - **2.2.4** — Permission and authentication resolution: class attributes, `get_permissions` overrides, `@permission_classes`, falling back to `REST_FRAMEWORK` defaults via the settings resolver.
+
+  **Done.** `api/permissions.py` answers what stands between an anonymous
+  caller and each endpoint. It has to combine three sources, because DRF ships
+  `DEFAULT_PERMISSION_CLASSES = ['AllowAny']` — an unconfigured install is open
+  — so "this view declares nothing" is not on its own a fact worth reporting.
+
+  The pass would have been useless on both benchmarks without resolving
+  project permission classes by ancestry. NetBox defaults to its own
+  `TokenPermissions` and pretix to its own `EventPermission`; a table of DRF's
+  eight classes alone would have resolved the default on neither and reported
+  nothing on both while appearing to work.
+
+  Two judgements carry it. A class inheriting `BasePermission` that never
+  overrides `has_permission` is `AllowAny` wearing a reassuring name, because
+  `BasePermission.has_permission` returns `True` — the most valuable thing here
+  and invisible to anything that only reads names. And an override whose every
+  other return is `False` and which ends `return super().has_permission(...)`
+  can only take permissions away, so its base still bounds it. That is exactly
+  NetBox's `TokenPermissions`, and refusing to see it would leave 142 of its
+  151 routed views unreadable.
+
+  Everything else is recorded as unknown rather than guessed. `UNKNOWN` sits
+  *below* `OPEN` in the ordering, so combining it with a class we do read keeps
+  that class's guarantee — an unreadable permission ANDed with
+  `IsAuthenticated` still cannot admit an anonymous caller — and a `Guard`
+  carries its unresolved references so a rule can demand certainty before
+  reporting. NetBox's `IsSuperuser` proves the ordering right: it is stronger
+  than anything in the table, and treating unknown as a verdict rather than a
+  floor would have called it open.
+
+  Two defects found by measurement, both invisible to unit tests.
+  `permission_classes = [A | B]` rendered to nothing, leaving a list
+  indistinguishable from `permission_classes = []` — the first is DRF's
+  `OperandHolder`, the second genuinely disables the check, and conflating them
+  turns a guarded view into a reported vulnerability. And an empty
+  `authentication_classes = ()` was falling back to the project default, hiding
+  that pretix's device-initialisation and idempotency endpoints have no
+  authentication at all.
+
+  NetBox: 151 routed views, 142 requiring authentication through the default,
+  11 uncertain (`IsSuperuser`, `IsAuthenticatedOrLoginNotRequired` — the latter
+  reads `settings.LOGIN_REQUIRED` at request time), 3 dynamic via a
+  `get_permissions` mixin, and exactly 1 certainly open: `TokenProvisionView`,
+  whose `permission_classes = []` and docstring agree it is deliberate. pretix:
+  76 routed views, 74 uncertain because `EventPermission` is hand-written, and
+  2 certainly open with no authenticators — both verified in source. Every
+  count from 2.1 through 2.2.3 is byte-identical before and after. 33 tests.
+
+  `Entry`, `entries`, `literal_text` and `assignment_value` moved from
+  `rules/_base.py` down into `settings.py`, where they belong: they read
+  settings and know nothing about rules. `api/` needs them, and leaving them in
+  the rules layer would have made Step 2.3's `DJA` rules — which import `api/`
+  — a circular import.
 - **2.2.5** — Queryset resolution: the `queryset` attribute and `get_queryset` return expressions, including filters applied.
 
 ### Step 2.3 — Authorization rules

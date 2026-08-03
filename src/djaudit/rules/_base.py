@@ -18,7 +18,6 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 
 from djaudit.context import ProjectContext, SettingsModule, SettingsRole
-from djaudit.evaluator import Evaluator
 from djaudit.models import Confidence, Evidence, EvidenceKind, Finding, Location, Severity
 from djaudit.registry import Rule
 from djaudit.settings import (
@@ -340,71 +339,6 @@ def module_location(ctx: ProjectContext, module: SettingsModule) -> Location:
     return Location(file=ctx.rel(module.path), line=1)
 
 
-def literal_text(value: Value) -> str | None:
-    """The value as a plain string, or ``None`` if it is not one."""
-    return value.literal if value.is_literal and isinstance(value.literal, str) else None
-
-
-@dataclass(frozen=True, slots=True)
-class Entry:
-    """One key of a dict literal, resolved without reference to its siblings."""
-
-    key: str
-    value: Value
-    node: ast.expr | None = None
-    """The value expression, when there was one to point at.
-
-    ``None`` when the entry came from a resolved value rather than a literal in
-    the source -- a dict built by a helper has no line of its own, so a finding
-    about it falls back to the assignment.
-    """
-
-
-def entries(
-    view: SettingsView, node: ast.expr | None, value: Value | None = None
-) -> dict[str, Entry]:
-    """Read a dict setting one key at a time.
-
-    Preferring the AST over the resolved value is deliberate. A dict collapses
-    to unknown the moment any single entry does, and a real ``DATABASES`` block
-    always has something coming from the environment -- so a password written
-    in beside it would disappear along with the rest. Resolving each entry on
-    its own keeps what is knowable, and the AST keeps the line numbers, which a
-    plain dict has already thrown away.
-
-    When the assignment is not a literal at all -- ``getattr(configuration,
-    'DATABASES', ...)``, or a call to the project's own builder -- there is no
-    dict in the source to walk, so a resolved value is used instead. That shape
-    is common enough to matter: it is how NetBox writes every one of its
-    settings, and a rule that quietly skipped it would report nothing and look
-    like it had checked. Such entries carry no node, so a finding about one
-    points at the assignment.
-
-    Non-string keys are skipped: every setting shaped like this is keyed by
-    name, and the callers all look keys up by name.
-    """
-    if not isinstance(node, ast.Dict):
-        if value is not None and value.is_literal and isinstance(value.literal, dict):
-            return {
-                key: Entry(key=key, value=Value.of(inner, env_dependent=value.env_dependent))
-                for key, inner in value.literal.items()
-                if isinstance(key, str)
-            }
-        return {}
-
-    evaluator = Evaluator(view.scope)
-    found: dict[str, Entry] = {}
-    for key_node, value_node in zip(node.keys, node.values, strict=True):
-        if key_node is None:
-            continue
-        key = evaluator.evaluate(key_node)
-        name = literal_text(key)
-        if name is None:
-            continue
-        found[name] = Entry(key=name, value=evaluator.evaluate(value_node), node=value_node)
-    return found
-
-
 def entries_of(value: Value) -> tuple[list[object] | None, ...]:
     """Every list this value could be, or ``(None,)`` if we cannot tell.
 
@@ -448,14 +382,6 @@ def lists_entry(view: SettingsView, setting: str, entry: str) -> bool | None:
     if any(entries is not None and entry in entries for entries in branches):
         return True
     return False if all(entries is not None for entries in branches) else None
-
-
-def assignment_value(setting: ResolvedSetting) -> ast.expr | None:
-    """The right-hand side of the assignment that decided a setting."""
-    definition = setting.definition
-    if definition is None or not isinstance(definition.node, ast.Assign | ast.AnnAssign):
-        return None
-    return definition.node.value
 
 
 def could_be_true(value: Value) -> bool:

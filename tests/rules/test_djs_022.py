@@ -8,8 +8,8 @@ import pytest
 
 from djaudit import engine
 from djaudit.models import Finding
-from djaudit.rules._base import Entry
 from djaudit.rules.database import definitely_local
+from djaudit.settings import Entry
 from djaudit.values import Value
 
 MARKERS = "INSTALLED_APPS = []\nSECRET_KEY = 'x'\nDEBUG = False\n"

@@ -131,6 +131,14 @@ is 2.2.5's job.
 """
 
 
+UNREADABLE = "?"
+"""Stands in for a ``*_classes`` entry we could not render to a name.
+
+A sentinel rather than an omission so that "there was nothing here" and "there
+was something here we could not read" stay distinguishable all the way to the
+rule that has to decide whether to report."""
+
+
 @dataclass(frozen=True, slots=True)
 class ExtraAction:
     """A method promoted to a route by ``@action``."""
@@ -145,6 +153,17 @@ class ExtraAction:
 
     url_path: str | None = None
     lineno: int = 0
+
+    permission_refs: tuple[str, ...] = ()
+    """``@action(permission_classes=[...])``, spelled as written.
+
+    Worth reading despite being rare, because the kwargs of ``@action`` become
+    ``initkwargs`` and DRF sets them as attributes on the view instance the
+    router builds -- so this genuinely overrides the viewset's own
+    ``permission_classes`` for this one route and nothing else."""
+
+    permissions_set: bool = False
+    """Whether the kwarg was passed at all, which an empty list cannot say."""
 
 
 @dataclass
@@ -188,6 +207,16 @@ class ViewNode:
 
     permission_refs: tuple[str, ...] = ()
     authentication_refs: tuple[str, ...] = ()
+
+    permission_source: str | None = None
+    """The class whose body declared :attr:`permission_refs`.
+
+    Not always this view. The names are written in *that* class's module and
+    resolve through *its* imports, so without recording it a reference
+    inherited from a base in another package resolves against the wrong
+    namespace and lands on nothing."""
+
+    authentication_source: str | None = None
 
     permissions_unset: bool = True
     """No ``permission_classes`` anywhere in the ancestry, so the project's
@@ -262,19 +291,25 @@ def _class_refs(body: list[ast.stmt], name: str) -> tuple[str, ...]:
 
     Element-wise, so one entry built by a call does not discard the rest --
     the same fidelity rule the serializer field lists follow.
+
+    An entry that renders to nothing becomes :data:`UNREADABLE` rather than
+    disappearing, because ``permission_classes = []`` and
+    ``permission_classes = [IsAuthenticated | IsAdminUser]`` must not arrive
+    at the caller looking identical. The first genuinely disables the check
+    and is a finding; the second is DRF's ``OperandHolder`` composition, whose
+    guarantee is its *weakest* operand, and silently reading it as an empty
+    list would turn a locked-down view into a reported vulnerability.
     """
     value = _assigned(body, name)
-    if value is None:
-        return ()
+    return () if value is None else _list_refs(value)
+
+
+def _list_refs(value: ast.expr) -> tuple[str, ...]:
+    """The same read, for a list written as a keyword argument."""
     if not isinstance(value, ast.List | ast.Tuple):
         rendered = dotted_name(value)
-        return (rendered,) if rendered else ()
-    out = []
-    for element in value.elts:
-        rendered = dotted_name(element)
-        if rendered:
-            out.append(rendered)
-    return tuple(out)
+        return (rendered,) if rendered else (UNREADABLE,)
+    return tuple(dotted_name(element) or UNREADABLE for element in value.elts)
 
 
 def _methods_kwarg(call: ast.Call) -> tuple[str, ...]:
@@ -308,6 +343,8 @@ def read_extra_actions(node: ast.ClassDef, bindings: dict[str, str]) -> tuple[Ex
                 continue
             detail = None
             url_path = None
+            permissions: tuple[str, ...] = ()
+            permissions_set = False
             for kw in decorator.keywords:
                 if kw.arg == "detail":
                     value = literal(kw.value)
@@ -315,6 +352,9 @@ def read_extra_actions(node: ast.ClassDef, bindings: dict[str, str]) -> tuple[Ex
                 elif kw.arg == "url_path":
                     value = literal(kw.value)
                     url_path = value if isinstance(value, str) else None
+                elif kw.arg == "permission_classes":
+                    permissions_set = True
+                    permissions = _list_refs(kw.value)
             found.append(
                 ExtraAction(
                     name=stmt.name,
@@ -322,6 +362,8 @@ def read_extra_actions(node: ast.ClassDef, bindings: dict[str, str]) -> tuple[Ex
                     methods=_methods_kwarg(decorator),
                     url_path=url_path,
                     lineno=stmt.lineno,
+                    permission_refs=permissions,
+                    permissions_set=permissions_set,
                 )
             )
     return tuple(found)
@@ -415,6 +457,8 @@ def build_view(record: ClassRecord, index: ClassIndex) -> ViewNode:
     permissions: tuple[str, ...] = ()
     authentication: tuple[str, ...] = ()
     permissions_unset = True
+    permission_source: str | None = None
+    authentication_source: str | None = None
 
     # Nearest declaration wins, which is why the chain is walked in order and
     # the first answer is kept rather than the last.
@@ -430,12 +474,15 @@ def build_view(record: ClassRecord, index: ClassIndex) -> ViewNode:
             if assigned is not None:
                 queryset_ref = ast.unparse(assigned)
                 queryset_model_ref = _root_name(assigned)
-        if not permissions:
+        if permission_source is None:
             permissions = _class_refs(link.node.body, "permission_classes")
             if permissions or _assigned(link.node.body, "permission_classes") is not None:
                 permissions_unset = False
-        if not authentication:
+                permission_source = link.dotted
+        if authentication_source is None:
             authentication = _class_refs(link.node.body, "authentication_classes")
+            if authentication or _assigned(link.node.body, "authentication_classes") is not None:
+                authentication_source = link.dotted
 
     kind = (
         "viewset"
@@ -458,6 +505,8 @@ def build_view(record: ClassRecord, index: ClassIndex) -> ViewNode:
         queryset_model_ref=queryset_model_ref,
         permission_refs=permissions,
         authentication_refs=authentication,
+        permission_source=permission_source,
+        authentication_source=authentication_source,
         permissions_unset=permissions_unset,
         overrides=frozenset(overrides),
         defined=frozenset(defined),
@@ -501,6 +550,8 @@ def build_function_view(
             http_methods=methods,
             permission_refs=_decorator_refs(node, bindings, "permission_classes"),
             authentication_refs=_decorator_refs(node, bindings, "authentication_classes"),
+            permission_source=f"{module}.{node.name}",
+            authentication_source=f"{module}.{node.name}",
             permissions_unset="rest_framework.decorators.permission_classes"
             not in {resolve_dotted(bindings, d) for d in decorators},
             bases=(API_VIEW_DECORATOR,),
