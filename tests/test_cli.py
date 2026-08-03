@@ -63,6 +63,30 @@ class TestExitCodes:
         result = runner.invoke(app, ["run", str(vulnerable_project), "--baseline", str(bad)])
         assert result.exit_code == EXIT_ERROR
 
+    def test_an_unauditable_project_is_a_tool_error_not_a_pass(self, tmp_path):
+        """Exiting 0 here would tell CI a project is clean that nothing examined."""
+        root = tmp_path / "proj"
+        (root / "conf").mkdir(parents=True)
+        (root / "manage.py").write_text("import os\n")
+        (root / "conf" / "settings.py").write_text(
+            "from configurations import Configuration\n\n"
+            "class Base(Configuration):\n    SECRET_KEY = 'x'\n"
+        )
+        result = runner.invoke(app, ["run", str(root)])
+        assert result.exit_code == EXIT_ERROR
+        assert "incomplete" in result.output
+
+    def test_the_diagnostic_reaches_json_consumers(self, tmp_path):
+        root = tmp_path / "proj"
+        (root / "conf").mkdir(parents=True)
+        (root / "manage.py").write_text("import os\n")
+        (root / "conf" / "settings.py").write_text("X = 1\n")
+        out = tmp_path / "out.json"
+        runner.invoke(app, ["run", str(root), "-f", "json", "-o", str(out)])
+        payload = json.loads(out.read_text())
+        assert payload["diagnostics"][0]["code"] == "no-settings-module"
+        assert payload["diagnostics"][0]["blocking"] is True
+
 
 class TestOutputFormats:
     def test_json_output_is_parseable(self, vulnerable_project, tmp_path):

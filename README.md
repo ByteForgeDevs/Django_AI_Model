@@ -74,10 +74,16 @@ uv run djaudit rules
 |---|---|
 | `0` | Nothing at or above `--fail-on` |
 | `1` | Findings at or above `--fail-on` |
-| `2` | The tool could not run — bad path, unreadable baseline, bad options |
+| `2` | The tool could not run — bad path, unreadable baseline, bad options — or ran without covering enough of the project to be trusted |
 
 "Found problems" and "tool broke" are separate codes so a pipeline can tell a
 real failure from a broken install.
+
+Incomplete analysis shares code `2` rather than passing quietly. If djaudit
+cannot locate a settings module in something that plainly is a Django project —
+`django-configurations` keeps its settings in class attributes, for instance —
+it says so and exits non-zero. A clean report from a run that read nothing is
+more dangerous than no report at all, so it is not offered as one.
 
 ## Severity and confidence are separate axes
 

@@ -42,6 +42,15 @@ def build(result: RunResult) -> dict[str, Any]:
             "duration_seconds": round(result.duration_seconds, 4),
         },
         "findings": [f.to_dict() for f in result.findings],
+        "diagnostics": [
+            {
+                "code": d.code,
+                "message": d.message,
+                "detail": d.detail,
+                "blocking": d.blocking,
+            }
+            for d in ctx.diagnostics
+        ],
         "rule_errors": dict(result.rule_errors),
         "parse_errors": {ctx.rel(p): msg for p, msg in ctx.parse_errors.items()},
     }

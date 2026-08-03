@@ -1437,6 +1437,42 @@ than after twenty-six of them disagree, is cheaper.
   §8's progress table and this phase's exit criteria were updated in the same
   pass, and the phase's outcome recorded against the criteria it was set.
 
+### Step 1.10 — Coverage honesty
+
+Added after Phase 1 merged. Pointing the finished tool at readthedocs.org — 951
+files, a real production Django deployment — produced **zero settings modules,
+zero findings, and exit 0**. Not a crash, not a warning: a clean bill of health
+for a project it had not read a single setting of. The cause is that
+readthedocs configures Django through `django-configurations`, so its settings
+are class attributes and the module-level scan sees nothing.
+
+That is the most dangerous defect this tool can have, and it is worse than any
+false positive in Step 1.9's triage. A false positive costs a developer ten
+minutes; a false all-clear is used as evidence that an unaudited deployment is
+safe. Phase 1 could not be called complete while it was possible, so the phase
+reopens for two substeps: refuse to be silent first, then remove the reason for
+the silence.
+
+- **1.10.1** — Incomplete-analysis diagnostics: a `Diagnostic` channel on `ProjectContext`, separate from findings, reported by the terminal and JSON reporters and exiting `2` when analysis could not cover the project.
+
+  **Done.** Deliberately not a finding. A finding is subject to baselines,
+  thresholds and `# djaudit: ignore`, so filing "I could not read your settings"
+  as one would let it be permanently silenced by the same mechanism that exists
+  to silence noise — after which the tool reports a confident all-clear forever.
+  Diagnostics are a separate channel that nothing can suppress.
+
+  Emitted only when the checkout looks like a Django project, since a reusable
+  app has no settings and warning about it would be noise. When settings-shaped
+  files exist but define nothing at module level, the class bodies are checked
+  for the same markers, which upgrades the message from "found nothing" to
+  naming the file, the settings it holds and `django-configurations` as the
+  reason. Exit code `2`, joining "the tool could not run" rather than "findings
+  were reported": a green build produced by a run that never located the
+  settings is worse than a red one. readthedocs.org now exits 2 and names
+  `dockerfiles/settings/build.py`; the three benchmark targets are unaffected.
+
+- **1.10.2** — `django-configurations` support: resolve settings declared as class attributes, including inheritance across `Configuration` subclasses and the `values.Value` family, so class-configured projects are audited rather than merely reported as unreadable.
+
 ---
 
 # Phase 2 — Model graph and DRF authorization
@@ -2187,14 +2223,14 @@ conversation.
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
-| 1 | Settings and deployment hardening | 10 | 55 | **Complete** — `DJS-001`…`DJS-027`, 100% precision on both real targets |
+| 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
 | 5 | Portability and external adapters | 4 | 20 | Not started |
 | 6 | LLM layer | 5 | 17 | Not started |
 | 7 | Distribution | 3 | 10 | Not started |
-| | **Total** | **51** | **230** | |
+| | **Total** | **52** | **232** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3.

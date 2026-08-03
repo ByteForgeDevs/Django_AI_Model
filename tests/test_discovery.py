@@ -216,3 +216,68 @@ class TestModulePath:
     def test_a_module_that_is_not_ours_is_not_invented(self, tmp_path):
         ctx = build_context(self.build(tmp_path, "myproj/mw.py"))
         assert ctx.module_path("django.contrib.sessions.middleware") is None
+
+
+class TestDiagnostics:
+    """A run that audits nothing must say so.
+
+    The failure this guards against is the quiet one: djaudit walked 951 files,
+    found no settings module, ran no DJS rule, printed "no findings" in green
+    and exited 0. Every assertion here is about refusing to do that.
+    """
+
+    def build(self, tmp_path: Path, files: dict[str, str]) -> Path:
+        root = tmp_path / "proj"
+        for name, source in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source)
+        return root
+
+    def test_a_normal_project_is_quiet(self, vulnerable_project):
+        assert build_context(vulnerable_project).diagnostics == ()
+
+    def test_class_based_settings_are_named_not_ignored(self, tmp_path):
+        root = self.build(
+            tmp_path,
+            {
+                "manage.py": "import os\n",
+                "conf/settings.py": (
+                    "from configurations import Configuration\n\n"
+                    "class Base(Configuration):\n"
+                    "    SECRET_KEY = 'x'\n"
+                    "    INSTALLED_APPS = []\n"
+                    "    DEBUG = True\n"
+                ),
+            },
+        )
+        ctx = build_context(root)
+        assert not ctx.settings_modules
+        diagnostic = ctx.diagnostics[0]
+        assert diagnostic.code == "settings-in-class-body"
+        assert diagnostic.blocking
+        assert "django-configurations" in diagnostic.detail
+        assert "INSTALLED_APPS" in diagnostic.detail
+
+    def test_a_settings_shaped_file_with_nothing_in_it_is_still_reported(self, tmp_path):
+        root = self.build(tmp_path, {"manage.py": "import os\n", "conf/settings.py": "X = 1\n"})
+        ctx = build_context(root)
+        assert [d.code for d in ctx.diagnostics] == ["no-settings-module"]
+
+    def test_a_reusable_app_stays_quiet(self, tmp_path):
+        """No manage.py and no settings file: nothing was missed, so say nothing."""
+        root = self.build(tmp_path, {"widgets/models.py": "import django\n"})
+        assert build_context(root).diagnostics == ()
+
+    def test_settings_that_parse_are_preferred_over_the_diagnostic(self, tmp_path):
+        root = self.build(
+            tmp_path,
+            {
+                "manage.py": "import os\n",
+                "conf/settings.py": "SECRET_KEY = 'x'\nINSTALLED_APPS = []\n",
+                "conf/legacy.py": "class Old:\n    SECRET_KEY = 'y'\n",
+            },
+        )
+        ctx = build_context(root)
+        assert ctx.settings_modules
+        assert ctx.diagnostics == ()

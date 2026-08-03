@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from djaudit.astutils import literal, module_assignments, star_import_targets
-from djaudit.context import ProjectContext, SettingsModule, SettingsRole
+from djaudit.context import Diagnostic, ProjectContext, SettingsModule, SettingsRole
 
 EXCLUDED_DIR_NAMES = frozenset(
     {
@@ -297,6 +297,81 @@ def discover_settings_modules(
     )
 
 
+def _class_settings_markers(ctx: ProjectContext, path: Path) -> tuple[str, ...]:
+    """Settings assigned inside a class body rather than at module level.
+
+    ``django-configurations`` (and a few hand-rolled equivalents) puts the whole
+    configuration in class attributes, so ``module_assignments`` sees an empty
+    module and the file is never confirmed as settings. Detecting the shape does
+    not analyse it, but it turns "found nothing" into "found something I cannot
+    read yet", which is the difference between a silent pass and a useful one.
+    """
+    tree = ctx.parse(path)
+    if tree is None:
+        return ()
+    found: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for stmt in node.body:
+            targets: list[ast.expr] = []
+            if isinstance(stmt, ast.Assign):
+                targets = list(stmt.targets)
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                targets = [stmt.target]
+            found.update(
+                t.id for t in targets if isinstance(t, ast.Name) and t.id in SETTINGS_MARKERS
+            )
+    return tuple(sorted(found))
+
+
+def diagnose_settings(ctx: ProjectContext, files: tuple[Path, ...]) -> tuple[Diagnostic, ...]:
+    """Report when a project that clearly has settings yielded none.
+
+    Every ``DJS`` rule reads a settings module, so finding none silently turns a
+    whole family off and the run exits 0 having audited nothing. That is the
+    worst failure mode available to this tool -- worse than a crash, because a
+    crash is noticed. It is only raised when the checkout actually looks like a
+    Django project: pointing djaudit at a reusable app, which legitimately has
+    no settings, must stay quiet.
+    """
+    if ctx.settings_modules:
+        return ()
+
+    candidates = [p for p in files if _is_settings_candidate(p)]
+    if ctx.manage_py is None and not candidates:
+        return ()
+
+    class_based = [(p, m) for p in candidates for m in (_class_settings_markers(ctx, p),) if m]
+    if class_based:
+        path, markers = class_based[0]
+        others = f" (and {len(class_based) - 1} more)" if len(class_based) > 1 else ""
+        return (
+            Diagnostic(
+                code="settings-in-class-body",
+                message="No settings module could be read: this project keeps its settings "
+                "in class attributes.",
+                detail=f"{ctx.rel(path)} assigns {', '.join(markers[:3])} inside a class "
+                f"body{others}, which is how django-configurations works. djaudit only "
+                "reads module-level assignments today, so every DJS rule was skipped and "
+                "this result says nothing about the project's security. Support is "
+                "planned; until then, audit the module that django-configurations "
+                "generates, or set DJANGO_SETTINGS_MODULE to a plain settings module.",
+            ),
+        )
+
+    return (
+        Diagnostic(
+            code="no-settings-module",
+            message="No settings module could be found, so no settings were audited.",
+            detail="A manage.py or settings-shaped file is present, but nothing assigns "
+            "recognisable Django settings at module level. Every DJS rule was skipped, so "
+            "a clean result here means only that djaudit found nothing to look at. Pass "
+            "the project root, or check that the settings module is not excluded.",
+        ),
+    )
+
+
 def detect_django_version(root: Path) -> str | None:
     """Read the pinned Django version from dependency manifests.
 
@@ -333,4 +408,5 @@ def build_context(root: Path) -> ProjectContext:
     )
     ctx.settings_modules = discover_settings_modules(ctx, files, ctx.settings_entrypoint)
     ctx.django_version = detect_django_version(root)
+    ctx.diagnostics = diagnose_settings(ctx, files)
     return ctx

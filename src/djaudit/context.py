@@ -51,6 +51,29 @@ class SettingsModule:
     """True when ``DJANGO_SETTINGS_MODULE`` points here."""
 
 
+@dataclass(frozen=True, slots=True)
+class Diagnostic:
+    """Something about the *analysis* that the user must be told.
+
+    Distinct from a finding, and deliberately not one. A finding says the
+    project has a problem; a diagnostic says djaudit could not see enough of the
+    project to judge. Conflating them would let a blind spot be silenced with a
+    baseline entry or a ``# djaudit: ignore`` comment, which is precisely the
+    outcome to avoid: the tool would then report a confident, permanent, and
+    entirely uninformed all-clear.
+    """
+
+    code: str
+    message: str
+    """One line, stating what could not be analysed."""
+
+    detail: str
+    """Why it happened and what the user can do about it."""
+
+    blocking: bool = True
+    """Whether the run should exit non-zero because its coverage is incomplete."""
+
+
 @dataclass
 class ProjectContext:
     """Everything a static-tier rule needs, with parsing cached across rules.
@@ -66,6 +89,9 @@ class ProjectContext:
     settings_entrypoint: str | None = None
     settings_modules: tuple[SettingsModule, ...] = ()
     django_version: str | None = None
+    diagnostics: tuple[Diagnostic, ...] = ()
+    """Gaps in what could be analysed. Reported before findings, never as one."""
+
     live: bool = False
     """Whether the target's virtualenv is available for live-tier rules."""
 
