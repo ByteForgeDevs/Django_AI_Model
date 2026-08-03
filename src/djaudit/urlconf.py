@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from djaudit.context import ProjectContext
+from djaudit.discovery import locate_module
 
 ROUTERS = frozenset({"path", "re_path", "url"})
 """The three ways Django has spelled "map this pattern to this view"."""
@@ -103,33 +104,11 @@ def routes(ctx: ProjectContext, path: Path) -> tuple[Route, ...]:
     return tuple(found)
 
 
-def locate(ctx: ProjectContext, dotted: str) -> Path | None:
-    """The file a dotted module name refers to, inside the analysed tree.
-
-    Not simply ``root / dotted``: a project's importable root is often a
-    directory below the repository root -- NetBox's ``netbox.urls`` lives at
-    ``netbox/netbox/urls.py`` -- so the name is matched as a suffix of the
-    paths we already found, nearest the root winning.
-    """
-    if not dotted:
-        return None
-    relative = Path(*dotted.split("."))
-    wanted = (relative.with_suffix(".py").as_posix(), (relative / "__init__.py").as_posix())
-    matches = [
-        candidate
-        for candidate in ctx.python_files
-        for target in wanted
-        if candidate.as_posix() == (ctx.root / target).as_posix()
-        or candidate.as_posix().endswith("/" + target)
-    ]
-    return min(matches, key=lambda p: (len(p.parts), p.as_posix())) if matches else None
-
-
 def urlconfs(ctx: ProjectContext, names: Iterator[str]) -> tuple[Path, ...]:
     """The distinct urlconf files named by a set of settings modules."""
     found: dict[str, Path] = {}
     for name in names:
-        path = locate(ctx, name)
+        path = locate_module(ctx, name)
         if path is not None:
             found.setdefault(path.as_posix(), path)
     return tuple(found.values())

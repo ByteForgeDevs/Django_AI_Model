@@ -50,3 +50,21 @@ ATOMIC_REQUESTS = True
 # debugging an incident at the worst possible moment.
 if os.environ.get("ENABLE_DEBUG_TOOLBAR"):
     INSTALLED_APPS = [*INSTALLED_APPS, "debug_toolbar"]
+
+# PLANTED DEFECT: include_html mails the full HTML debug page -- every local
+# variable in every frame -- through SMTP on every unhandled exception, and the
+# replacement reporter filter throws away the redaction that would have kept the
+# Authorization header and the session cookie out of it (DJS-027).
+LOGGING = {
+    "version": 1,
+    "handlers": {
+        "mail_admins": {
+            "class": "django.utils.log.AdminEmailHandler",
+            "level": "ERROR",
+            "include_html": True,
+        },
+    },
+    "loggers": {"django.request": {"handlers": ["mail_admins"], "level": "ERROR"}},
+}
+
+DEFAULT_EXCEPTION_REPORTER_FILTER = "app.reporting.TerseFilter"

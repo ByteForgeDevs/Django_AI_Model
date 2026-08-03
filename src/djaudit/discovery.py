@@ -174,6 +174,28 @@ def resolve_dotted(root: Path, dotted: str) -> Path | None:
     return None
 
 
+def locate_module(ctx: ProjectContext, dotted: str) -> Path | None:
+    """The file a dotted module name refers to, inside the analysed tree.
+
+    Not simply ``root / dotted``: a project's importable root is often a
+    directory below the repository root -- NetBox's ``netbox.urls`` lives at
+    ``netbox/netbox/urls.py`` -- so the name is matched as a suffix of the
+    paths we already found, nearest the root winning.
+    """
+    if not dotted:
+        return None
+    relative = Path(*dotted.split("."))
+    wanted = (relative.with_suffix(".py").as_posix(), (relative / "__init__.py").as_posix())
+    matches = [
+        candidate
+        for candidate in ctx.python_files
+        for target in wanted
+        if candidate.as_posix() == (ctx.root / target).as_posix()
+        or candidate.as_posix().endswith("/" + target)
+    ]
+    return min(matches, key=lambda p: (len(p.parts), p.as_posix())) if matches else None
+
+
 def _is_settings_candidate(path: Path) -> bool:
     return path.stem == "settings" or path.parent.name in SETTINGS_PARENT_DIRS
 

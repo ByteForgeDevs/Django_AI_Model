@@ -12,8 +12,8 @@ import pathlib
 
 import pytest
 
-from djaudit.discovery import build_context
-from djaudit.urlconf import locate, pattern_of, routes
+from djaudit.discovery import build_context, locate_module
+from djaudit.urlconf import pattern_of, routes
 
 
 def parse(source: str) -> ast.expr:
@@ -108,7 +108,7 @@ def test_a_module_below_the_repository_root_is_found(tmp_path: pathlib.Path) -> 
     (root / "netbox" / "netbox" / "settings.py").write_text('DATABASES = {}\nSECRET_KEY = "x"\n')
     (root / "netbox" / "netbox" / "urls.py").write_text("urlpatterns = []\n")
     ctx = build_context(root)
-    assert locate(ctx, "netbox.urls") == root / "netbox" / "netbox" / "urls.py"
+    assert locate_module(ctx, "netbox.urls") == root / "netbox" / "netbox" / "urls.py"
 
 
 def test_a_package_urlconf_is_found(tmp_path: pathlib.Path) -> None:
@@ -117,10 +117,10 @@ def test_a_package_urlconf_is_found(tmp_path: pathlib.Path) -> None:
     (root / "config" / "urls").mkdir()
     (root / "config" / "urls" / "__init__.py").write_text("urlpatterns = []\n")
     ctx = build_context(root)
-    assert locate(ctx, "config.urls") == root / "config" / "urls" / "__init__.py"
+    assert locate_module(ctx, "config.urls") == root / "config" / "urls" / "__init__.py"
 
 
 def test_an_unknown_module_resolves_to_nothing(tmp_path: pathlib.Path) -> None:
     ctx = build_context(project(tmp_path, "urlpatterns = []\n"))
-    assert locate(ctx, "nowhere.urls") is None
-    assert locate(ctx, "") is None
+    assert locate_module(ctx, "nowhere.urls") is None
+    assert locate_module(ctx, "") is None

@@ -30,3 +30,16 @@ SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 SECURE_HSTS_SECONDS = 31536000
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+
+# Control for DJS-027: the filter extends Django's rather than replacing it,
+# which is the right way to redact more, and the mail_admins handler leaves
+# include_html off, so the traceback goes out as plain text.
+LOGGING = {
+    "version": 1,
+    "handlers": {
+        "mail_admins": {"class": "django.utils.log.AdminEmailHandler", "level": "ERROR"},
+    },
+    "loggers": {"django.request": {"handlers": ["mail_admins"], "level": "ERROR"}},
+}
+
+DEFAULT_EXCEPTION_REPORTER_FILTER = "app.reporting.ExtraFilter"

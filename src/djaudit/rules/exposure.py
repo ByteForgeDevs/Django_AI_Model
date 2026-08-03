@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from djaudit.context import ProjectContext
+from djaudit.discovery import locate_module
 from djaudit.manifest import deployed, discover
 from djaudit.models import (
     Confidence,
@@ -27,6 +28,7 @@ from djaudit.models import (
 )
 from djaudit.registry import Rule, RuleMeta, register
 from djaudit.rules._base import (
+    Entry,
     SettingGroup,
     SettingsRule,
     assignment_value,
@@ -37,6 +39,7 @@ from djaudit.rules._base import (
 )
 from djaudit.settings import ResolvedSetting, SettingsView, resolve_all
 from djaudit.urlconf import routes, urlconfs
+from djaudit.values import Value
 
 
 @dataclass(frozen=True)
@@ -533,5 +536,212 @@ class AdminAtDefaultPath(Rule):
         references=(
             "https://docs.djangoproject.com/en/stable/ref/contrib/admin/",
             "https://docs.djangoproject.com/en/stable/howto/deployment/checklist/",
+        ),
+    )
+
+
+DJANGO_FILTER = "django.views.debug.SafeExceptionReporterFilter"
+"""The filter that does all of Django's redaction of error reports.
+
+Its ``hidden_settings`` pattern -- ``API|AUTH|TOKEN|KEY|SECRET|PASS|SIGNATURE|
+HTTP_COOKIE`` -- is what keeps the Authorization header, the session cookie and
+anything password-shaped out of a traceback. Replace it and every one of those
+goes back in.
+"""
+
+REPORTER_SETTINGS = frozenset({"LOGGING", "DEFAULT_EXCEPTION_REPORTER_FILTER"})
+
+
+def sub_entries(view: SettingsView, entry: Entry) -> dict[str, Entry]:
+    """The keys of a nested dict, resolved the same way as the outer one."""
+    return entries(view, entry.node, entry.value)
+
+
+def class_bases(ctx: ProjectContext, dotted: str) -> set[str] | None:
+    """The base classes of a class named by dotted path, if we can find it.
+
+    ``None`` when the class is outside the tree we parsed, which is a different
+    answer from "it has no bases" and has to stay different: a project may
+    perfectly well subclass Django's filter in a package we are not looking at.
+    """
+    module, _, name = dotted.rpartition(".")
+    path = locate_module(ctx, module)
+    tree = None if path is None else ctx.parse(path)
+    if tree is None:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return {ast.unparse(base) for base in node.bases}
+    return None
+
+
+def replaces_redaction(ctx: ProjectContext, dotted: str) -> bool | None:
+    """Whether a filter class abandons Django's redaction rather than extending it.
+
+    The distinction is the whole rule. Almost every project that sets this
+    setting does so to redact *more*, by subclassing, and reporting them would
+    punish exactly the people who thought about it hardest.
+    """
+    if dotted == DJANGO_FILTER:
+        return False
+    bases = class_bases(ctx, dotted)
+    if bases is None:
+        return None
+    return not any(base.endswith("SafeExceptionReporterFilter") for base in bases)
+
+
+@register
+class ErrorReportsLeakRequests(SettingsRule):
+    """The error-report path is configured to send more than it redacts."""
+
+    ceiling = Confidence.FIRM
+    """Whether the setting says this is a fact; whether an error ever occurs on
+    a request carrying something sensitive is a near-certainty, not a fact."""
+
+    def selects(self, name: str) -> bool:
+        return name in REPORTER_SETTINGS
+
+    def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
+        if group.setting.name == "LOGGING":
+            yield from self.inspect_handlers(ctx, group)
+        else:
+            yield from self.inspect_filter(ctx, group)
+
+    def inspect_handlers(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
+        view = self.views[group.module.dotted]
+        top = entries(view, assignment_value(group.setting), group.setting.value)
+        handlers = top.get("handlers")
+        if handlers is None:
+            return
+        for name, handler in sub_entries(view, handlers).items():
+            config = sub_entries(view, handler)
+            klass = literal_text(config.get("class", Entry("class", Value.unknown("absent"))).value)
+            if klass is None or not klass.endswith("AdminEmailHandler"):
+                continue
+            yield from self.inspect_handler(ctx, group, name, config)
+
+    def inspect_handler(
+        self, ctx: ProjectContext, group: SettingGroup, name: str, config: dict[str, Entry]
+    ) -> Iterator[Finding]:
+        html = config.get("include_html")
+        if html is not None and html.value.is_always(True):
+            yield self.report(
+                ctx,
+                group.narrow(f'LOGGING["handlers"]["{name}"]["include_html"]', html.value),
+                at=html.node,
+                severity=Severity.MEDIUM,
+                message=(
+                    f"the {name!r} handler mails admins with include_html on, so every "
+                    "unhandled exception sends the full HTML debug page -- every local "
+                    "variable in every frame, the request, and a slice of the settings "
+                    "-- out through SMTP, which is the one page DEBUG exists to keep off "
+                    "the internet"
+                ),
+                evidence=(
+                    Evidence(
+                        kind=EvidenceKind.CONFIG,
+                        content=f'LOGGING["handlers"]["{name}"]["include_html"] = True',
+                        source="djaudit settings resolver",
+                    ),
+                ),
+            )
+
+        reporter = config.get("reporter_class")
+        dotted = literal_text(reporter.value) if reporter is not None else None
+        if reporter is None or dotted is None:
+            return
+        replaced = replaces_redaction(ctx, dotted)
+        if replaced is False:
+            return
+        yield self.report(
+            ctx,
+            group.narrow(f'LOGGING["handlers"]["{name}"]["reporter_class"]', reporter.value),
+            at=reporter.node,
+            severity=Severity.MEDIUM,
+            ceiling=Confidence.FIRM if replaced else Confidence.TENTATIVE,
+            extra_caveats=()
+            if replaced
+            else (
+                "the class is outside the tree we parsed, so whether it extends "
+                "Django's reporter could not be checked",
+            ),
+            message=(
+                f"the {name!r} handler builds its error emails with {dotted}, which does "
+                "not extend Django's reporter, so the redaction that keeps the "
+                "Authorization header, the session cookie and anything password-shaped "
+                "out of a traceback is whatever that class reimplements"
+            ),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.CONFIG,
+                    content=f'LOGGING["handlers"]["{name}"]["reporter_class"] = {dotted!r}',
+                    source="djaudit settings resolver",
+                ),
+            ),
+        )
+
+    def inspect_filter(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
+        dotted = literal_text(group.setting.value)
+        if dotted is None:
+            return
+        replaced = replaces_redaction(ctx, dotted)
+        if replaced is False:
+            return
+        yield self.report(
+            ctx,
+            group,
+            severity=Severity.MEDIUM,
+            ceiling=Confidence.FIRM if replaced else Confidence.TENTATIVE,
+            extra_caveats=()
+            if replaced
+            else (
+                "the class is outside the tree we parsed, so whether it extends "
+                "Django's reporter could not be checked",
+            ),
+            message=(
+                f"DEFAULT_EXCEPTION_REPORTER_FILTER is {dotted}, which does not extend "
+                "SafeExceptionReporterFilter, so Django's redaction is replaced rather "
+                "than extended -- and that redaction is the only thing keeping the "
+                "Authorization header, the session cookie and every password-shaped POST "
+                "parameter out of error emails and 500 pages"
+            ),
+        )
+
+    meta = RuleMeta(
+        id="DJS-027",
+        title="the error-report path sends more than it redacts",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "Django's error reports are already close to the line: an unhandled "
+            "exception mails ADMINS a traceback containing the request, the POST "
+            "parameters and every local variable, in plaintext over SMTP. What keeps "
+            "that survivable is SafeExceptionReporterFilter, whose pattern -- "
+            "API, AUTH, TOKEN, KEY, SECRET, PASS, SIGNATURE, HTTP_COOKIE -- redacts the "
+            "Authorization header, the session cookie and anything password-shaped "
+            "before the mail goes out. This rule is about the two opt-in ways a project "
+            "removes that protection. include_html on an AdminEmailHandler attaches the "
+            "full HTML debug page, which is the page DEBUG exists to keep off the "
+            "internet, and mails it. Replacing the reporter filter with a class that "
+            "does not extend Django's substitutes whatever that class happens to "
+            "implement for the pattern above. Neither is a default and neither happens "
+            "by accident, which is why both are reported and why the far more common "
+            "arrangement -- the stock mail_admins handler, which Django itself ships in "
+            "DEFAULT_LOGGING -- is not."
+        ),
+        remediation=(
+            "Leave include_html off; the plaintext traceback already says what broke, "
+            "and the HTML version adds every local variable in every frame for the "
+            "benefit of an inbox. If a custom reporter filter is needed, subclass "
+            "SafeExceptionReporterFilter and extend cleanse_setting or "
+            "get_post_parameters rather than replacing the class, so the existing "
+            "redaction keeps working. Better still, send exceptions to an error "
+            "tracker over TLS instead of to a mailbox."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/logging/#django.utils.log.AdminEmailHandler",
+            "https://docs.djangoproject.com/en/stable/howto/error-reporting/#filtering-error-reports",
         ),
     )

@@ -1196,6 +1196,40 @@ than after twenty-six of them disagree, is cheaper.
   `django.contrib.admin` and no admin route at all.
 - **1.8.4** — `DJS-027` logging configuration that emits request bodies or `Authorization` headers.
 
+  **Done, and reshaped by reading Django's source.** The obvious version of
+  this rule — `django.db.backends` at `DEBUG`, which logs every statement with
+  its bound parameters — was dropped, because `CursorDebugWrapper` only logs
+  when `connection.queries_logged`, and that is `force_debug_cursor or
+  settings.DEBUG`. In a production module with `DEBUG` off it emits nothing, so
+  the rule would have been a false-positive generator; and where `DEBUG` *is*
+  on, `DJS-001` and `DJS-002` already say so at critical. A rule whose
+  precondition is an existing critical finding is noise.
+
+  The second draft was going to be about the `Authorization` header and the
+  session cookie surviving into error emails. Reading
+  `SafeExceptionReporterFilter` killed that too: its pattern is
+  `API|AUTH|TOKEN|KEY|SECRET|PASS|SIGNATURE|HTTP_COOKIE`, so `HTTP_AUTHORIZATION`
+  and `HTTP_COOKIE` are both already redacted. Django has closed those.
+
+  What is left is the genuine article, and it is the two opt-in ways a project
+  removes that protection. `include_html: True` on an `AdminEmailHandler`
+  attaches the **full HTML debug page** — every local variable in every frame,
+  the request, a slice of the settings — and mails it over SMTP; that is the
+  page `DEBUG` exists to keep off the internet. And a
+  `DEFAULT_EXCEPTION_REPORTER_FILTER` (or per-handler `reporter_class`) that
+  does not extend `SafeExceptionReporterFilter` replaces the redaction rather
+  than adding to it.
+
+  That second one needs care, because almost everyone who sets it does so to
+  redact *more*, by subclassing — reporting them would punish the people who
+  thought hardest. So the rule resolves the dotted class inside the tree and
+  reads its bases: subclasses Django's filter, silent; does not, `firm`; not
+  found in the tree at all, `tentative` with a caveat saying why. The stock
+  `mail_admins` handler, which Django itself ships in `DEFAULT_LOGGING`, is
+  never reported.
+
+  Both targets are silent. `overridden_project` is the control for both halves.
+
 ### Step 1.9 — Harden, benchmark, and document
 
 - **1.9.1** — Fixture expansion: extend the vulnerable project to plant every new rule; add a realistic `env_settings_project` fixture using `django-environ`.
