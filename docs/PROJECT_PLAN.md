@@ -1785,6 +1785,47 @@ building it here pays for itself twice.
 ### Step 2.2 — API surface discovery
 
 - **2.2.1** — Serializer discovery: `Serializer`, `ModelSerializer`, declared fields, `Meta.model`, `Meta.fields`, `Meta.exclude`, `read_only_fields`.
+
+  **Done.** `api/serializers.py` reads one serializer; `api/discovery.py` finds
+  them all and ties each to the model it exposes. Serializers are found by
+  ancestry, not by filename: unlike models they can live anywhere, and NetBox
+  spreads **224** of them across `api/serializers.py` and
+  `api/serializers_/*.py`. `SerializerNode` records the field set and how it
+  was chosen — `explicit`, `all`, `exclude`, `unset` — plus declared fields,
+  `depth`, and the three spellings of read-only that `is_read_only()` unifies.
+
+  The central distinction is `is_open_ended`: `fields = "__all__"` and
+  `exclude = [...]` both hand the decision to the model, so a column added
+  later ships with nobody editing the serializer. An explicit list is a
+  decision re-made every time it is edited.
+
+  Reading DRF's `get_field_names` first was what made this tractable: `fields`
+  and `exclude` are mutually exclusive, one of them is mandatory, and
+  `__all__` expands to pk + declared + concrete + **forward** relations only —
+  which is the same forward-only rule 2.1.8 arrived at independently.
+
+  Two findings from the survey. Six of NetBox's seven `fields = "__all__"` are
+  Django **ModelForms**, not serializers, and the seventh is runtime code
+  inside a function — NetBox has **zero** open-ended serializers. The
+  constructs are indistinguishable by shape, so a grep-based rule would report
+  the wrong thing; only ancestry separates them, and a test pins it.
+
+  Fixed three defects this exposed. `import_bindings` and `star_imports` used
+  `ast.walk`, descending into every function body: **4.3s** of NetBox's build,
+  and wrong as well as slow, since an import inside a function binds a local
+  name, not a module one. Both now walk module scope, following `if
+  TYPE_CHECKING:` and `try/except ImportError` because those bindings are real.
+  `Meta.model` resolution used raw bindings instead of `resolve_dotted`, so
+  `model = models.Device` failed — 24 unresolved references, now 4. And
+  `DJANGO_MODEL_PATHS` held only `models.Model`, so any model inheriting a
+  Django-provided base was **absent from the graph entirely** — including
+  NetBox's own `User(AbstractBaseUser, PermissionsMixin)`, the class every
+  authorization rule pivots on. The abstract and concrete base sets are now
+  listed explicitly, verified against Django's source. NetBox: **185 → 187**
+  models, `users.User` and `core.ObjectType` present, the 5 remaining
+  unresolved bases still exactly the third-party ones. 24 tests, two of which
+  check `ALL_FIELDS` and the base names against the installed DRF rather than
+  trusting the transcription.
 - **2.2.2** — View discovery: `APIView`, generics, `ViewSet`, `ModelViewSet`, plus function views decorated with `@api_view`.
 - **2.2.3** — Router and URL graph: `DefaultRouter.register`, `path`, `re_path`, `include`, resolving view to route to HTTP methods.
 - **2.2.4** — Permission and authentication resolution: class attributes, `get_permissions` overrides, `@permission_classes`, falling back to `REST_FRAMEWORK` defaults via the settings resolver.

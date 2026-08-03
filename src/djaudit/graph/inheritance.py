@@ -24,12 +24,48 @@ from typing import TYPE_CHECKING
 from djaudit.astutils import import_bindings, resolve_dotted, star_imports
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from djaudit.context import ProjectContext
+
+DJANGO_ABSTRACT_MODELS = frozenset(
+    {
+        "django.contrib.auth.base_user.AbstractBaseUser",
+        "django.contrib.auth.models.AbstractBaseUser",
+        "django.contrib.auth.models.AbstractUser",
+        "django.contrib.auth.models.PermissionsMixin",
+        "django.contrib.sessions.base_session.AbstractBaseSession",
+    }
+)
+"""Abstract models Django ships, verified against its source. They subclass
+``Model`` there, but a project checkout does not contain Django, so the chain
+from ``class User(AbstractBaseUser, PermissionsMixin)`` cannot be walked and
+the class has to be recognised by name instead.
+
+Not a convenience: NetBox's own user model is declared exactly that way, so
+without these the model every authorization rule pivots on is absent from the
+graph."""
+
+DJANGO_CONCRETE_MODELS = frozenset(
+    {
+        "django.contrib.auth.models.User",
+        "django.contrib.auth.models.Group",
+        "django.contrib.auth.models.Permission",
+        "django.contrib.contenttypes.models.ContentType",
+        "django.contrib.sessions.models.Session",
+    }
+)
+"""Concrete models Django ships. Subclassing one is multi-table inheritance
+unless ``Meta.proxy`` says otherwise -- NetBox's ``ObjectType(ContentType)``
+is a proxy, and reading it as MTI would invent a ``contenttype_ptr`` column
+that does not exist."""
 
 DJANGO_MODEL_PATHS = frozenset(
     {
         "django.db.models.Model",
         "django.db.models.base.Model",
+        *DJANGO_ABSTRACT_MODELS,
+        *DJANGO_CONCRETE_MODELS,
     }
 )
 
@@ -130,6 +166,18 @@ class ClassIndex:
 
     def _absolute(self, dotted: str, module: str) -> str:
         return absolute(dotted, module, is_package=module in self._packages)
+
+    def records(self) -> Iterator[ClassRecord]:
+        """Every class in the project, parsing whatever has not been read yet.
+
+        Deliberately eager, unlike the rest of this class. Models can only live
+        in an app's ``models`` module, so the graph finds them by looking; a
+        serializer or a view can live anywhere -- NetBox spreads them over
+        ``api/serializers.py`` and ``api/serializers_/*.py`` -- and the only
+        way to find them is to look at everything.
+        """
+        for module in tuple(self._modules):
+            yield from self._load(module).values()
 
     def bindings_for(self, module: str) -> dict[str, str]:
         self._load(module)
