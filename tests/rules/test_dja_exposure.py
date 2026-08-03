@@ -745,3 +745,209 @@ class TestWritableOwnership:
         )
         blob = " ".join(e.content for e in found[0].evidence)
         assert "shop.Note.owner" in blob
+
+
+NESTED_MODELS = """
+from django.db import models
+from django.conf import settings
+
+class Ticket(models.Model):
+    label = models.CharField(max_length=50)
+    secret = models.CharField(max_length=32)
+
+class Order(models.Model):
+    code = models.CharField(max_length=10)
+    ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE)
+"""
+
+
+def nested(make_project, api_source: str) -> list[Finding]:
+    return run(make_project, "DJA-012", api_source, **{"shop/models.py": NESTED_MODELS})
+
+
+class TestNestedSensitiveField:
+    """DJA-012 -- the secret that is not in the field list you read."""
+
+    def test_reports_a_nested_secret(self, make_project) -> None:
+        found = nested(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Order, Ticket
+
+            class TicketSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Ticket
+                    fields = ['id', 'label', 'secret']
+
+            class OrderSerializer(serializers.ModelSerializer):
+                ticket = TicketSerializer(read_only=True)
+
+                class Meta:
+                    model = Order
+                    fields = ['id', 'code', 'ticket']
+            """,
+        )
+        assert len(found) == 1
+        assert "'secret'" in found[0].message
+        assert "OrderSerializer" in found[0].message
+
+    def test_cites_both_files(self, make_project) -> None:
+        """The parent's field list is what a reviewer read; show the other one."""
+        found = nested(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Order, Ticket
+
+            class TicketSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Ticket
+                    fields = ['id', 'secret']
+
+            class OrderSerializer(serializers.ModelSerializer):
+                ticket = TicketSerializer(read_only=True)
+
+                class Meta:
+                    model = Order
+                    fields = ['id', 'ticket']
+            """,
+        )
+        blob = " ".join(e.content for e in found[0].evidence)
+        assert "OrderSerializer.ticket = TicketSerializer(...)" in blob
+        assert "TicketSerializer.Meta.fields includes 'secret'" in blob
+
+    def test_silent_when_the_nested_class_hides_it(self, make_project) -> None:
+        found = nested(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Order, Ticket
+
+            class TicketSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Ticket
+                    fields = ['id', 'secret']
+                    extra_kwargs = {'secret': {'write_only': True}}
+
+            class OrderSerializer(serializers.ModelSerializer):
+                ticket = TicketSerializer(read_only=True)
+
+                class Meta:
+                    model = Order
+                    fields = ['id', 'ticket']
+            """,
+        )
+        assert found == []
+
+    def test_silent_when_the_nested_class_is_clean(self, make_project) -> None:
+        found = nested(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Order, Ticket
+
+            class TicketSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Ticket
+                    fields = ['id', 'label']
+
+            class OrderSerializer(serializers.ModelSerializer):
+                ticket = TicketSerializer(read_only=True)
+
+                class Meta:
+                    model = Order
+                    fields = ['id', 'ticket']
+            """,
+        )
+        assert found == []
+
+    def test_silent_when_the_relation_is_not_in_the_field_list(self, make_project) -> None:
+        found = nested(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Order, Ticket
+
+            class TicketSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Ticket
+                    fields = ['id', 'secret']
+
+            class OrderSerializer(serializers.ModelSerializer):
+                ticket = TicketSerializer(read_only=True)
+
+                class Meta:
+                    model = Order
+                    fields = ['id', 'code']
+            """,
+        )
+        assert found == []
+
+    def test_a_plain_field_is_not_followed(self, make_project) -> None:
+        found = nested(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Order
+
+            class OrderSerializer(serializers.ModelSerializer):
+                code = serializers.CharField()
+
+                class Meta:
+                    model = Order
+                    fields = ['id', 'code']
+            """,
+        )
+        assert found == []
+
+    def test_reports_meta_depth(self, make_project) -> None:
+        """`depth` expands relations with nobody choosing the field list."""
+        found = nested(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Order
+
+            class OrderSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Order
+                    fields = ['id', 'code', 'ticket']
+                    depth = 1
+            """,
+        )
+        assert len(found) == 1
+        assert "depth = 1" in found[0].message
+        assert "'secret'" in found[0].message
+
+    def test_silent_without_depth(self, make_project) -> None:
+        found = nested(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Order
+
+            class OrderSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Order
+                    fields = ['id', 'code', 'ticket']
+            """,
+        )
+        assert found == []
+
+    def test_self_reference_does_not_report_itself(self, make_project) -> None:
+        found = nested(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Ticket
+
+            class TicketSerializer(serializers.ModelSerializer):
+                parent = serializers.CharField()
+
+                class Meta:
+                    model = Ticket
+                    fields = ['id', 'secret', 'parent']
+            """,
+        )
+        assert found == []

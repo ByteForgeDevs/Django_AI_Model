@@ -125,6 +125,26 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "True reading. GiftCard.secret is the redemption code (models/giftcards.py:93) and is returned by __str__ as the card's public identity, so it is a bearer credential that pretix intends to be readable -- an organizer cannot hand out a gift card without it. Behind organizer permissions. Accepted as designed."
+    },
+    {
+      "fingerprint": "c393d2be8d72a015",
+      "rule_id": "DJA-012",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 863,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, and the clearest example in the benchmark set of what this rule is for. OrderSerializer.positions = OrderPositionSerializer(many=True, read_only=True) is a plain nesting with no narrowing, so every order response embeds each position's full field list -- including secret, the 32-character string the ticket barcode encodes. A reviewer reading OrderSerializer's Meta.fields sees 'positions' and nothing that suggests credential material. pretix intends this: an integration fetching an order needs the ticket secrets to render or scan tickets, and the endpoint sits behind organizer-scoped permissions. Accepted as designed. The finding is still worth raising, because the parent's field list is the one people read."
+    },
+    {
+      "fingerprint": "3cac78d37e838d19",
+      "rule_id": "DJA-012",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1185,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, same shape on the create path. OrderCreateSerializer.positions nests OrderPositionCreateSerializer, whose field list includes secret, so a create response returns the newly generated ticket secrets. This is how a caller learns the secrets for tickets it just created, which is the point of the endpoint. Accepted as designed."
     }
   ]
 }

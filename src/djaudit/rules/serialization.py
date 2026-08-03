@@ -479,3 +479,131 @@ class WritableOwnership(SerializerRule):
         if field is None:
             return False
         return field.primary_key or not field.editable or field.auto_now or field.auto_now_add
+
+
+@register
+class NestedSensitiveField(SerializerRule):
+    meta = RuleMeta(
+        id="DJA-012",
+        title="Serializer reaches a sensitive field through a nested one",
+        family=Family.DJA,
+        severity=Severity.HIGH,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "A nested serializer renders its own field list inside the parent's "
+            "response, so a parent that names nothing sensitive can still return "
+            "credential material through one relation. This is the version of the "
+            "problem that survives review: the field list a reader checks is the "
+            "parent's, and it shows a relation name that gives no hint of what the "
+            "other class publishes. Meta.depth does the same thing without naming a "
+            "class at all -- DRF expands every relation to that depth using the "
+            "related model's full field list."
+        ),
+        remediation=(
+            "Nest a serializer written for the purpose, with a field list limited to "
+            "what the parent's callers need, rather than reusing the one built for "
+            "the related model's own endpoint. Replace Meta.depth with explicit "
+            "nested serializers, since depth cannot be narrowed and grows silently "
+            "as relations are added."
+        ),
+        references=(
+            "https://www.django-rest-framework.org/api-guide/relations/#nested-relationships",
+            "https://cwe.mitre.org/data/definitions/522.html",
+            "https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/",
+        ),
+        limitations=(
+            "A parent may narrow a nested serializer's fields at runtime -- NetBox "
+            "passes nested=True and the base class swaps in a shorter brief_fields "
+            "list -- and that is invisible here, so such a nesting is not reported.",
+            "Only one level is followed, so a secret three serializers deep is "
+            "missed unless the intermediate serializer also names it directly.",
+            "The nested class is resolved by the name written in the field, so a "
+            "serializer referenced through a module alias or built at runtime is "
+            "not followed and its contents are not examined.",
+        ),
+    )
+
+    def inspect(self, ctx: ProjectContext, node: SerializerNode) -> Iterator[Finding]:
+        surface = ctx.api_surface
+        index = surface.index
+        for name in dict.fromkeys(node.fields):
+            declared = node.declared.get(name)
+            if declared is None or declared.kind is None or index is None:
+                continue
+            target = index.resolve_name(node.module, declared.kind.rsplit(".", 1)[-1])
+            nested = surface.serializers.get(target) if target else None
+            if nested is None or nested.label == node.label:
+                continue
+            leaked = [
+                f
+                for f in dict.fromkeys(nested.fields)
+                if f in SECRET_FIELDS and not nested.is_write_only(f)
+            ]
+            if not leaked:
+                continue
+            yield self.finding(
+                location=self.at(ctx, node, node.field_line(name)),
+                message=(
+                    f"{node.name} nests {nested.name} as {name!r}, so every response "
+                    f"also returns {', '.join(repr(f) for f in leaked)}."
+                ),
+                evidence=(
+                    Evidence(
+                        kind=EvidenceKind.AST,
+                        content=f"{node.name}.{name} = {declared.kind}(...)",
+                        source=ctx.rel(node.path),
+                    ),
+                    Evidence(
+                        kind=EvidenceKind.AST,
+                        content=(
+                            f"{nested.name}.Meta.fields includes "
+                            f"{', '.join(repr(f) for f in leaked)}"
+                        ),
+                        source=ctx.rel(nested.path),
+                    ),
+                ),
+            )
+        yield from self.by_depth(ctx, node)
+
+    def by_depth(self, ctx: ProjectContext, node: SerializerNode) -> Iterator[Finding]:
+        """`Meta.depth` expands relations with nobody choosing the field list.
+
+        Worse than an explicit nesting, because there is no class to read: the
+        related model's columns are published as they stand, and a column added
+        to a model three apps away lands in this response.
+        """
+        if not node.depth or node.model is None:
+            return
+        model = ctx.model_graph.get(node.model)
+        if model is None:
+            return
+        for edge in model.relations:
+            if edge.field_name not in node.fields and node.mode == "explicit":
+                continue
+            related = ctx.model_graph.get(edge.target_ref) if edge.target_ref else None
+            if related is None:
+                continue
+            leaked = [f for f in sorted(related.fields) if f in SECRET_FIELDS]
+            if not leaked:
+                continue
+            yield self.finding(
+                location=self.at(ctx, node),
+                message=(
+                    f"{node.name} sets depth = {node.depth}, so {edge.field_name!r} is "
+                    f"expanded into {related.label}'s columns, including "
+                    f"{', '.join(repr(f) for f in leaked)}."
+                ),
+                evidence=(
+                    Evidence(
+                        kind=EvidenceKind.AST,
+                        content=f"{node.name}.Meta.depth = {node.depth}",
+                        source=ctx.rel(node.path),
+                    ),
+                    Evidence(
+                        kind=EvidenceKind.AST,
+                        content=(f"{related.label} has {', '.join(repr(f) for f in leaked)}"),
+                        source="djaudit model graph",
+                    ),
+                ),
+            )

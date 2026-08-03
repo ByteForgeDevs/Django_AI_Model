@@ -2278,6 +2278,34 @@ building it here pays for itself twice.
   every reason to trust. Triage now stands at 45 reviewed findings. Nine tests.
 - **2.4.5** — `DJA-012` nested serializer reaching a sensitive field through a relation.
 
+  **Done.** `DJA-012` in `src/djaudit/rules/serialization.py`, covering both
+  spellings: a declared field whose class resolves to another serializer, and
+  `Meta.depth`, which expands relations with no class to read at all.
+
+  This is the version of `DJA-010` that survives review. The field list a
+  reader checks is the parent's, and it shows a relation name that gives no
+  hint of what the other class publishes. pretix's `OrderSerializer` lists
+  `positions`; `OrderPositionSerializer` returns `secret`, the 32-character
+  string the ticket barcode encodes.
+
+  **The rule is restricted to secret-named fields, and the reason is a false
+  positive we found before shipping it.** Extending it to privilege fields on
+  the user model produced six NetBox findings — `ObjectChangeSerializer.user`,
+  `JobSerializer.user` and four others nesting `UserSerializer` — and all six
+  are wrong. NetBox's base serializer accepts `nested=True` and swaps in
+  `brief_fields`, which for `UserSerializer` is `('id', 'url', 'display',
+  'username')`. The permission list is never rendered there. A parent narrowing
+  a child's fields at runtime is invisible to us, so the rule reports only
+  where the evidence is strong and records the gap as its first limitation.
+
+  **2 findings, both pretix, both `accepted_risk`; 0 on NetBox and
+  healthchecks.** `Meta.depth > 0` occurs nowhere in any benchmark, so that
+  branch's recall rests entirely on its unit test. Nine tests. Triage now
+  stands at 47 reviewed findings.
+
+  **Step 2.4 complete.** Five rules, 25 benchmark findings, all triaged, three
+  benchmarks still at 100% precision.
+
 ### Step 2.5 — Availability rules
 
 - **2.5.1** — `DJA-013` list endpoint with no pagination and no bounded queryset.
