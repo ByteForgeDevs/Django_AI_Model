@@ -1303,6 +1303,39 @@ than after twenty-six of them disagree, is cheaper.
   change that promotes an informational branch into a default-visible one
   breaks the gate rather than quietly landing on users.
 - **1.9.3** — Full triage pass over Healthchecks and NetBox; every finding classified with a written justification.
+
+  **Done, and the pass was a coverage sweep rather than a re-read.** Every
+  finding already carried a verdict — `djaudit benchmark` refuses to pass with
+  an untriaged one, so that much was enforced substep by substep. What had
+  never been done was the inverse question: for each of the 27 rules, is the
+  target's silence *correct*?
+
+  Both settings modules were read against the full rule list, setting by
+  setting. Healthchecks: `PASSWORD_HASHERS` leads with Argon2 and contains no
+  fast hasher at all, so `DJS-019` is right to be quiet; `ALLOWED_HOSTS` is
+  built from the environment or derived from `SITE_ROOT` and is never a
+  wildcard; `X_FRAME_OPTIONS` and `SECURE_CONTENT_TYPE_NOSNIFF` are absent and
+  Django's defaults for both are already the safe value; `SECURE_PROXY_SSL_HEADER`
+  is assembled by splitting an environment string, so it is genuinely
+  unreadable rather than missed. NetBox: every security setting is a
+  `getattr(configuration, ...)` against a file outside the repository, and the
+  ones we report are exactly those whose *shipped fallback* is the unsafe
+  value — `SECURE_HSTS_INCLUDE_SUBDOMAINS` is `False` and correctly silent,
+  because excluding subdomains is the right value while HSTS is off. No rule
+  was found to be silent where it should have spoken.
+
+  The durable output is **`scripts/check_triage.py`**, wired into CI. The tool
+  can tell a triaged finding from an untriaged one; it cannot tell a considered
+  `accepted_risk` from a rubber stamp, and a rubber stamp on a precision
+  benchmark is how a project ends up with a 100% score and no credibility. The
+  script requires every entry to carry a real justification, a reviewer and a
+  date — which immediately found five entries written during 1.7 and 1.8 with
+  no review metadata at all.
+
+  It also cross-checks the SHA in each triage file against the SHA in the CI
+  matrix. Those are two independent copies of the same fact, and if they drift,
+  every note in the file describes a tree nobody is scanning any more — a
+  failure that would otherwise look exactly like success.
 - **1.9.4** — Tune severity and confidence based on the triage; document every downgrade.
 - **1.9.5** — `docs/rules/DJS.md` — one section per rule: what, why, remediation, references, and known limitations.
 - **1.9.6** — Update README and this plan with measured precision and recall.

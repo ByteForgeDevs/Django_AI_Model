@@ -51,6 +51,13 @@ jobs:
       - name: project plan is self-consistent
         run: uv run python scripts/check_plan.py
 
+      # A verdict is worth the reasoning behind it, and nothing in the tool can
+      # tell a considered `accepted_risk` from a rubber stamp. A rubber stamp
+      # on a precision benchmark is how a project ends up with a 100% score and
+      # no credibility, so the standard is enforced on our own files.
+      - name: benchmark verdicts are a completed review
+        run: uv run python scripts/check_triage.py
+
       - name: pytest
         run: uv run pytest
 
