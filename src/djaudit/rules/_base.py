@@ -423,6 +423,23 @@ def definitely_empty(value: Value) -> bool:
     return all(entries == [] for entries in branches)
 
 
+def lists_entry(view: SettingsView, setting: str, entry: str) -> bool | None:
+    """Whether ``setting`` holds ``entry``, or ``None`` if we could not tell.
+
+    The three-valued answer is the point. A rule whose precondition is "this
+    app is installed" must not treat "could not read the list" as "not
+    installed", because plenty of projects build ``INSTALLED_APPS`` and
+    ``MIDDLEWARE`` conditionally and every one of those would become a missed
+    finding. NetBox is the case that pins the shape: its ``MIDDLEWARE``
+    resolves to three branches of which one is unreadable, so a partial read
+    answers ``None`` unless the entry turned up in a branch we could see.
+    """
+    branches = entries_of(view.get(setting).value)
+    if any(entries is not None and entry in entries for entries in branches):
+        return True
+    return False if all(entries is not None for entries in branches) else None
+
+
 def assignment_value(setting: ResolvedSetting) -> ast.expr | None:
     """The right-hand side of the assignment that decided a setting."""
     definition = setting.definition
@@ -489,6 +506,16 @@ class InsecureDefaultRule(SettingsRule):
 
     corrected_as = "sets it"
     """How to describe an heir that fixes the value, mid-sentence."""
+
+    caveats: tuple[str, ...] = ()
+    """Doubt this rule always carries, attached to every finding it makes.
+
+    Distinct from :attr:`ceiling`, and the distinction matters. A ceiling is
+    for doubt about the *value*, and it is compounded by how well the value
+    resolved. This is for doubt about the *consequence* -- something outside
+    the settings that could make the finding moot -- which resolution quality
+    says nothing about, so charging it as a grade would both double-count and
+    hide the finding rather than qualify it."""
 
     @abstractmethod
     def insecure(self, value: Value) -> bool:
@@ -557,7 +584,7 @@ class InsecureDefaultRule(SettingsRule):
 
         severity: Severity | None = self.severity_for(resolved)
         ceiling: Confidence | None = self.ceiling_for(resolved)
-        caveats: tuple[str, ...] = ()
+        caveats: tuple[str, ...] = self.caveats
         corrected = self.overridden(group.module, lambda rs: not self.insecure(rs.value))
         if resolved.is_default and self.overridden(
             group.module, lambda rs: rs.is_assigned or not self.insecure(rs.value)
@@ -579,6 +606,7 @@ class InsecureDefaultRule(SettingsRule):
             # than dropped, because the base can still be pointed at directly.
             severity, ceiling = Severity.LOW, Confidence.TENTATIVE
             caveats = (
+                *caveats,
                 f"every settings module that imports this one "
                 f"{self.corrected_as}, which should override it",
             )

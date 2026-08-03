@@ -945,6 +945,39 @@ than after twenty-six of them disagree, is cheaper.
   `entries_of`, `any_entry` and `definitely_empty` moved from `hosts.py` into
   `_base.py`; they are generic list helpers and a second family now needs them.
 - **1.7.2** — `DJS-020` `AUTH_PASSWORD_VALIDATORS` empty or absent.
+
+  **Done.** This setting is the only password policy Django has — nothing else
+  in the framework looks at what a password contains, and every path that sets
+  one reaches the same `validate_password()`, which returns without checking
+  anything when the list is empty. The trap is that Django's default and
+  Django's project template disagree: `global_settings` ships `[]` while
+  `startproject` writes four validators into the generated file, so an empty
+  list looks like a configuration rather than the absence of one.
+
+  Graded at `medium`/`firm`, and the ceiling stayed at `CERTAIN` deliberately.
+  The doubt this rule carries is real — a project can enforce a policy in a
+  form and never touch the setting, which is exactly what Healthchecks does —
+  but it is doubt about the *consequence*, not about the value. Charging it to
+  the ceiling would double-count against the never-assigned case, which is the
+  normal shape of the defect and already pays a step for resolving to the
+  Django default; it would land at `tentative` and vanish below the default
+  output threshold. So a new `caveats` hook on `InsecureDefaultRule` carries it
+  onto the finding, where the reader sees it, instead of into a grade that
+  hides the finding. That distinction — ceiling for the value, caveat for the
+  consequence — is now written down in `_base.py`.
+
+  `applies()` requires `django.contrib.auth` to be installed, via a new generic
+  `lists_entry()` in `_base.py` that `installs_middleware()` now delegates to.
+  Three-valued, for the usual reason: an unreadable `INSTALLED_APPS` must not
+  be read as "auth is not installed".
+
+  Measured: Healthchecks never sets it and is a genuine finding, triaged
+  `true_positive` with the mitigation written down — `SetPasswordForm` declares
+  `min_length=8`, which still accepts `"12345678"`, does not reach
+  `createsuperuser` (which reimplements its own check), and has no equivalent
+  of `CommonPasswordValidator`. NetBox configures two validators and stays
+  silent. The vulnerable fixture carries the forgotten case; the other two
+  fixtures gained validators and are the controls.
 - **1.7.3** — `DJS-021` `CONN_MAX_AGE` at the default of 0, forcing a new connection per request.
 - **1.7.4** — `DJS-022` Postgres connection without `sslmode=require`.
 - **1.7.5** — `DJS-023` `ATOMIC_REQUESTS` disabled where the project otherwise implies it — informational, low severity.

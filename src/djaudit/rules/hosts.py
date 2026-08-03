@@ -21,6 +21,7 @@ from djaudit.rules._base import (
     could_be_true,
     definitely_empty,
     entries_of,
+    lists_entry,
 )
 from djaudit.settings import ResolvedSetting, SettingsView
 from djaudit.values import Value
@@ -297,10 +298,7 @@ def installs_middleware(view: SettingsView, dotted: str) -> bool | None:
     of which one is unreadable, so a partial read has to answer ``None`` unless
     the entry turned up in a branch we could see.
     """
-    branches = entries_of(view.get("MIDDLEWARE").value)
-    if any(entries is not None and dotted in entries for entries in branches):
-        return True
-    return False if all(entries is not None for entries in branches) else None
+    return lists_entry(view, "MIDDLEWARE", dotted)
 
 
 @register

@@ -71,3 +71,11 @@ SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_SECURE = True
 
 STATIC_URL = "static/"
+
+# Control for DJS-020: this project is API-only but still stores passwords, so
+# it keeps a policy. Appended at the end deliberately -- every other finding in
+# this fixture is pinned to a line number.
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 12}},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+]
