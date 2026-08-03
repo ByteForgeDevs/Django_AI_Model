@@ -1,0 +1,88 @@
+{
+  "description": "Twelve-factor settings read through django-environ, which is how most Django projects written since about 2018 are configured and which none of the other fixtures cover. Nothing here is a literal: every value arrives from the environment, so the source alone cannot say what any deployment will actually do. The fixture holds two things in tension. Defects must survive the indirection -- a wrong fallback is still a wrong fallback when it is spelled env.bool(..., default=True) -- and they must arrive at *lower confidence* than the same defect written as a literal, because the operator may well have set the variable. DJS-001 and DJS-013 are pinned at tentative here and at certain or firm in vulnerable_project, and that gap is the thing this fixture is really guarding. DJS-003 stays at firm because the fallback is startproject's own placeholder key, which is published in the Django tutorial and is a specific known value rather than an inference. The controls are the more valuable half and there are more of them: env.db() parses a URL the source never contains, so DJS-004 and DJS-022 must stay silent rather than guess; EMAIL_HOST_PASSWORD is required with no default, which is the correct way to hold a credential and must not be punished by a rule that matches on the name; and SECURE_SSL_REDIRECT and SESSION_COOKIE_SECURE are read with no inline default at all, so the only way to know they are on is to read the schema passed to Env(). A tool that fires on those idioms fires on the projects that got this right, and gets uninstalled by them.",
+  "expected": [
+    {
+      "rule_id": "DJS-001",
+      "file": "config/settings.py",
+      "line": 41,
+      "severity": "critical",
+      "confidence": "tentative"
+    },
+    {
+      "rule_id": "DJS-003",
+      "file": "config/settings.py",
+      "line": 47,
+      "severity": "critical",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJS-013",
+      "file": "config/settings.py",
+      "line": 55,
+      "severity": "high",
+      "confidence": "tentative"
+    }
+  ],
+  "must_not_report": [
+    {
+      "rule_id": "DJS-004",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-005",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-006",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-007",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-008",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-009",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-010",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-017",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-018",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-020",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-021",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-022",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-024",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-025",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-026",
+      "file": "config/urls.py"
+    }
+  ]
+}

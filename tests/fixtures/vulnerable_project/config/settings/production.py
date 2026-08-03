@@ -68,3 +68,10 @@ LOGGING = {
 }
 
 DEFAULT_EXCEPTION_REPORTER_FILTER = "app.reporting.TerseFilter"
+
+# PLANTED DEFECT: HttpOnly switched off so an analytics snippet could read the
+# session id out of document.cookie (DJS-011). It is the only rule in the family
+# that needs an explicit line -- Django's default is True, so this can only ever
+# appear because somebody typed it, and the session id becomes readable by every
+# script on the page, including any that gets injected onto it.
+SESSION_COOKIE_HTTPONLY = False

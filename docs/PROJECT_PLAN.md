@@ -1233,6 +1233,44 @@ than after twenty-six of them disagree, is cheaper.
 ### Step 1.9 — Harden, benchmark, and document
 
 - **1.9.1** — Fixture expansion: extend the vulnerable project to plant every new rule; add a realistic `env_settings_project` fixture using `django-environ`.
+
+  **Done.** Auditing the manifests against the registry turned up exactly one
+  rule with no recall coverage anywhere: `DJS-011`. It is the only member of
+  the cookie family that needs an explicit line, because Django's default for
+  `SESSION_COOKIE_HTTPONLY` is already `True` — absence is correct, so the
+  defect can only ever exist because somebody typed it. Planted in
+  `vulnerable_project`'s production module with the reason people actually type
+  it: an analytics snippet that wanted to read the session id out of
+  `document.cookie`. Every rule `DJS-001`…`DJS-027` now has at least one
+  fixture asserting it fires.
+
+  The larger half is **`tests/fixtures/env_settings_project`**. Every existing
+  fixture writes settings as literals, which is the shape Django had in 2013
+  and the shape almost nothing has now; a rule catalogue validated only against
+  literals is validated against a world that no longer exists. This fixture
+  reads everything through django-environ, including the schema form
+  (`Env(SECURE_SSL_REDIRECT=(bool, True))` with a bare `env("SECURE_SSL_REDIRECT")`
+  at the call site) that the README leads with.
+
+  What it actually guards is not that defects are still found — it is that they
+  are found *less certainly*. `DJS-001` and `DJS-013` are pinned at `tentative`
+  here and at `certain`/`firm` in `vulnerable_project`, and that gap is the
+  regression gate. `DJS-003` deliberately stays at `firm`, because the fallback
+  is `startproject`'s own `django-insecure-` placeholder: a specific published
+  value an attacker already has, not an inference, so the indirection cannot
+  make it better.
+
+  Fifteen of the manifest's entries are controls, which is the more valuable
+  half. `env.db()` parses a URL the repository does not contain, so `DJS-004`
+  and `DJS-022` must stay silent rather than guess; `EMAIL_HOST_PASSWORD` is
+  required with no default, which is the *correct* way to hold a credential and
+  must not be punished by a name match; and the two schema-form reads prove the
+  resolver follows `Env()` rather than the call site — without that, `DJS-006`
+  fires on a project that has the setting switched on.
+
+  Wired into the CI recall gate and `tests/conftest.py`, with
+  `tests/test_env_settings_fixture.py` asserting the confidence gap directly
+  rather than only through the manifest.
 - **1.9.2** — Near-miss fixtures: the correct-looking shapes each rule must *not* flag.
 - **1.9.3** — Full triage pass over Healthchecks and NetBox; every finding classified with a written justification.
 - **1.9.4** — Tune severity and confidence based on the triage; document every downgrade.

@@ -23,6 +23,11 @@ def api_project() -> Path:
     return FIXTURES / "api_project"
 
 
+@pytest.fixture
+def env_settings_project() -> Path:
+    return FIXTURES / "env_settings_project"
+
+
 def make_finding(
     rule_id: str = "DJS-001",
     file: str = "app/views.py",

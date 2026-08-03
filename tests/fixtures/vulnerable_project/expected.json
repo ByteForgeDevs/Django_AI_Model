@@ -196,6 +196,13 @@
       "line": 70,
       "severity": "medium",
       "confidence": "firm"
+    },
+    {
+      "rule_id": "DJS-011",
+      "file": "config/settings/production.py",
+      "line": 77,
+      "severity": "medium",
+      "confidence": "certain"
     }
   ],
   "must_not_report": [
