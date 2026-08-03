@@ -1707,6 +1707,44 @@ building it here pays for itself twice.
   django-mptt and django-taggit, which are not in the checkout. Naming what we
   cannot see beats inventing what it contributes.
 - **2.1.7** — Custom managers and `QuerySet` subclasses, so `Model.objects` resolves to the right class.
+
+  *Done.* Every ORM question starts at a manager, and on a real project it is
+  rarely Django's. **106 of NetBox's 142** concrete models reach the database
+  through `RestrictedQuerySet`, whose `restrict()` is how permission scoping
+  happens — so the DRF authorization rules in Step 2.4, told that `objects` is
+  a plain `Manager`, would call all 106 of those viewsets unscoped. That is not
+  a few false positives; it is the rule being wrong about the project.
+
+  The graph now records which manager is the default, what queryset it
+  produces, and whether either narrows what comes back. `Meta.base_manager_name`
+  is tracked separately from `default_manager_name` because Django follows a
+  foreign key through `_base_manager` deliberately — so a filtered default
+  manager cannot make a related object vanish when something dereferences a
+  key to it.
+
+  Three construction forms all had to work, and two of them defeat a naive
+  read. `QuerySet.as_manager()` is NetBox's dominant spelling and puts the
+  interesting half in the queryset. `Manager.from_queryset(QuerySet)()` is a
+  call *of a call*, so the outer callee is not a name at all and reading it as
+  one gives up before reaching the queryset that is the point of the
+  expression. And `class IPAddressManager(Manager.from_queryset(Q))` has no
+  base that is a name either, which left the class looking as though it
+  descended from nothing — that one cost three of NetBox's narrowing managers
+  until `base_names()` learned to unwrap it.
+
+  Recognition goes through the class index where the definition is in the
+  project, because `objects = {s.name: s for s in ...}` sits in a NetBox model
+  body and no name-based guess can decline it. The `…Manager` suffix is the
+  fallback for classes we cannot see: django-mptt's `TreeManager` is nine
+  NetBox models' default and is not in the checkout.
+
+  `narrows` — the manager or its queryset overriding `get_queryset` — is the
+  signal that a manager returns less than its table. It finds exactly three in
+  NetBox (`IPAddressManager`, `ObjectTypeManager`, `ModuleBayManager`), which
+  matches the source exactly. The implicit `objects` Django adds is synthesised
+  only after inheritance has run, because `ModelBase._prepare` creates it only
+  when nothing was declared anywhere in the MRO: 9 NetBox models and 10 of
+  Healthchecks' 12.
 - **2.1.8** — Graph queries: `is_user_owned(model)` (path to the user model within N hops), `relation_path`, `reachable_fields`. This is what the authorization rules consume.
 
 ### Step 2.2 — API surface discovery

@@ -189,6 +189,41 @@ class FieldNode:
 
 
 @dataclass(slots=True, frozen=True)
+class ManagerNode:
+    """One manager attached to a model.
+
+    Every ORM query starts at one of these, and on a real project it is rarely
+    Django's own: NetBox reaches most of its models through
+    ``RestrictedQuerySet.as_manager()``, whose ``restrict()`` is how permission
+    scoping happens. A rule that assumes ``objects`` is a plain ``Manager``
+    calls all of that unscoped.
+    """
+
+    name: str
+    """The attribute it is bound to -- ``objects`` unless the model says
+    otherwise."""
+
+    manager_class: str
+    dotted: str
+    queryset_class: str | None = None
+    """The queryset behind ``QuerySet.as_manager()`` or
+    ``Manager.from_queryset(QuerySet)()``, which is where any narrowing lives."""
+
+    is_plain: bool = False
+    """Django's own ``Manager``, adding nothing."""
+
+    implicit: bool = False
+    """Django created it because the model declared none."""
+
+    narrows: bool = False
+    """This manager or its queryset overrides ``get_queryset``, so it may
+    return less than the table. A soft-delete manager hiding deleted rows makes
+    a rule counting its results measure the wrong set."""
+
+    lineno: int = 0
+
+
+@dataclass(slots=True, frozen=True)
 class IndexNode:
     """One entry of ``Meta.indexes``.
 
@@ -340,6 +375,10 @@ class ModelNode:
     ``<parent>_ptr`` of multi-table inheritance. Kept apart from
     :attr:`fields` so "declared here" stays answerable."""
 
+    managers: dict[str, ManagerNode] = field(default_factory=dict)
+    """Managers in declaration order, which is Django's tie-breaker for which
+    one is the default."""
+
     inheritance_applied: bool = field(default=False, repr=False, compare=False)
 
     meta_bases: tuple[str, ...] = ()
@@ -364,6 +403,32 @@ class ModelNode:
     def label(self) -> str:
         """``app_label.ModelName`` — the identifier Django uses everywhere."""
         return f"{self.app_label}.{self.name}"
+
+    @property
+    def default_manager(self) -> ManagerNode | None:
+        """The manager Django reaches for, following ``Options.default_manager``.
+
+        ``Meta.default_manager_name`` when it names one that exists, and
+        otherwise the first declared -- which is why declaration order is kept
+        rather than sorted.
+        """
+        named = self.managers.get(self.default_manager_name or "")
+        if named is not None:
+            return named
+        return next(iter(self.managers.values()), None)
+
+    @property
+    def base_manager(self) -> ManagerNode | None:
+        """The manager related-object lookups go through.
+
+        Deliberately not the default one: Django uses ``_base_manager`` to
+        follow a foreign key precisely so a filtered default manager cannot
+        make a related object vanish.
+        """
+        named = self.managers.get(self.base_manager_name or "")
+        if named is not None:
+            return named
+        return next(iter(self.managers.values()), None)
 
     @property
     def all_fields(self) -> dict[str, FieldNode]:

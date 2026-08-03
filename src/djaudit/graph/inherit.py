@@ -66,6 +66,7 @@ def apply_inheritance(
         _inherit_fields(model, ancestor)
         _inherit_relations(model, ancestor)
         _inherit_meta(model, ancestor)
+        _inherit_managers(model, ancestor)
 
 
 def _inherit_fields(model: ModelNode, ancestor: ModelNode) -> None:
@@ -100,6 +101,18 @@ def _inherit_relations(model: ModelNode, ancestor: ModelNode) -> None:
         )
         accessor_for(copy, model)
         model.relations.append(copy)
+
+
+def _inherit_managers(model: ModelNode, ancestor: ModelNode) -> None:
+    """Managers come down from an abstract base like anything else.
+
+    ``Options.managers`` walks the whole MRO, so a model declaring none still
+    has its base's -- which is the common case in NetBox, where the
+    ``RestrictedQuerySet`` manager is attached once on a base class and reached
+    by every model under it.
+    """
+    for name, manager in ancestor.managers.items():
+        model.managers.setdefault(name, manager)
 
 
 def _inherit_meta(model: ModelNode, ancestor: ModelNode) -> None:

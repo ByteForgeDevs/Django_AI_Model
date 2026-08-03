@@ -94,7 +94,7 @@ class ClassIndex:
         self._bindings: dict[str, dict[str, str]] = {}
         self._stars: dict[str, tuple[str, ...]] = {}
         self._packages: set[str] = set()
-        self._model_cache: dict[str, bool] = {}
+        self._inherit_cache: dict[tuple[str, int], bool] = {}
         for path in ctx.python_files:
             dotted = package_dotted(path)
             if dotted not in self._modules:
@@ -172,7 +172,7 @@ class ClassIndex:
             return f"{record.module}.{base}"
         return resolved
 
-    def is_model(self, record: ClassRecord, *, depth: int = 0) -> bool:
+    def is_model(self, record: ClassRecord) -> bool:
         """Whether this class ends up inheriting from ``django.db.models.Model``.
 
         The question a mixin makes interesting: ``TrackingModelMixin`` is a
@@ -180,25 +180,30 @@ class ClassIndex:
         names along in the same base list is abstract and brings two columns
         with it. Only following the chain tells them apart.
         """
-        cached = self._model_cache.get(record.dotted)
+        return self.inherits(record, DJANGO_MODEL_PATHS)
+
+    def inherits(self, record: ClassRecord, targets: frozenset[str], *, depth: int = 0) -> bool:
+        """Whether any ancestor of ``record`` is one of ``targets``."""
+        key = (record.dotted, id(targets))
+        cached = self._inherit_cache.get(key)
         if cached is not None:
             return cached
         if depth > MAX_DEPTH:
             return False
         # Provisional False stops a cycle from recursing; a real answer
         # overwrites it below.
-        self._model_cache[record.dotted] = False
+        self._inherit_cache[key] = False
         verdict = False
         for base in record.bases:
             target = self.base_target(record, base)
-            if target in DJANGO_MODEL_PATHS:
+            if target in targets:
                 verdict = True
                 break
             parent = self.lookup(target)
-            if parent is not None and self.is_model(parent, depth=depth + 1):
+            if parent is not None and self.inherits(parent, targets, depth=depth + 1):
                 verdict = True
                 break
-        self._model_cache[record.dotted] = verdict
+        self._inherit_cache[key] = verdict
         return verdict
 
     def ancestry(self, record: ClassRecord) -> tuple[ClassRecord, ...]:

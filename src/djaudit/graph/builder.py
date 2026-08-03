@@ -22,6 +22,7 @@ from djaudit.graph.inheritance import (
     class_defs,
     package_dotted,
 )
+from djaudit.graph.managers import extract_managers, implicit_manager
 from djaudit.graph.meta import class_attr_literal, meta_class, read_meta
 from djaudit.graph.nodes import ModelGraph, ModelNode
 from djaudit.graph.relations import DEFAULT_USER_MODEL, build_edges, resolve_edges
@@ -100,16 +101,37 @@ def _appconfig_label(apps_py: Path, ctx: ProjectContext) -> str | None:
 
 
 def base_names(node: ast.ClassDef) -> list[str]:
-    """Base classes as written, skipping anything that is not a dotted name."""
+    """Base classes as written, skipping anything that is not a dotted name.
+
+    ``Manager.from_queryset(SomeQuerySet)`` is the exception. It is a call, but
+    it is also how Django composes a manager class, and NetBox subclasses the
+    result four times. Reading it as no base at all leaves those classes with
+    an empty ancestry and nothing to identify them by.
+    """
     names = []
     for base in node.bases:
         rendered = dotted_name(base)
         if rendered is not None:
             names.append(rendered)
+            continue
+        composed = _composed_base(base)
+        if composed is not None:
+            names.append(composed)
     return names
 
 
-def build_node(record: ClassRecord, app_label: str) -> ModelNode:
+def _composed_base(base: ast.expr) -> str | None:
+    """The class ``Manager.from_queryset(...)`` produces, named by its owner."""
+    if not isinstance(base, ast.Call):
+        return None
+    callee = dotted_name(base.func)
+    if callee is None or "." not in callee:
+        return None
+    owner, _, tail = callee.rpartition(".")
+    return owner if tail == "from_queryset" else None
+
+
+def build_node(record: ClassRecord, app_label: str, index: ClassIndex) -> ModelNode:
     """A graph node for one class, from what its own body says."""
     node = record.node
     model = ModelNode(
@@ -123,6 +145,7 @@ def build_node(record: ClassRecord, app_label: str) -> ModelNode:
         fields=extract_fields(node, record.bindings),
     )
     read_meta(model, meta_class(node))
+    model.managers = extract_managers(node, record, index)
     model.relations = build_edges(model, record.bindings)
     return model
 
@@ -190,7 +213,7 @@ def build_model_graph(ctx: ProjectContext) -> ModelGraph:
     def node_for(record: ClassRecord) -> ModelNode:
         existing = nodes.get(record.dotted)
         if existing is None:
-            existing = build_node(record, label_for(record.path))
+            existing = build_node(record, label_for(record.path), index)
             nodes[record.dotted] = existing
         return existing
 
@@ -223,6 +246,10 @@ def build_model_graph(ctx: ProjectContext) -> ModelGraph:
         # counting one as a concrete parent invents a table and a join.
         ancestors = tuple(a for a in index.ancestry(record) if index.is_model(a))
         apply_inheritance(model, ancestors, node_for)
+        if not model.managers and not model.is_abstract:
+            # ModelBase._prepare adds `objects` only when nothing was declared
+            # anywhere in the MRO, so this waits until inheritance is done.
+            model.managers["objects"] = implicit_manager(model.lineno)
 
     # Deferred until every model is known: a bare "Order" may name a model in
     # a module read after the one referring to it.
