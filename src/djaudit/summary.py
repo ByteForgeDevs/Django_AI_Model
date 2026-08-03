@@ -70,6 +70,10 @@ def benchmark_summary(report: BenchmarkReport) -> str:
             [f"- `{e.rule_id}` {e.file}:{e.line}" for e in report.resolved],
         ),
         (
+            f"Misfiled ({len(report.misfiled)})",
+            [f"- recorded as {m.recorded} — now {m.actual}" for m in report.misfiled],
+        ),
+        (
             f"Rule errors ({len(report.rule_errors)})",
             [f"- `{rule_id}` — {msg}" for rule_id, msg in sorted(report.rule_errors.items())],
         ),

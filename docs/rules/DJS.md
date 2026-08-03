@@ -257,7 +257,8 @@ Then revoke the exposed credential at the provider and issue a new one. Revoking
 
 **What this rule cannot see.**
 
-- Nothing in front of Django changes this one, so the value is the whole story -- but a session backend that does not use a cookie at all makes the setting moot, and that is not checked.
+- A session backend that does not use a cookie at all makes the setting moot, and that is not checked.
+- Only speaks for Django while Django sets the cookie. A project that installs its own session or CSRF middleware in place of the stock one is reported tentatively instead of firmly, with the replacement named -- whether that replacement sets the flag itself is not read, only that the decision has moved somewhere a settings rule cannot follow.
 
 **References**
 
@@ -278,6 +279,7 @@ Then revoke the exposed credential at the provider and issue a new one. Revoking
 **What this rule cannot see.**
 
 - Reports the flag, not the deployment. A site served only over HTTPS with HSTS already in force is much less exposed than the finding's severity suggests, and neither of those is visible from the setting.
+- Only speaks for Django while Django sets the cookie. A project that installs its own session or CSRF middleware in place of the stock one is reported tentatively instead of firmly, with the replacement named -- whether that replacement sets the flag itself is not read, only that the decision has moved somewhere a settings rule cannot follow.
 
 **References**
 
@@ -297,6 +299,7 @@ Then revoke the exposed credential at the provider and issue a new one. Revoking
 **What this rule cannot see.**
 
 - Django's default is already True, so this can only fire on an explicit assignment. A project that reads the session cookie from JavaScript through some other mechanism is not detected.
+- Only speaks for Django while Django sets the cookie. A project that installs its own session or CSRF middleware in place of the stock one is reported tentatively instead of firmly, with the replacement named -- whether that replacement sets the flag itself is not read, only that the decision has moved somewhere a settings rule cannot follow.
 
 **References**
 

@@ -24,13 +24,17 @@ from djaudit.context import ProjectContext
 from djaudit.models import Confidence, Evidence, EvidenceKind, Family, Finding, Severity, Tier
 from djaudit.registry import RuleMeta, register
 from djaudit.rules._base import (
-    Entry,
     SettingGroup,
     SettingsRule,
+)
+from djaudit.settings import (
+    Definition,
+    Entry,
+    ResolvedSetting,
+    SettingsView,
     entries,
     literal_text,
 )
-from djaudit.settings import Definition, ResolvedSetting, SettingsView
 
 _DATABASES_DOCS = "https://docs.djangoproject.com/en/stable/ref/settings/#databases"
 

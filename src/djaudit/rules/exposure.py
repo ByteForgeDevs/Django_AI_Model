@@ -28,16 +28,20 @@ from djaudit.models import (
 )
 from djaudit.registry import Rule, RuleMeta, register
 from djaudit.rules._base import (
-    Entry,
     SettingGroup,
     SettingsRule,
-    assignment_value,
-    entries,
     entries_of,
     lists_entry,
-    literal_text,
 )
-from djaudit.settings import ResolvedSetting, SettingsView, resolve_all
+from djaudit.settings import (
+    Entry,
+    ResolvedSetting,
+    SettingsView,
+    assignment_value,
+    entries,
+    literal_text,
+    resolve_all,
+)
 from djaudit.urlconf import routes, urlconfs
 from djaudit.values import Value
 

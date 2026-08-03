@@ -94,6 +94,9 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "corsheaders",
+    "rest_framework",
+    "django_filters",
+    "catalog",
 ]
 
 # Not DJS-024. The toolbar is installed only when DEBUG is on, and DEBUG above
@@ -161,3 +164,19 @@ DEFAULT_EXCEPTION_REPORTER_FILTER = "config.reporting.StricterFilter"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 STATIC_URL = "static/"
 USE_TZ = True
+
+# Not DJA-001. The project default is a permission class the project wrote
+# itself, so a rule that recognises `IsAuthenticated` by name recognises
+# nothing here -- and a project is under no obligation to use DRF's names.
+# What the rule has to establish is that the value is *not* AllowAny, which is
+# a different question from whether it knows what the value is.
+REST_FRAMEWORK = {
+    "DEFAULT_PERMISSION_CLASSES": ["catalog.permissions.IsActiveStaffOrReadOnly"],
+    "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.SessionAuthentication"],
+    # Not DJA-013. No PAGE_SIZE, and none needed: SizedPagination assigns its
+    # own page_size, so nothing here is left to the setting.
+    "DEFAULT_PAGINATION_CLASS": "catalog.views.SizedPagination",
+    "DEFAULT_FILTER_BACKENDS": ["django_filters.rest_framework.DjangoFilterBackend"],
+    "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle"],
+    "DEFAULT_THROTTLE_RATES": {"anon": "20/hour", "user": "1000/hour"},
+}

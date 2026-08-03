@@ -1,0 +1,10 @@
+{
+  "target": "pretix",
+  "models_expected": 113,
+  "models_found": 103,
+  "fields_expected": 1075,
+  "fields_found": 1071,
+  "relations_resolved": 258,
+  "models_unexplained": 0,
+  "fields_unexplained": 0
+}

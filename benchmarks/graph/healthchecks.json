@@ -1,0 +1,10 @@
+{
+  "target": "healthchecks",
+  "models_expected": 12,
+  "models_found": 12,
+  "fields_expected": 127,
+  "fields_found": 127,
+  "relations_resolved": 8,
+  "models_unexplained": 0,
+  "fields_unexplained": 0
+}

@@ -1,0 +1,176 @@
+{
+  "description": "The DRF recall fixture. Every other fixture measures the settings family; this one measures the API surface and the model graph, and it is the only place where DJA-004, DJA-005, DJA-010 and DJA-012 have a known answer. The settings module is deliberately correct apart from one line -- DEFAULT_PERMISSION_CLASSES is AllowAny -- because that single line is what turns four views that merely say nothing about permissions into an open API, which is the point DJA-001 and DJA-002 make together. The controls matter as much as the defects. MyTicketViewSet scopes with filter(owner=self.request.user) and CommentViewSet scopes across a relation with filter(ticket__owner=...), so DJA-004 must report TicketViewSet and stay silent on both of those; a rule that cannot tell them apart is worse than no rule. InvoiceSerializer lists its fields explicitly with nothing sensitive in them, so the whole exposure family must ignore it. Pagination is configured with both a class and a PAGE_SIZE and every model declares Meta.ordering, which makes this project the control for DJA-013 and DJD-003 -- two rules that report nothing here and must keep reporting nothing.",
+  "expected": [
+    {
+      "rule_id": "DJA-001",
+      "file": "config/settings.py",
+      "line": 69,
+      "severity": "high",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJA-002",
+      "file": "support/views.py",
+      "line": 25,
+      "severity": "high",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJA-002",
+      "file": "support/views.py",
+      "line": 125,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJA-003",
+      "file": "support/views.py",
+      "line": 103,
+      "severity": "critical",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJA-004",
+      "file": "support/views.py",
+      "line": 34,
+      "severity": "critical",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJA-005",
+      "file": "support/views.py",
+      "line": 50,
+      "severity": "high",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJA-006",
+      "file": "support/views.py",
+      "line": 125,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJA-007",
+      "file": "support/views.py",
+      "line": 89,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJA-008",
+      "file": "support/serializers.py",
+      "line": 13,
+      "severity": "medium",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJA-009",
+      "file": "support/serializers.py",
+      "line": 38,
+      "severity": "medium",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJA-010",
+      "file": "support/serializers.py",
+      "line": 50,
+      "severity": "high",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJA-011",
+      "file": "support/serializers.py",
+      "line": 26,
+      "severity": "high",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJA-012",
+      "file": "support/serializers.py",
+      "line": 72,
+      "severity": "high",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJA-014",
+      "file": "support/views.py",
+      "line": 36,
+      "severity": "medium",
+      "confidence": "tentative"
+    },
+    {
+      "rule_id": "DJA-015",
+      "file": "support/views.py",
+      "line": 25,
+      "severity": "medium",
+      "confidence": "tentative"
+    },
+    {
+      "rule_id": "DJA-015",
+      "file": "support/views.py",
+      "line": 103,
+      "severity": "high",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJD-001",
+      "file": "support/models.py",
+      "line": 60,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJD-002",
+      "file": "support/models.py",
+      "line": 62,
+      "severity": "low",
+      "confidence": "firm"
+    }
+  ],
+  "must_not_report": [
+    {
+      "rule_id": "DJA-004",
+      "file": "support/views.py",
+      "line": 54
+    },
+    {
+      "rule_id": "DJA-004",
+      "file": "support/views.py",
+      "line": 69
+    },
+    {
+      "rule_id": "DJA-004",
+      "file": "support/views.py",
+      "line": 79
+    },
+    {
+      "rule_id": "DJA-005",
+      "file": "support/views.py",
+      "line": 54
+    },
+    {
+      "rule_id": "DJA-008",
+      "file": "support/serializers.py",
+      "line": 79
+    },
+    {
+      "rule_id": "DJA-010",
+      "file": "support/serializers.py",
+      "line": 79
+    },
+    {
+      "rule_id": "DJA-011",
+      "file": "support/serializers.py",
+      "line": 79
+    },
+    {
+      "rule_id": "DJA-013",
+      "file": "support/views.py"
+    },
+    {
+      "rule_id": "DJD-003",
+      "file": "support/views.py"
+    }
+  ]
+}

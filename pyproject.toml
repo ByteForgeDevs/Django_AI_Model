@@ -37,6 +37,9 @@ dev = [
     # Installed so tests can check our defaults table against the real
     # django.conf.global_settings instead of trusting a transcription.
     "django>=5.2",
+    # Same reason: 2.2.4 resolves REST_FRAMEWORK against api_settings.DEFAULTS,
+    # and a transcribed copy of that table would rot silently.
+    "djangorestframework>=3.15",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -86,6 +89,12 @@ ignore_missing_imports = true
 # django-stubs purely for that would be disproportionate.
 [[tool.mypy.overrides]]
 module = "django.*"
+ignore_missing_imports = true
+
+# Likewise DRF, imported only so tests can check ALL_FIELDS and the serializer
+# base names against the real package rather than a transcription of them.
+[[tool.mypy.overrides]]
+module = "rest_framework.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

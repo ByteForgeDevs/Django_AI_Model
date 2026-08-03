@@ -153,6 +153,80 @@ class TestCrashes:
         assert report.ok is False
 
 
+class TestMisfiled:
+    """A verdict's citation must still describe the finding it is attached to.
+
+    Fingerprints ignore line numbers on purpose, so a verdict stays attached
+    to its defect when the file around it moves. The cost is that the
+    ``file``/``line`` recorded beside the verdict can rot in silence, and every
+    note in ``benchmarks/`` argues from that citation -- a reviewer who opens
+    the cited line and finds unrelated code has no way to tell whether the
+    verdict is stale or the citation is.
+    """
+
+    def test_a_moved_finding_keeps_its_verdict_but_reports_the_drift(self, tmp_path: Path) -> None:
+        recorded = make_finding("DJS-001", line=10)
+        moved = make_finding("DJS-001", line=94)
+        # The premise: the same defect, one fingerprint, two line numbers.
+        assert recorded.fingerprint == moved.fingerprint
+
+        triage = Triage(target="t", entries=(entry(recorded, Verdict.TRUE_POSITIVE),))
+        report = compare(make_result([moved], tmp_path), triage)
+
+        assert report.untriaged == []
+        assert report.regressed == []
+        assert report.precision == 1.0
+        assert len(report.misfiled) == 1
+        assert report.misfiled[0].recorded == "DJS-001 at app/views.py:10"
+        assert report.misfiled[0].actual == "DJS-001 at app/views.py:94"
+        assert report.ok is False
+
+    def test_an_accurate_citation_passes(self, tmp_path: Path) -> None:
+        finding = make_finding("DJS-001")
+        triage = Triage(target="t", entries=(entry(finding, Verdict.ACCEPTED_RISK),))
+
+        report = compare(make_result([finding], tmp_path), triage)
+
+        assert report.misfiled == []
+        assert report.ok is True
+        assert "0 misfiled" in report.summary()
+
+    def test_a_verdict_filed_under_the_wrong_rule_is_caught(self, tmp_path: Path) -> None:
+        # Hand-editing these files is the normal workflow, so a verdict pasted
+        # under a neighbouring rule's id is a realistic way to be wrong -- and
+        # it is the one field the precision score is computed from.
+        finding = make_finding("DJA-010")
+        misattributed = TriageEntry(
+            fingerprint=finding.fingerprint,
+            rule_id="DJA-011",
+            verdict=Verdict.TRUE_POSITIVE,
+            file=finding.location.file,
+            line=finding.location.line,
+        )
+
+        report = compare(
+            make_result([finding], tmp_path), Triage(target="t", entries=(misattributed,))
+        )
+
+        assert [m.recorded for m in report.misfiled] == ["DJA-011 at app/views.py:10"]
+        assert report.ok is False
+
+    def test_a_verdict_for_a_finding_that_stopped_firing_is_not_misfiled(
+        self, tmp_path: Path
+    ) -> None:
+        # That is a regression, which says something different and has its own
+        # remedy. Reporting both would double-count one event.
+        finding = make_finding("DJS-001")
+
+        report = compare(
+            make_result([], tmp_path),
+            Triage(target="t", entries=(entry(finding, Verdict.TRUE_POSITIVE),)),
+        )
+
+        assert report.misfiled == []
+        assert len(report.regressed) == 1
+
+
 class TestPrecisionDisplay:
     def test_precision_is_not_claimed_when_nothing_is_scored(self, tmp_path) -> None:
         # A wholly untriaged run must not advertise 100% precision.

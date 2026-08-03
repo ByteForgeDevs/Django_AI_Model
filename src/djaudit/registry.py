@@ -15,7 +15,7 @@ from djaudit.models import Confidence, Evidence, Family, Finding, Location, Seve
 if TYPE_CHECKING:
     from djaudit.context import ProjectContext
 
-RULE_ID_PATTERN = re.compile(r"^(DJS|DJI|DJA|DJP|DJM|DJX)-\d{3}$")
+RULE_ID_PATTERN = re.compile(r"^(DJS|DJI|DJA|DJD|DJP|DJM|DJX)-\d{3}$")
 
 
 class RuleError(Exception):

@@ -114,6 +114,17 @@ class Family(StrEnum):
     DJX = "DJX"
     """Cross-database portability and divergence."""
 
+    DJD = "DJD"
+    """Data model design.
+
+    Separate from `DJS` because the fix is a migration rather than a settings
+    line, and separate from `DJP` because these are correctness defects that
+    happen to be cheap: a nullable `CharField` has two spellings of empty and
+    every query has to know it, and an unordered queryset paginates by
+    whatever the planner felt like. Neither costs anything until it produces a
+    wrong answer.
+    """
+
     @property
     def label(self) -> str:
         return _FAMILY_LABEL[self]
@@ -123,6 +134,7 @@ _FAMILY_LABEL: dict[Family, str] = {
     Family.DJS: "Settings & deployment",
     Family.DJI: "Injection & untrusted input",
     Family.DJA: "API authorization & exposure",
+    Family.DJD: "Data model design",
     Family.DJP: "Performance & ORM efficiency",
     Family.DJM: "Migration safety",
     Family.DJX: "Database portability",

@@ -42,6 +42,11 @@ def _header(result: RunResult, console: Console) -> None:
         console.print(Text(f"  {roles}", style="dim"))
     console.print()
 
+    for diagnostic in ctx.diagnostics:
+        console.print(Text(f"incomplete analysis: {diagnostic.message}", style="bold yellow"))
+        console.print(Text(f"  {diagnostic.detail}", style="yellow"))
+        console.print()
+
 
 def _finding(finding: Finding, console: Console) -> None:
     severity_style = _SEVERITY_STYLE[finding.severity]
@@ -101,7 +106,10 @@ def _summary(result: RunResult, console: Console) -> None:
 def report(result: RunResult, console: Console) -> None:
     _header(result, console)
     if not result.findings:
-        console.print(Text("No findings above the configured thresholds.", style="green"))
+        # Saying "no findings" in green after admitting we could not read the
+        # settings would undo the warning printed two lines earlier.
+        style = "yellow" if result.context.diagnostics else "green"
+        console.print(Text("No findings above the configured thresholds.", style=style))
         console.print()
     else:
         for finding in result.findings:

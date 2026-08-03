@@ -188,7 +188,7 @@ what it needs to be for the next six phases.
 
 No rule is complete until every line is true:
 
-- [ ] Unique ID matching `^(DJS|DJI|DJA|DJP|DJM|DJX)-\d{3}$`, prefix agrees with declared family
+- [ ] Unique ID matching `^(DJS|DJI|DJA|DJD|DJP|DJM|DJX)-\d{3}$`, prefix agrees with declared family
 - [ ] `RuleMeta` carries title, severity, confidence, tier, and at least one authoritative reference (Django docs, OWASP, or CWE)
 - [ ] Message states what is wrong *at this location*; rationale states why it matters; remediation is concrete enough to paste
 - [ ] Emits at least one `Evidence` item — never an assertion without support
@@ -247,8 +247,8 @@ must not invalidate a committed baseline.
 | `DJM` | Migration safety | 4 |
 | `DJX` | Cross-database portability and divergence | 5 |
 
-`DJS`, `DJA`, `DJP`, `DJI`, `DJM`, and `DJX` are already enforced by
-`RULE_ID_PATTERN`. `DJD` is added in substep 2.6.1.
+All seven prefixes are enforced by `RULE_ID_PATTERN`. `DJD` was added in
+substep 2.6.1.
 
 ---
 
@@ -1437,6 +1437,42 @@ than after twenty-six of them disagree, is cheaper.
   §8's progress table and this phase's exit criteria were updated in the same
   pass, and the phase's outcome recorded against the criteria it was set.
 
+### Step 1.10 — Coverage honesty
+
+Added after Phase 1 merged. Pointing the finished tool at readthedocs.org — 951
+files, a real production Django deployment — produced **zero settings modules,
+zero findings, and exit 0**. Not a crash, not a warning: a clean bill of health
+for a project it had not read a single setting of. The cause is that
+readthedocs configures Django through `django-configurations`, so its settings
+are class attributes and the module-level scan sees nothing.
+
+That is the most dangerous defect this tool can have, and it is worse than any
+false positive in Step 1.9's triage. A false positive costs a developer ten
+minutes; a false all-clear is used as evidence that an unaudited deployment is
+safe. Phase 1 could not be called complete while it was possible, so the phase
+reopens for two substeps: refuse to be silent first, then remove the reason for
+the silence.
+
+- **1.10.1** — Incomplete-analysis diagnostics: a `Diagnostic` channel on `ProjectContext`, separate from findings, reported by the terminal and JSON reporters and exiting `2` when analysis could not cover the project.
+
+  **Done.** Deliberately not a finding. A finding is subject to baselines,
+  thresholds and `# djaudit: ignore`, so filing "I could not read your settings"
+  as one would let it be permanently silenced by the same mechanism that exists
+  to silence noise — after which the tool reports a confident all-clear forever.
+  Diagnostics are a separate channel that nothing can suppress.
+
+  Emitted only when the checkout looks like a Django project, since a reusable
+  app has no settings and warning about it would be noise. When settings-shaped
+  files exist but define nothing at module level, the class bodies are checked
+  for the same markers, which upgrades the message from "found nothing" to
+  naming the file, the settings it holds and `django-configurations` as the
+  reason. Exit code `2`, joining "the tool could not run" rather than "findings
+  were reported": a green build produced by a run that never located the
+  settings is worse than a red one. readthedocs.org now exits 2 and names
+  `dockerfiles/settings/build.py`; the three benchmark targets are unaffected.
+
+- **1.10.2** — `django-configurations` support: resolve settings declared as class attributes, including inheritance across `Configuration` subclasses and the `values.Value` family, so class-configured projects are audited rather than merely reported as unreadable.
+
 ---
 
 # Phase 2 — Model graph and DRF authorization
@@ -1461,45 +1497,905 @@ building it here pays for itself twice.
 ### Step 2.1 — Model graph construction
 
 - **2.1.1** — `ModelNode`: name, app label, abstract/proxy/swappable flags, source location, base classes.
+
+  **Done.** New `djaudit.graph` package: `nodes.py` holds the records,
+  `builder.py` reads them out of source, and `ProjectContext.model_graph`
+  builds the graph once and lazily, so a settings-only run never walks an app's
+  models at all.
+
+  Recognising a model is the whole substep, and it is harder than matching
+  `models.Model`. That string is only Django's because of an import at the top
+  of the file, and `from pydantic import BaseModel as Model` produces the same
+  spelling with none of the meaning. So `astutils` gained `import_bindings()`
+  and `resolve_dotted()`, which map each name to what it is actually bound to;
+  the four ways of writing Django's base all resolve to
+  `django.db.models.Model` and the impostor resolves to pydantic.
+
+  Two boundaries drawn deliberately. Only an app's `models` module counts,
+  because that is the only module Django imports looking for models — and it
+  keeps us out of `migrations/`, where every historical version of every model
+  is written out in full and none of them is the current schema. And ancestry
+  is resolved *within* a module only: a class inheriting from a base defined
+  above it is a model exactly when that one is, but a base imported from
+  another module needs the project's whole import graph, which is 2.1.6. Such a
+  base is recorded in `unresolved_bases` rather than dropped, since a model
+  whose parents we cannot see is a model whose fields we may be missing.
+
+  That boundary is measurable, which is the point of recording it: Healthchecks
+  resolves completely — 12 models, 4 apps, nothing unresolved — while NetBox
+  yields 63 models and 20 unresolved bases, all of them NetBox's own
+  `NetBoxModel` / `PrimaryModel` / `TrackingModelMixin` hierarchy in a shared
+  module. 2.1.6 has a number to beat.
+
+  App labels follow Django's rule — the tail of the application's module path —
+  with `apps.py` read first, because two installed apps whose directories share
+  a name *must* override the label and every string reference in the project
+  then uses the override. `models/` packages resolve to the app above them,
+  which is how NetBox splits every one of its apps.
+
+  Lookups match how Django refers to models: `"app.Model"` exactly, a bare
+  `"Model"` in the local app first and the project second. An ambiguous bare
+  name resolves to `None` rather than to a guess — two apps with a `Comment`
+  each is ordinary, and picking one would put every downstream finding on the
+  wrong model.
 - **2.1.2** — Field extraction with parameters (`null`, `blank`, `unique`, `db_index`, `max_length`, `default`, `choices`).
+
+  **Done.** `graph/fields.py` reads every field declared in a class body into a
+  `FieldNode`, attached to its model in declaration order — which matters,
+  because a serializer rule reporting "the first sensitive field exposed" would
+  otherwise land on a different line each run.
+
+  The substance of the substep is the third state. A keyword can be absent,
+  present and readable, or present and computed, and a boolean holds only two
+  of those. `default=timezone.now` is not "no default"; `choices=Status.choices`
+  is not "no choices"; `null=USE_NULL` is not `null=False`. Each field
+  therefore records Django's own default *and* an `unreadable` tuple naming the
+  keywords we could not evaluate, with a `knows()` guard for any rule about to
+  make a claim that turns on one. On the two benchmark targets that is 31
+  unreadable `choices` and 14 unreadable `default`s in NetBox alone — every one
+  of them a place a careless rule would have invented a fact.
+
+  What counts as a field is the other half. Django's 39 exported `Field`
+  subclasses are listed, plus the contenttypes and postgres ones — and
+  `GenericForeignKey`/`GenericRelation` have to be listed by name, because
+  neither ends in `Field` and generic relations are where a surprising amount
+  of data hides. Beyond that a name ending in `Field` is accepted as a custom
+  field: the convention is near-universal, and the alternative is dropping
+  NetBox's six (`ColorField`, `PathField`, `WWNField`…). `models.Manager()` and
+  the constraint classes are explicitly excluded — they live in a model body
+  and are not columns.
+
+  Raw `args` and `kwargs` are kept on the node so relation resolution does not
+  re-walk the tree. 244 fields extracted from NetBox, 128 from Healthchecks.
 - **2.1.3** — Relationship edges: `ForeignKey`, `OneToOneField`, `ManyToManyField`, including string references, `self`, and `settings.AUTH_USER_MODEL`.
+
+  **Done.** `graph/relations.py` turns every relation field into a
+  `RelationEdge`, kept as its own object rather than folded into the field
+  because a relation has two ends and the reverse one belongs to the target —
+  edges are what let the graph be walked in either direction, which 2.1.8 needs.
+
+  Django accepts five spellings for the other end: the class itself,
+  `"app.Model"`, a bare `"Model"`, `"self"`, and `settings.AUTH_USER_MODEL`.
+  All five occur in the benchmark targets, and understanding four of them
+  means going quiet on the fifth — which will be the one pointing at the user,
+  because every authorization rule in this phase is a question about ownership.
+
+  Resolution is deferred until every model is known, since a bare `"Order"` can
+  name a model in a module read later. `AUTH_USER_MODEL` comes from the Phase 1
+  settings resolver, reading production-reachable modules first. That pays for
+  itself immediately: NetBox resolves to `users.User`, not `auth.User`, so
+  assuming the default would have silenced every ownership rule on the project.
+
+  Two honest limits, both measured. A target we do not have stays unresolved
+  rather than invented — `contenttypes.ContentType` is real, referenced eleven
+  times in NetBox, and never in a repository. And a plain reference to Django's
+  own `User` still sets `points_at_user`, because Healthchecks writes all five
+  of its user relations that way and the class is not in the checkout; that
+  fallback fires only on an *unresolved* reference, so a project with its own
+  `User` in some other app resolves to that model and is not mistaken for the
+  user.
+
+  Totals: NetBox 67 edges, 8 reaching the user, 3 self-referential; Healthchecks
+  13 edges, 5 reaching the user. `on_delete` is read from both the keyword and
+  the positional form, including `models.SET(...)`.
 - **2.1.4** — Reverse relation naming: `related_name`, `related_query_name`, and Django's default `_set` accessor.
+
+  *Done.* Every rule that follows a relation backwards to test ownership has to
+  name the accessor Django actually created, and five things decide it. Each is
+  now read from `django/db/models/fields/related.py` rather than assumed.
+
+  `related_name` wins; failing that `Meta.default_related_name`, which belongs
+  to the model **declaring** the foreign key and not the one it points at — it
+  names the relation back to the declarer. Failing both, the accessor is the
+  declaring model's lowercased name, plus `_set` only when the reverse side is
+  multiple: `author.book_set` for a foreign key, but `project.owner.profile`
+  for a one-to-one, which is exactly how Healthchecks reaches its `Profile`.
+
+  A `related_name` ending in `+` means Django creates no reverse relation at
+  all; NetBox does this seventeen times, and following one of those would be a
+  rule inventing an `AttributeError`. Same for a symmetrical self-referential
+  many-to-many, where `symmetrical` defaults to `True` for a relation to `self`
+  and the relation is its own reverse. Both leave `accessor` as `None`, and
+  neither enters the reverse index.
+
+  The query name is tracked separately because it is not the accessor. Its
+  fallback chain is `related_query_name`, then `related_name`, then the bare
+  model name — no `_set`. `author.book_set` and `Author.objects.filter(book=…)`
+  are the same relation under two names, and a `filter()` built from the wrong
+  one is a crash.
+
+  Placeholders (`%(class)s`, `%(model_name)s`, `%(app_label)s`) are expanded
+  against the owning model, with `%(model_name)s` deliberately absent from
+  `related_query_name` because Django does not substitute it there. An abstract
+  base keeps its placeholder unexpanded and gets no accessor, which is what
+  Django does: the whole point is one declaration yielding a different name on
+  every heir, and those heirs are resolved in 2.1.6.
+
+  `ModelGraph.incoming` inverts the whole thing into a target-to-edges index,
+  so asking what points *at* a model is a lookup rather than a scan of every
+  model in the project. Measured: NetBox 17 hidden relations and 43 explicitly
+  named across 67 edges; Healthchecks 2 named across 13.
 - **2.1.5** — `Meta` handling: `ordering`, `indexes`, `constraints`, `unique_together`, `abstract`, `db_table`.
+
+  *Done.* `Meta` is where a model states everything that is not a field, and
+  the rules coming in 2.2 onward query it directly — is this filtered column
+  indexed, does this table sort every page by default, what is the table
+  actually called. So the failure mode is not an absent feature but a confident
+  wrong answer, and each option is read against Django's semantics rather than
+  what its name suggests. Parsing moved out of `builder.py` into
+  `graph/meta.py` on the way.
+
+  `db_table` is **derived, not absent**, when unset: Django builds
+  `app_label_modelname`, which is the string a rule matching raw SQL needs.
+  Abstract models keep it empty because they have no table. `Meta.app_label`
+  now re-keys the model, which is a correctness fix rather than an addition —
+  the label is what `"billing.Order"` in a foreign key resolves against, so
+  reading it late meant every relation into a relabelled model failed.
+
+  `unique_together` is normalised the way `options.normalize_together` does.
+  `("a", "b")` is *one* constraint over two columns; reading it as two would
+  claim each column is unique on its own, which is the opposite of what the
+  model guarantees.
+
+  Indexes and constraints are classified rather than counted. An index with a
+  `condition` is partial and only serves queries carrying the same predicate;
+  an expression index serves `Lower("email")` and not `email`; a
+  `CheckConstraint` creates no index at all while a `UniqueConstraint` does.
+  `ModelNode.indexed_fields` folds field-level `db_index`/`unique`/`primary_key`
+  together with the qualifying `Meta` entries, counting only the **leading**
+  column of a composite — a btree on `(a, b)` does nothing for a filter on `b`
+  alone, and crediting it would silence a real table scan.
+
+  Sequences are read element-wise off the AST instead of by evaluating the
+  container, because NetBox writes `ordering = ('device', CollateAsChar('_name'))`
+  and a whole-container read yields nothing at all. The first column — the one
+  that decides whether the sort can use an index — is a plain string sitting
+  right there. What could not be read is recorded separately, so "no ordering"
+  and "ordering we could only partly read" stay distinguishable.
+
+  Measured: NetBox 20 models with default ordering (1 partially read), 18
+  indexes, 12 constraints; Healthchecks 4 indexes of which 2 are partial, and
+  its `alert_after` index is exactly the conditional case. Neither project sets
+  an explicit `db_table`, so all 75 tables came from the derivation.
 - **2.1.6** — Inheritance resolution: abstract bases, multi-table inheritance, mixins.
+
+  *Done.* Reading one file at a time is enough for a tutorial project and
+  useless on a real one. NetBox has **185** models and almost none of them
+  names `models.Model`: they inherit through a `NetBoxModel`/`PrimaryModel`
+  chain layered over a dozen feature mixins, re-exported through star imports,
+  spread across three packages. Seen a file at a time that was **63** models
+  with most of their columns missing — not wrong at the edges, wrong about
+  which models exist.
+
+  `graph/inheritance.py` does by hand the part of an import Python would do for
+  us: a base class name becomes a dotted path through the writing module's own
+  imports, that path becomes a file, and the file is parsed. Modules are read
+  only when something refers to them, so this costs 0.76s across NetBox's 1213
+  files rather than the price of parsing all of them.
+
+  Three things had to be got right, and each was found by measuring rather
+  than by reasoning:
+
+  - **Module names come from the package root**, walking up while
+    `__init__.py` keeps existing, because NetBox's code sits at
+    `<root>/netbox/netbox/models/` and every import in the project calls that
+    `netbox.models`. Anchoring on the project root names it
+    `netbox.netbox.models` and resolves nothing.
+  - **A relative import means one thing in a module and another in a
+    package.** `from .device_components import X` inside `dcim/models/power.py`
+    means `dcim.models.device_components`; the same line inside
+    `dcim/models/__init__.py` means the same module while starting a component
+    shorter. Getting this wrong left four in-project bases unresolved.
+  - **Star imports have to be followed.** `netbox/models/__init__.py` is almost
+    nothing but re-exports, and a star import binds no name we can see, so the
+    only way to know whether it supplies `ChangeLoggingMixin` is to look in the
+    module it names.
+
+  `graph/inherit.py` then applies what an ancestor declares, and Django's two
+  modes mean opposite things in the database despite looking alike in source.
+  An abstract base has no table, so each heir gets its own copy of every
+  column — that is where **1475** inherited fields come from. A concrete base
+  does have one, so the heir stores nothing locally and reaches those columns
+  over the implicit `<parent>_ptr` one-to-one, which is recorded as a relation
+  because every query on the child joins across it. A proxy is the same table
+  under a second class: columns readable, `db_table` shared, and no reverse
+  relations of its own, because those belong to the concrete model and two
+  classes claiming one accessor is a name Django never created twice.
+
+  Both of NetBox's apparent MTI children — `account.UserToken` and
+  `extras.ScriptModule` — turned out to be proxies, and both looked exactly
+  like multi-table inheritance until `Meta.proxy` was read. A plain mixin is
+  the mirror image: `TrackingModelMixin` appears in seven `dcim` base lists and
+  is not a model at all, so Django contributes none of its attributes, and
+  counting it as a concrete ancestor invented seven tables and the joins to
+  reach them.
+
+  Inherited relations are renamed for the heir rather than copied, which is the
+  entire reason `related_name="%(class)s_items"` exists: two models sharing a
+  base would otherwise claim the same attribute on the model they both point
+  at, and Django refuses to start. `Meta` follows too — an heir declaring no
+  `Meta` inherits its base's ordering, indexes and constraints, and a rule
+  reading only the heir's body would report a model with no default ordering
+  when every query it makes is sorted.
+
+  Measured on NetBox: 63 → **185 models**, 67 → **892 relation edges**, 20 → **5
+  unresolved bases**, and all five remaining are `MPTTModel` and `TagBase` from
+  django-mptt and django-taggit, which are not in the checkout. Naming what we
+  cannot see beats inventing what it contributes.
 - **2.1.7** — Custom managers and `QuerySet` subclasses, so `Model.objects` resolves to the right class.
+
+  *Done.* Every ORM question starts at a manager, and on a real project it is
+  rarely Django's. **106 of NetBox's 142** concrete models reach the database
+  through `RestrictedQuerySet`, whose `restrict()` is how permission scoping
+  happens — so the DRF authorization rules in Step 2.4, told that `objects` is
+  a plain `Manager`, would call all 106 of those viewsets unscoped. That is not
+  a few false positives; it is the rule being wrong about the project.
+
+  The graph now records which manager is the default, what queryset it
+  produces, and whether either narrows what comes back. `Meta.base_manager_name`
+  is tracked separately from `default_manager_name` because Django follows a
+  foreign key through `_base_manager` deliberately — so a filtered default
+  manager cannot make a related object vanish when something dereferences a
+  key to it.
+
+  Three construction forms all had to work, and two of them defeat a naive
+  read. `QuerySet.as_manager()` is NetBox's dominant spelling and puts the
+  interesting half in the queryset. `Manager.from_queryset(QuerySet)()` is a
+  call *of a call*, so the outer callee is not a name at all and reading it as
+  one gives up before reaching the queryset that is the point of the
+  expression. And `class IPAddressManager(Manager.from_queryset(Q))` has no
+  base that is a name either, which left the class looking as though it
+  descended from nothing — that one cost three of NetBox's narrowing managers
+  until `base_names()` learned to unwrap it.
+
+  Recognition goes through the class index where the definition is in the
+  project, because `objects = {s.name: s for s in ...}` sits in a NetBox model
+  body and no name-based guess can decline it. The `…Manager` suffix is the
+  fallback for classes we cannot see: django-mptt's `TreeManager` is nine
+  NetBox models' default and is not in the checkout.
+
+  `narrows` — the manager or its queryset overriding `get_queryset` — is the
+  signal that a manager returns less than its table. It finds exactly three in
+  NetBox (`IPAddressManager`, `ObjectTypeManager`, `ModuleBayManager`), which
+  matches the source exactly. The implicit `objects` Django adds is synthesised
+  only after inheritance has run, because `ModelBase._prepare` creates it only
+  when nothing was declared anywhere in the MRO: 9 NetBox models and 10 of
+  Healthchecks' 12.
 - **2.1.8** — Graph queries: `is_user_owned(model)` (path to the user model within N hops), `relation_path`, `reachable_fields`. This is what the authorization rules consume.
+
+  **Done.** `graph/queries.py` with a frozen `RelationPath` carrying the edges,
+  the resolved target, and the three properties that decide how much a route
+  proves: `lookup` (`project__owner` — the string a `get_queryset` override
+  must contain), `is_optional` (a nullable hop, so scoping *drops* rows rather
+  than protecting them) and `is_multi`. Exposed on `ModelGraph` as
+  `relation_path`, `path_to_user`, `is_user_owned` and `reachable_fields`.
+
+  The design was set by a measurement, not by taste. Traversing every forward
+  relation called **133 of NetBox's 140** models user-owned, on chains like
+  `datafile__source__jobs__user` — "owned by whoever last ran a job against
+  the source of my file". Two causes. `GenericRelation` is the *reverse* of a
+  `GenericForeignKey`, and NetBox declares **397** of them, so half the graph's
+  edges pointed backwards. And a many-to-many hop does not give a row an
+  owner, it gives it a set of them; filtering along one returns duplicates.
+  Restricting ownership to single-valued forward hops leaves **12 of 140**,
+  every one a direct `user`/`created_by` foreign key — correct for an
+  infrastructure inventory whose objects are org-wide, not personal.
+  Healthchecks is unmoved at **10 of 12**, reaching its user through
+  `project__owner` and `owner__project__owner`, both verified against source;
+  the two exceptions are a rate-limit bucket and a log record, neither owned.
+  `allow_multi=True` keeps the looser reading for callers who want it.
+
+  Reverse traversal is opt-in and confined to `reachable_fields`, since forward
+  is what a request can *set* and reverse only what it can read — and it is
+  spelled with the query name, not the accessor (`filter(books__title=…)`, not
+  `books_set`). It also explodes: 368 paths at depth 2 from `circuits.Circuit`
+  forward, 1900 with reverse included, which is what the depth cap is for.
+  `max_hops=4` is headroom over the deepest real chain found (3).
+
+  One bug surfaced: a foreign key to `settings.AUTH_USER_MODEL` resolving to
+  Django's own `auth.User` has `target=None`, because that class is not in the
+  project's source — so the most important query returned a path with no
+  destination. `RelationPath` now carries the target rather than deriving it.
+  `RelationEdge` gained `null` and `is_multi_valued`. 27 tests.
 
 ### Step 2.2 — API surface discovery
 
 - **2.2.1** — Serializer discovery: `Serializer`, `ModelSerializer`, declared fields, `Meta.model`, `Meta.fields`, `Meta.exclude`, `read_only_fields`.
+
+  **Done.** `api/serializers.py` reads one serializer; `api/discovery.py` finds
+  them all and ties each to the model it exposes. Serializers are found by
+  ancestry, not by filename: unlike models they can live anywhere, and NetBox
+  spreads **224** of them across `api/serializers.py` and
+  `api/serializers_/*.py`. `SerializerNode` records the field set and how it
+  was chosen — `explicit`, `all`, `exclude`, `unset` — plus declared fields,
+  `depth`, and the three spellings of read-only that `is_read_only()` unifies.
+
+  The central distinction is `is_open_ended`: `fields = "__all__"` and
+  `exclude = [...]` both hand the decision to the model, so a column added
+  later ships with nobody editing the serializer. An explicit list is a
+  decision re-made every time it is edited.
+
+  Reading DRF's `get_field_names` first was what made this tractable: `fields`
+  and `exclude` are mutually exclusive, one of them is mandatory, and
+  `__all__` expands to pk + declared + concrete + **forward** relations only —
+  which is the same forward-only rule 2.1.8 arrived at independently.
+
+  Two findings from the survey. Six of NetBox's seven `fields = "__all__"` are
+  Django **ModelForms**, not serializers, and the seventh is runtime code
+  inside a function — NetBox has **zero** open-ended serializers. The
+  constructs are indistinguishable by shape, so a grep-based rule would report
+  the wrong thing; only ancestry separates them, and a test pins it.
+
+  Fixed three defects this exposed. `import_bindings` and `star_imports` used
+  `ast.walk`, descending into every function body: **4.3s** of NetBox's build,
+  and wrong as well as slow, since an import inside a function binds a local
+  name, not a module one. Both now walk module scope, following `if
+  TYPE_CHECKING:` and `try/except ImportError` because those bindings are real.
+  `Meta.model` resolution used raw bindings instead of `resolve_dotted`, so
+  `model = models.Device` failed — 24 unresolved references, now 4. And
+  `DJANGO_MODEL_PATHS` held only `models.Model`, so any model inheriting a
+  Django-provided base was **absent from the graph entirely** — including
+  NetBox's own `User(AbstractBaseUser, PermissionsMixin)`, the class every
+  authorization rule pivots on. The abstract and concrete base sets are now
+  listed explicitly, verified against Django's source. NetBox: **185 → 187**
+  models, `users.User` and `core.ObjectType` present, the 5 remaining
+  unresolved bases still exactly the third-party ones. 24 tests, two of which
+  check `ALL_FIELDS` and the base names against the installed DRF rather than
+  trusting the transcription.
 - **2.2.2** — View discovery: `APIView`, generics, `ViewSet`, `ModelViewSet`, plus function views decorated with `@api_view`.
+  **Done.** `api/views.py` reads all four spellings into one `ViewNode`, whose
+  `writes` property answers "can this change data" the same way for an HTTP
+  method on a generic, an action on a viewset, and an `@action` on either.
+  DRF's ancestry has to be enumerated rather than followed — the class index
+  stops at the first name that leaves the project — so the concrete generics'
+  handlers and the mixins' actions are transcribed from
+  `rest_framework/generics.py` and `viewsets.py`; the bare mixins are
+  deliberately excluded from `VIEW_BASES` so a base class is not counted as an
+  endpoint. NetBox: **157 views** (143 viewsets, 13 `APIView`, 1 generic), 136
+  `get_queryset` overrides, 141 with a `queryset`, 24 `@action` routes from 12
+  declarations. pretix: **77 views** (62 viewsets, 15 `APIView`/generic — an
+  exact match for its 15 hand-written `APIView` classes), 55 `@action` routes
+  of which 12 are `detail=False`. Healthchecks: **0**, which is correct, as it
+  uses no DRF. Measurement found two defects: `queryset = Cable.objects.all()`
+  read as absent because a call has no dotted name, and `@action` declared on
+  a mixin — 2 of NetBox's 12 — missed entirely, which lost real writable routes
+  on dozens of viewsets. 21 tests.
 - **2.2.3** — Router and URL graph: `DefaultRouter.register`, `path`, `re_path`, `include`, resolving view to route to HTTP methods.
+
+  **Done.** `api/routes.py` joins 2.2.2's views to the requests that reach
+  them. The router table is transcribed from `rest_framework/routers.py`, but
+  the load-bearing part is `get_method_map`: DRF binds a mapping entry only
+  when the viewset implements the action, which is why a `ReadOnlyModelViewSet`
+  405s POST without anyone writing a restriction. Applied wholesale instead,
+  the table would report DELETE on every registered viewset in the project.
+
+  Two shapes that both benchmarks depend on. NetBox routes everything through
+  a `NetBoxRouter` that mutates `self.routes[0].mapping` in `__init__` to put
+  bulk `PUT`, `PATCH` and `DELETE` on every collection URL, so those edits are
+  read; ignoring them called 139 writable endpoints read-only-plus-POST. And
+  every pretix plugin registers on an `event_router` imported from
+  `pretix.api.urls`, so router instances are collected project-wide rather than
+  per file — without that, nine plugin viewsets looked unroutable and were
+  therefore exempt from every authorization rule.
+
+  Measuring found a defect in shared machinery. `from . import views` was bound
+  as `..views`, one level higher than written, so 138 of NetBox's 139
+  registrations resolved into a sibling package and vanished. Model, serializer
+  and view counts are byte-identical before and after the fix, so it took
+  nothing away.
+
+  NetBox: 139 registrations, matching its 139 `register` calls exactly, 0
+  unresolved, **1204 endpoints**, 907 of them writable, and 6 unrouted views
+  that are all genuinely base classes. pretix: 64 registrations, again an exact
+  match, **369 endpoints**, and 1 unrouted view — `ScheduledExportersViewSet`,
+  which is only ever subclassed. Spot-checked against source:
+  `OrganizerViewSet(UpdateModelMixin, ReadOnlyModelViewSet)` reports list GET,
+  detail GET/PUT/PATCH and nothing else, which is what pretix serves. 26 tests.
 - **2.2.4** — Permission and authentication resolution: class attributes, `get_permissions` overrides, `@permission_classes`, falling back to `REST_FRAMEWORK` defaults via the settings resolver.
+
+  **Done.** `api/permissions.py` answers what stands between an anonymous
+  caller and each endpoint. It has to combine three sources, because DRF ships
+  `DEFAULT_PERMISSION_CLASSES = ['AllowAny']` — an unconfigured install is open
+  — so "this view declares nothing" is not on its own a fact worth reporting.
+
+  The pass would have been useless on both benchmarks without resolving
+  project permission classes by ancestry. NetBox defaults to its own
+  `TokenPermissions` and pretix to its own `EventPermission`; a table of DRF's
+  eight classes alone would have resolved the default on neither and reported
+  nothing on both while appearing to work.
+
+  Two judgements carry it. A class inheriting `BasePermission` that never
+  overrides `has_permission` is `AllowAny` wearing a reassuring name, because
+  `BasePermission.has_permission` returns `True` — the most valuable thing here
+  and invisible to anything that only reads names. And an override whose every
+  other return is `False` and which ends `return super().has_permission(...)`
+  can only take permissions away, so its base still bounds it. That is exactly
+  NetBox's `TokenPermissions`, and refusing to see it would leave 142 of its
+  151 routed views unreadable.
+
+  Everything else is recorded as unknown rather than guessed. `UNKNOWN` sits
+  *below* `OPEN` in the ordering, so combining it with a class we do read keeps
+  that class's guarantee — an unreadable permission ANDed with
+  `IsAuthenticated` still cannot admit an anonymous caller — and a `Guard`
+  carries its unresolved references so a rule can demand certainty before
+  reporting. NetBox's `IsSuperuser` proves the ordering right: it is stronger
+  than anything in the table, and treating unknown as a verdict rather than a
+  floor would have called it open.
+
+  Two defects found by measurement, both invisible to unit tests.
+  `permission_classes = [A | B]` rendered to nothing, leaving a list
+  indistinguishable from `permission_classes = []` — the first is DRF's
+  `OperandHolder`, the second genuinely disables the check, and conflating them
+  turns a guarded view into a reported vulnerability. And an empty
+  `authentication_classes = ()` was falling back to the project default, hiding
+  that pretix's device-initialisation and idempotency endpoints have no
+  authentication at all.
+
+  NetBox: 151 routed views, 142 requiring authentication through the default,
+  11 uncertain (`IsSuperuser`, `IsAuthenticatedOrLoginNotRequired` — the latter
+  reads `settings.LOGIN_REQUIRED` at request time), 3 dynamic via a
+  `get_permissions` mixin, and exactly 1 certainly open: `TokenProvisionView`,
+  whose `permission_classes = []` and docstring agree it is deliberate. pretix:
+  76 routed views, 74 uncertain because `EventPermission` is hand-written, and
+  2 certainly open with no authenticators — both verified in source. Every
+  count from 2.1 through 2.2.3 is byte-identical before and after. 33 tests.
+
+  `Entry`, `entries`, `literal_text` and `assignment_value` moved from
+  `rules/_base.py` down into `settings.py`, where they belong: they read
+  settings and know nothing about rules. `api/` needs them, and leaving them in
+  the rules layer would have made Step 2.3's `DJA` rules — which import `api/`
+  — a circular import.
 - **2.2.5** — Queryset resolution: the `queryset` attribute and `get_queryset` return expressions, including filters applied.
+
+  **Done.** `api/querysets.py` answers which rows an endpoint reaches and
+  whether the request narrows them — the groundwork for the IDOR rules, and
+  the reason it needs a pass rather than a pattern is that neither benchmark
+  writes anything resembling "scoped to the requesting user". NetBox narrows
+  with `self.queryset.restrict(request.user, action)` inside a base viewset's
+  `initial()`; pretix narrows with
+  `filter(order__event__organizer=self.request.organizer)`, where `organizer`
+  is attached to the request by middleware and the word `user` never appears.
+
+  So the test is "does anything narrowing this queryset derive from the
+  request", asked of the whole ancestry. Weaker than knowing the scoping is
+  *correct*, and deliberately so: this reports whether the request was
+  consulted and declines to guess whether it was consulted properly.
+
+  Nearly all the work is indirection, and each layer was found by measuring
+  rather than by reasoning. Reading only the return expression called 31 of
+  pretix's 57 querysets unscoped, because `qs = ...` then `return qs` four
+  statements later is how everyone writes this — following locals fixed 22 of
+  them. Following `self` attributes fixed 8 more: `ItemVariationViewSet`
+  resolves `self.item` in a `@cached_property` off `self.kwargs['item']` and
+  returns `self.item.variations.all()`, with nothing in the return expression
+  to show it. `_root_path` then had to descend through calls, without which
+  the provider branch never fired at all.
+
+  Three shapes that look unscoped and are not. A return guarded by a
+  request-reading condition — pretix's `OrganizerViewSet` returns every row,
+  but only inside `if self.request.user.has_active_staff_session(...)`.
+  `.none()`, which is the strongest narrowing there is and which pretix writes
+  on views that exist only to accept a POST. And a request-scoped `get_object`,
+  kept in its own field rather than folded in, because NetBox's `DashboardView`
+  is protected completely on a detail route and would be protected not at all
+  on a list route.
+
+  NetBox: 139 attribute querysets, 138 scoped through the `initial()` rebind,
+  138 models resolved, and 2 unfiltered — `DashboardView`, which is
+  `object_scoped` and detail-only, and `DummyViewSet` in the test plugin, which
+  genuinely reads every row. pretix: 57 `get_queryset` overrides, all 57
+  scoped, and **0 unfiltered**. Every count from 2.1 through 2.2.4 unchanged.
+  27 tests.
 
 ### Step 2.3 — Authorization rules
 
 - **2.3.1** — `DJA-001` `DEFAULT_PERMISSION_CLASSES` set to `AllowAny`, or absent (DRF's own default is `AllowAny`).
+  **Done.** The foundation first: `ProjectContext.api_surface`, cached the same
+  way the model graph is so seven rules share one pass over 1200 files rather
+  than each rebuilding it, and `rules/_api.py` carrying the loop every `DJA`
+  rule runs — resolve the surface, resolve the guards, hand each routed
+  endpoint to a rule that supplies only its judgement.
+
+  One policy decision was unavoidable there. A project with a permissive
+  `dev.py` and a locked-down `production.py` has two different answers to
+  "what is the default permission", so `production_settings` picks the module
+  that ships: an entrypoint named by `DJANGO_SETTINGS_MODULE` wins outright,
+  then the most production-like role, then the longer import chain, because a
+  module that overrides a base is a later word than the base. Every finding
+  names the module it read, so the reader never has to guess which file the
+  tool was looking at. It resolves `netbox.netbox.settings` and
+  `src.pretix.settings` on the two benchmarks.
+
+  `DJA-001` itself is reported against the settings module rather than per
+  endpoint — one line decides this for the whole project, and reporting it per
+  view would have produced 151 identical sentences on NetBox. It fires on an
+  explicit `AllowAny` and on the setting being absent, which is the same thing
+  because DRF's own default is `AllowAny`, and it counts how many routed views
+  actually rely on it: `HIGH` when any do, `LOW` when none do, since a
+  permissive default nothing inherits is a latent hazard rather than a live
+  one. Silent on both benchmarks, correctly — both set the default explicitly.
 - **2.3.2** — `DJA-002` view with no explicit permission classes under a permissive default.
+  **Done.** The view that never said anything, which is the common shape of an
+  accidentally public endpoint: nobody wrote a permissive rule, they wrote
+  nothing. Fires only when the guard's source is the setting or DRF's own
+  default — a view whose ancestry declares permissions is not relying on
+  anything, even if it never mentions them itself, and 2.2.4 already resolved
+  that. Graded `HIGH` on a writable route and `MEDIUM` otherwise.
+
+  The message names where the default came from, because "this view has no
+  permissions" is a claim a reader will not believe about their own code and
+  the useful reply is the chain that produced it. Silent on both benchmarks.
 - **2.3.3** — `DJA-003` `AllowAny` on a view exposing write methods.
+  **Done.** The view that said "anyone" out loud, on a route that changes data.
+  Deliberately declines the case where the opening came from the project
+  default: `DJA-002` owns that, and the same view on two lines of one report
+  with one fix between them is one line too many.
+
+  This is the only `DJA` rule that fires on the benchmarks, twice, and both are
+  true readings of intentionally public endpoints — NetBox's
+  `TokenProvisionView` and pretix's `InitializeView`. Both are credential
+  exchange: the caller presents a password or a one-time enrolment token in the
+  body and receives an API token, so both must precede the authentication they
+  exist to grant, and both check the credential by hand in the handler where no
+  permission class can see it. Recorded as `accepted_risk` rather than
+  suppressed. An endpoint that opens itself to anonymous POST should have to
+  justify itself once, and the rule asking is the rule working; narrowing it
+  until these two disappear would cost the next such endpoint, which will not
+  be deliberate.
 - **2.3.4** — `DJA-004` **IDOR** — `get_queryset` on a user-owned model not scoped to `request.user`. The flagship rule of this phase.
+  **Done.** The flagship, joining all three passes: an unfiltered queryset from
+  2.2.5, a list route from 2.2.3, and a model the graph says is per-user.
+  Authentication is no defence here and the rule says so — every logged-in
+  caller sees every other caller's rows — so it fires regardless of enforcement
+  and grades `CRITICAL` only when the endpoint is also open.
+
+  "Per-user" is the `points_at_user` edge from 2.1 *and* an ownership name.
+  Both halves are needed: a foreign key to the user model called `approved_by`
+  records who signed something off and does not make the row theirs, and
+  filtering by it would be wrong as well as noisy. `Tag.approved_by` in the
+  fixtures exists to hold that line.
+
+  Two corrections, both from measuring. The first was a silent one — a patch
+  that stopped applying after `ruff format` reflowed the line it matched, so
+  `collection_methods` was never passed and the rule could not fire at all
+  while every unit test still passed, because they exercised `inspect` and the
+  break was in the loop above it. The second was the fix revealing a false
+  positive: counting a plain `path()` route as a collection put NetBox's
+  `DashboardView` on the list, and it is a single-object view at
+  `dashboard/`. A router states outright that a URL returns a collection; a
+  `path()` entry does not, so those now require the view to claim the `list`
+  action itself. That is a recall gap for generic `ListAPIView` subclasses
+  routed by hand, and it is written into the rule's limitations rather than
+  guessed at. Silent on both benchmarks, which 2.2.5 predicted: pretix has zero
+  unfiltered querysets and NetBox's two are a detail-only view and a test
+  plugin.
 - **2.3.5** — `DJA-005` object-level permissions declared but `check_object_permissions` never reached on a custom `get_object`.
+  **Done.** The hook that was written, reviewed, and never ran. DRF calls
+  object permissions from inside `GenericAPIView.get_object`, so an override
+  that fetches the object itself and forgets the call leaves
+  `has_object_permission` looking protective in every place anyone would think
+  to look. Requires an object hook to actually exist on one of the endpoint's
+  permission classes — a view that overrides `get_object` for an unrelated
+  reason loses nothing by not calling it.
+
+  The interesting decision is what counts as already having done the check.
+  2.2.5's `object_scoped` was the obvious answer and is the wrong one: its
+  `REQUEST_ROOTS` include `kwargs`, correctly, because a URL capture is caller
+  input — but here caller input is the attack. `Note.objects.get(pk=self.kwargs['pk'])`
+  is the textbook IDOR and would have been read as self-defending. So this rule
+  asks the narrower question, whether the fetch reaches `request.user`, which
+  is what NetBox's `DashboardView` does with
+  `Dashboard.objects.filter(user=self.request.user).first()` and what an
+  exploitable override does not. That view was a false positive until this
+  landed; both benchmarks are now silent.
 - **2.3.6** — `DJA-006` `@api_view` function view with no permission decorator.
+  **Done.** A function view carries its configuration in decorators, and a
+  missing decorator looks exactly like a view that needs no configuration —
+  class views at least inherit from a base somebody chose. Fires on a routed
+  `@api_view` with no `@permission_classes` under a permissive default.
+
+  Silent on both benchmarks and verified to be a real zero rather than a broken
+  rule: neither project routes a single function view. NetBox is 143 viewsets,
+  13 `APIView` subclasses and 1 generic; pretix is 62, 14 and 1. Recall for
+  this one rests entirely on the fixtures until 2.7.1 plants a defect.
 - **2.3.7** — `DJA-007` authentication classes permitting session auth only on an endpoint routed as a public API.
+  **Done, narrowed deliberately.** The plan asked for session-only
+  authentication on a public endpoint. Measuring that first showed why it
+  cannot be written as stated: DRF's default *is* session plus basic auth, so
+  the rule would fire on essentially every endpoint of every project that never
+  touched the setting, and "routed as a public API" has no static definition
+  that distinguishes it from "routed".
+
+  What is reportable is the contradiction. An empty `authentication_classes`
+  means DRF never populates `request.user`, so it is `AnonymousUser` on every
+  request no matter what credentials arrived; when the permission classes still
+  demand an authenticated user, the endpoint can only ever refuse. The two
+  settings disagree and one of them is not what the author meant. Paired with a
+  permissive permission it is instead how a deliberately public endpoint is
+  spelled — pretix's `InitializeView` and `IdempotencyQueryView` both do
+  exactly this, correctly — so that case is left to `DJA-002` and `DJA-003`,
+  which already report it from the permission side and would otherwise put
+  three findings on one line.
+
+  Both of those pretix views were findings before the narrowing and are silent
+  after it, which is the whole argument for it.
+
+  Step 2.3 totals: 7 rules, 44 tests, 1417 passing. Three benchmarks at 100%
+  precision with 2 new triaged verdicts, 22 in total. `docs/rules/DJA.md`
+  remains 2.7.5's job; the generator is `DJS`-only until then.
 
 ### Step 2.4 — Data exposure rules
 
 - **2.4.1** — `DJA-008` `ModelSerializer` using `fields = '__all__'`.
+
+  **Done.** `src/djaudit/rules/serialization.py` — `SerializerRule` base plus
+  `DJA-008`. The base carries the loop and the two exclusions every rule in the
+  step shares: skip anything that is not a model serializer, because a plain
+  `Serializer` publishes exactly what it declares and has no model to
+  over-share; and skip anything with no `Meta` of its own, because that is an
+  abstract mixin whose field list is chosen by whichever concrete subclass uses
+  it, and reporting the mixin would name a file that cannot be fixed while
+  missing the one that ships. That second exclusion removes 38 classes on
+  NetBox and 27 on pretix.
+
+  The finding is raised **once per serializer, never per endpoint**. A
+  serializer is reused across views far more often than it is written, so a
+  field list that is wrong is wrong everywhere; reporting per route would
+  repeat one defect and imply the routes it did not name were fine. The cost —
+  that reachability is unknown — is stated in the rule's limitations instead of
+  being hidden behind a confidence level.
+
+  Every finding carries the columns `'__all__'` expands to *today*, read from
+  the model graph. A reader looking at that line sees one word, and the
+  argument for changing it is almost always a column in the expansion they had
+  forgotten was there.
+
+  **Zero on all three benchmarks, and the zero was verified against source**
+  rather than inferred from a clean report — neither NetBox nor pretix uses
+  `'__all__'` anywhere, and the single grep hit in NetBox is a class generated
+  inside a function, correctly not discovered. Recall is demonstrated by seven
+  tests, including one where the serializer's base is a package we cannot read,
+  which is how pretix spells all of its.
 - **2.4.2** — `DJA-009` serializer using `exclude`, which silently exposes every field added later.
+
+  **Done.** `DJA-009` in `src/djaudit/rules/serialization.py`. `Meta.exclude`
+  is a denylist, so the default is exposure and the author's reasoning covers
+  only the columns that existed when they wrote it. It is the more dangerous of
+  the two open-ended spellings precisely because it reads as *more* careful
+  than `'__all__'` — somebody visibly thought about which fields to hide, which
+  is exactly the signal that stops a reviewer looking further.
+
+  The finding quotes the denylist back verbatim, because the list is the whole
+  of the author's argument and seeing it next to the model's current columns is
+  what makes the gap obvious. A documented limitation: excluded names are not
+  checked against the model, so a typo in an `exclude` entry publishes the field
+  it was meant to hide and reads here as a correct entry.
+
+  **Zero on all three benchmarks, verified against source** — neither project
+  uses `exclude` anywhere. Six tests, including one asserting that `'__all__'`
+  and `exclude` never both report on the same class: they are alternative
+  spellings of one mistake, and two findings sharing one fix is one finding too
+  many.
 - **2.4.3** — `DJA-010` serializer exposing sensitive fields (`password`, `is_staff`, `is_superuser`, `token`, `secret`).
+
+  **Done.** `DJA-010` in `src/djaudit/rules/serialization.py`, plus
+  `SerializerNode.field_line` and the `write_only` support added in the 2.2.2
+  fix that this rule cannot work without.
+
+  The decisive fact is that **`read_only` is the wrong half**. It blocks writes
+  and guarantees reads, so a secret marked read-only is *more* reliably served,
+  not less. Only `write_only=True` — accepted on input, never rendered — makes a
+  field safe, and it is one keyword away in a field list that otherwise looks
+  identical. NetBox's `UserSerializer.password` spells it correctly via
+  `extra_kwargs`, and reporting that would have taught readers to ignore the
+  rule; NetBox's `TokenSerializer.key` is `read_only_fields = ('key',)` and is
+  reported, correctly.
+
+  **A field name is not evidence.** The first draft matched
+  `is_active`/`groups` anywhere and flagged NetBox's cable paths, config
+  contexts, contacts and notification groups — none of which decide anything
+  about a session. Privilege names are therefore consulted **only when the
+  serializer's model is the project's user model**, the same discipline that
+  cut the mass-assignment candidates from 270 to 8. Because the model graph
+  holds only project-defined models, a project on Django's built-in
+  `auth.User` resolves `Meta.model = User` to nothing at all, so the check
+  falls back to the class name — otherwise the most common Django project of
+  all would be invisible to this rule.
+
+  Severity splits by what is lost: credential material is `HIGH`, an
+  authority-granting field on the user model is `MEDIUM`. Learning who is staff
+  tells an attacker which account to spend effort on; it does not hand them one.
+
+  `hash` was removed from the name list after NetBox's `DataFile.hash` turned
+  out to be a checksum of public content. `key` was kept despite being the most
+  generic entry, with the ambiguity recorded in the rule's limitations rather
+  than resolved by dropping the one name that reliably means "API token".
+
+  **15 findings across the benchmarks — 8 NetBox, 7 pretix, 0 healthchecks —
+  every one verified against source and triaged as `accepted_risk`.** They are
+  genuinely credential-bearing: NetBox's webhook HMAC key, its API tokens, and
+  pretix's ticket `secret`, which is the 32-character string the barcode
+  encodes and the door scanner checks. All are intended, all are behind
+  permissions, and all are worth telling a reviewer about. Triage now stands at
+  37 reviewed findings. Ten tests.
 - **2.4.4** — `DJA-011` writable field that should be read-only (`id`, `user`, `owner`, `created_by`) — mass assignment.
+
+  **Done.** `DJA-011` in `src/djaudit/rules/serialization.py`, reusing
+  `OWNERSHIP_FIELDS` from `rules/authorization.py`.
+
+  The plan's list starts with `id`, and **`id` can never fire** — DRF's
+  `build_standard_field_kwargs` sets `read_only` for an `AutoField` or any
+  field with `editable=False` before it inspects anything else, so a primary
+  key listed in `Meta.fields` is not writable no matter how it is spelled. The
+  same clause covers `auto_now` and `auto_now_add`. A first draft that ignored
+  this reported **270 fields on NetBox**; the rule now checks the model field
+  and there is a test asserting `id` stays silent.
+
+  The other half of that 270 was the name. NetBox's `owner` is a foreign key to
+  `users.Owner`, a separate administrative model that has nothing to do with
+  authentication. A name is only taken as ownership when the model graph shows
+  a relation **resolving to the project's user model** — the same rule
+  `DJA-004` uses. 270 became 8.
+
+  `HiddenField` is excluded: it sets `write_only` on itself and takes no client
+  input, so `HiddenField(default=CurrentUserDefault())` is the recommended fix
+  and reporting it would report the fix. `CurrentUserDefault` **on its own is
+  not** a protection — NetBox's `JournalEntrySerializer` pairs it with
+  `queryset=User.objects.all()`, so the field still accepts any user id — and
+  the rule is deliberately not fooled by it.
+
+  **8 findings, all NetBox, all verified against source, triaged with mixed
+  verdicts** rather than uniformly waved through. Three are `accepted_risk`
+  with visible evidence of intent: `TokenSerializer.user` is guarded by a
+  hand-written `user_may_grant_token` check in `validate()` — precisely the
+  mitigation the rule's first limitation says it cannot see — while
+  `JournalEntrySerializer` and `RackReservationSerializer` show deliberate
+  design. **Five are `true_positive`**: `Bookmark`, `Notification`,
+  `Subscription`, `SavedFilter` and `TableConfig` accept `user` with no
+  `validate`, no `perform_create` and no queryset scoping anywhere in the
+  chain. The notification one is the sharpest — a caller can inject UI text
+  into another user's feed that NetBox itself renders and the recipient has
+  every reason to trust. Triage now stands at 45 reviewed findings. Nine tests.
 - **2.4.5** — `DJA-012` nested serializer reaching a sensitive field through a relation.
+
+  **Done.** `DJA-012` in `src/djaudit/rules/serialization.py`, covering both
+  spellings: a declared field whose class resolves to another serializer, and
+  `Meta.depth`, which expands relations with no class to read at all.
+
+  This is the version of `DJA-010` that survives review. The field list a
+  reader checks is the parent's, and it shows a relation name that gives no
+  hint of what the other class publishes. pretix's `OrderSerializer` lists
+  `positions`; `OrderPositionSerializer` returns `secret`, the 32-character
+  string the ticket barcode encodes.
+
+  **The rule is restricted to secret-named fields, and the reason is a false
+  positive we found before shipping it.** Extending it to privilege fields on
+  the user model produced six NetBox findings — `ObjectChangeSerializer.user`,
+  `JobSerializer.user` and four others nesting `UserSerializer` — and all six
+  are wrong. NetBox's base serializer accepts `nested=True` and swaps in
+  `brief_fields`, which for `UserSerializer` is `('id', 'url', 'display',
+  'username')`. The permission list is never rendered there. A parent narrowing
+  a child's fields at runtime is invisible to us, so the rule reports only
+  where the evidence is strong and records the gap as its first limitation.
+
+  **2 findings, both pretix, both `accepted_risk`; 0 on NetBox and
+  healthchecks.** `Meta.depth > 0` occurs nowhere in any benchmark, so that
+  branch's recall rests entirely on its unit test. Nine tests. Triage now
+  stands at 47 reviewed findings.
+
+  **Step 2.4 complete.** Five rules, 25 benchmark findings, all triaged, three
+  benchmarks still at 100% precision.
 
 ### Step 2.5 — Availability rules
 
 - **2.5.1** — `DJA-013` list endpoint with no pagination and no bounded queryset.
+
+  **Done.** The rule has two branches, and the second one is why it exists.
+  Naming a `DEFAULT_PAGINATION_CLASS` without setting `PAGE_SIZE` does
+  *nothing*: `PageNumberPagination.page_size` is `api_settings.PAGE_SIZE` and
+  `paginate_queryset` returns `None` when it is falsy, so the settings file
+  reads as solved while every list endpoint still returns its whole table.
+  NetBox has exactly this shape and is correct anyway, because
+  `NetBoxPagination.__init__` assigns `default_limit` from runtime config — so
+  `supplies_its_own_size()` walks the named class and its ancestry for a size
+  attribute or a `get_limit`/`get_page_size` override. That check then had to
+  learn that `page_size = api_settings.PAGE_SIZE` is a redirect and not an
+  answer, or DRF's own base class would have vouched for every subclass of it.
+  A view setting `pagination_class = None` is reported against the view and
+  excluded from the settings finding, so one endpoint never draws two.
+  Suppressed entirely when the project has no DRF views: healthchecks has none,
+  and DRF's defaults are not facts about a library it does not install.
+  Benchmarks 0/0/0, both branches confirmed against a positive control.
+  11 tests.
 - **2.5.2** — `DJA-014` filter backend permitting arbitrary field lookups (`filterset_fields = '__all__'`).
+
+  **Done.** django-filter resolves `'__all__'` through `get_all_model_fields`,
+  which returns every concrete field and every m2m on the model. Nothing about
+  that list is reviewed, so adding a column adds a query parameter — and when
+  the column is credential material the endpoint becomes an oracle: the caller
+  cannot read `password` but can ask whether it starts with `a`, one request at
+  a time. `Meta.exclude` with no `Meta.fields` is the same thing, because
+  django-filter documents it as meaning all other fields; the excluded names
+  are subtracted from the message so the finding does not accuse a project of
+  exposing the one column it remembered.
+
+  Three precision guards came out of the source. `filterset_class` wins
+  outright — `get_filterset_class` returns it before it looks at
+  `filterset_fields` — so the dead attribute is never named. `filterset_fields`
+  with no filter backend, on the view or in `DEFAULT_FILTER_BACKENDS`, is
+  decoration and stays silent. And one finding per view, not per route.
+
+  Both zeros were nearly fake. `filterset_class = filtersets.DeviceFilterSet`
+  is written against the view module's imports, not as a dotted path, so
+  looking it up verbatim resolved **0 of NetBox's 129** filtersets — a
+  measurement identical to a clean project. Resolving through
+  `ClassIndex.resolve_name` took it to 129/129, all explicit. pretix then
+  resolved 3 of 31, because it declares its filtersets inside
+  `with scopes_disabled():` and `class_defs` walked `if` and `try` but not
+  `with`; extending it took pretix to 29/31 and left every other benchmark
+  count unchanged. Four firing branches confirmed against a positive control.
+  13 tests.
+
+  **Correction, made in 2.5.3.** The commit for this substep claimed
+  benchmarks 0/0/0. It was measured with `djaudit run`, which hides
+  `tentative` findings by default, and the benchmark harness does not — the
+  real counts were NetBox 2 and pretix 3, every one an explicit field list
+  naming a credential column rather than an `'__all__'`. Reading the five
+  changed the rule. `secret` on a pretix `OrderPosition` is the barcode
+  printed on the ticket, and `secret` on a `GiftCard` is the code the customer
+  types in: looking a row up *by* the credential is how a redemption endpoint
+  works, and the caller has to hold the value already. A substring or range
+  lookup needs no such thing — it reads the column back one answer at a time.
+  So an oracle lookup on a secret stays HIGH/firm and a bare `exact` drops to
+  MEDIUM/tentative, which is the difference between extracting a credential
+  and confirming one. All five triaged; only NetBox's `Webhook.secret`, which
+  nothing is ever looked up by, is a `true_positive`.
 - **2.5.3** — `DJA-015` no throttling on authentication or password-reset endpoints.
+
+  **Done.** DRF ships `DEFAULT_THROTTLE_CLASSES` empty, so an endpoint is
+  unthrottled unless the project said otherwise, and there are two quieter ways
+  to arrive at the same place: `ScopedRateThrottle.allow_request` returns
+  `True` the moment a view has no `throttle_scope`, and a throttle class whose
+  scope has no entry in `DEFAULT_THROTTLE_RATES` cannot produce a rate. Both
+  are the `PAGE_SIZE` shape from 2.5.1 — configuration that reads as solved and
+  does nothing.
+
+  The measurement rewrote the rule. Across 227 routed endpoints on NetBox and
+  pretix there are exactly **two** anonymous writes, and both hand out
+  credentials: NetBox's `TokenProvisionView` trades a username and password for
+  an API token, pretix's `InitializeView` trades an initialization token for a
+  device token. Neither project throttles anything. So the filter is not the
+  name — the filter is *anonymous POST*, which is a 1-in-113 event in mature
+  code — and requiring a credential word would have missed pretix, whose route
+  is `device/initialize`. The rule now reports every unthrottled anonymous
+  write, at HIGH/firm when the name, module, URL or base class says credentials
+  and MEDIUM/tentative when it does not, so it never claims more than it read.
+  NetBox's finding is a `true_positive`: DJA-003 already reports that the
+  endpoint is deliberately anonymous, and being unthrottled is a separate
+  decision the code records nowhere. 11 tests.
+
+  **Step 2.5 complete.** Three rules, six benchmark findings, all triaged,
+  three benchmarks still at 100% precision.
 
 ### Step 2.6 — Model correctness rules
 
@@ -1507,17 +2403,312 @@ These are data-model design defects, not settings, so they need a family of
 their own. Substep 2.6.1 extends `RULE_ID_PATTERN` to admit `DJD`.
 
 - **2.6.1** — Register the `DJD` family (data model design) in `Family` and the ID pattern.
+
+  **Done.** `Family.DJD` and one alternation in `RULE_ID_PATTERN`. Its own
+  family because the fix is a migration rather than a settings line, and
+  because these are correctness defects that cost nothing until they produce a
+  wrong answer — which is a different argument from `DJP`'s, where the code is
+  right and slow.
 - **2.6.2** — `DJD-001` `ForeignKey` with `on_delete=CASCADE` to the user model on financial or audit records — informational, high value in review.
+
+  **Done.** `rules/datamodel.py` with `ModelRule`, `name_tokens()` and
+  `CascadingRetainedRecord`. All three benchmarks are silent, and the probe
+  behind that silence is the substep's real result: the word list matches
+  **nineteen** retained-record models across NetBox and pretix, **four** of them
+  carry a foreign key to the user, and all four are `SET_NULL` or `PROTECT` —
+  NetBox's `ObjectChange` and `JournalEntry`, pretix's `LogEntry` and
+  `StaffSessionAuditLog`. Two mature projects independently made the choice this
+  rule asks for, which is the strongest available evidence that the rule asks
+  for the right thing. The other fifteen never link to a Django user at all,
+  because a pretix `Order` belongs to an event rather than to `auth.User`.
+
+  Two calibrations came out of measuring rather than testing. NetBox's
+  `Subscription` is a *change-notification* subscription that cascades
+  correctly, so `subscription` is out of the word list even though a billing
+  subscription is exactly the target — recall traded for the right to be
+  believed. And names are matched by splitting on camel case rather than by
+  substring, because `Recorder` contains `order` and `HistoricPassword`
+  contains `histor`; adjacent words are then re-joined so `ChangeLog`,
+  `LogEntry` and `StaffSessionAuditLog` reach a single term.
+
+  `ModelRule` iterates abstract bases as well as concrete models. The positive
+  control found that omission: a cascading user FK declared on an abstract base
+  is invisible otherwise, since the base is not concrete and every subclass's
+  copy is inherited. That is the highest-leverage place in a schema to get a
+  field wrong, and it was reporting nothing.
 - **2.6.3** — `DJD-002` `CharField` with `null=True`, which creates two representations of empty.
+
+  **Done.** `NullableStringField`, plus `covered_by_uniqueness()`. The
+  interesting part of this substep is what it declines to report. Django's
+  documentation says plainly to avoid `null` on string fields, and taken
+  literally that fires **191 times** across the three benchmarks — 55 on
+  NetBox, 132 on pretix — which would bury every other finding the tool makes.
+  A rule nobody can read is not a rule.
+
+  The discriminator is `blank`. Where `blank=True` is present the project has
+  said that empty is a permitted input and which spelling it means; where it is
+  absent, the database accepts a `NULL` that the project's own validation layer
+  would reject, so those rows can only have come from a backfill or a direct
+  write. That cut leaves 25 columns, all on pretix, and grouping them per model
+  — one migration, one finding — gives **8 reports, 0 on NetBox, 0 on
+  healthchecks**.
+
+  pretix's `Invoice` is the true positive and proves the rule is about a real
+  cost rather than a style preference. Migration `0100` added all fifteen
+  address columns as `AddField(..., null=True)` with no backfill, so invoices
+  written before October 2018 hold `NULL` and later ones hold a string. The
+  model pays for it on every read: `address_invoice_to` is written as
+  `((self.invoice_to_zipcode or "") + " " + (self.invoice_to_city or "") + …)`
+  and then filters the assembled parts again. That is the defensive read the
+  documentation warns the pattern will force, sitting in the source.
+
+  `covered_by_uniqueness` came out of measuring, not designing. The rule
+  exempted field-level `unique=True` and duly reported `Customer.email`, which
+  is unique on `(organizer, email)` and needs `null` for exactly the documented
+  reason — many customers of one organizer with no email, where `''` would
+  collide on the second one. The exemption has to follow `unique_together` and
+  `UniqueConstraint` as well.
 - **2.6.4** — `DJD-003` `Meta.ordering` absent on a model that is paginated, producing unstable pagination.
+
+  **Done.** `UnorderedPaginatedModel`, `orders_anywhere()` and
+  `manager_may_order()`. `LIMIT`/`OFFSET` with no `ORDER BY` lets the planner
+  return rows in whatever order the scan produced, and that order shifts as
+  rows are written, so a client walking the pages sees some records twice and
+  never sees others. Django raises `UnorderedObjectListWarning` for it; nothing
+  reaches the API.
+
+  Zero on all three benchmarks, and the two exemptions that produce that zero
+  were both found by measuring. NetBox's `RegionViewSet` and `SiteGroupViewSet`
+  paginate models with no `Meta.ordering` and are perfectly stable, because
+  `objects = TreeManager()` orders every queryset by `(tree_id, lft)` — so any
+  manager that is not Django's plain one has to buy silence. And all fourteen
+  pretix candidates declare `queryset = Model.objects.none()` as a placeholder
+  and build the real query in `get_queryset`, where the `.order_by('name')`
+  lives; reading only the `queryset` attribute would have reported fourteen
+  correctly-ordered endpoints, so ordering is credited from anywhere in the
+  view class or its ancestors.
+
+  **The first measurement of this rule was a lie.** It reported zero on all
+  three benchmarks and on its own positive control, because `ApiRule.inspect`
+  is abstract and the rule had overridden `check` instead — the class could not
+  be instantiated, the engine filed the `TypeError` under `rule_errors`, and
+  `djaudit run` never printed them. A rule that never ran and a clean project
+  were indistinguishable at the command line. `run` now writes crashed rules to
+  stderr, which is the same argument the blocking-diagnostic exit already makes,
+  and a test asserts this rule can be constructed at all.
+
+  **Step 2.6 complete.** Three rules, eight benchmark findings, all triaged,
+  three benchmarks still at 100% precision. Two of the three rules report
+  nothing on any benchmark, and in both cases the probe behind the zero is the
+  result: mature Django projects already use `SET_NULL`/`PROTECT` on audit
+  records and already order their paginated lists, they just do it somewhere
+  other than where a naive rule looks.
 
 ### Step 2.7 — Benchmark and document
 
 - **2.7.1** — DRF fixture project: viewsets, serializers, routers, planted IDOR and mass-assignment defects.
+
+  **Done.** `tests/fixtures/drf_project` — a support-ticket API with eighteen
+  planted defects, scored at **100% precision and 100% recall**. Every other
+  fixture measures the settings family; this is the only place `DJA-004`,
+  `DJA-005`, `DJA-010` and `DJA-012` have a known answer, and the benchmarks
+  cannot supply one because a mature project by definition does not contain
+  the defect.
+
+  One settings line does most of the work: `DEFAULT_PERMISSION_CLASSES` is
+  `AllowAny`, which is `DJA-001` on its own and the precondition for the two
+  `DJA-002` reports and the `DJA-006` one. That is the actual shape of the
+  vulnerability — not four independently careless views, but four views that
+  said nothing and one line that answered for them.
+
+  Three rules had to be *given* something to find, which was itself worth
+  learning. `DJA-010` and `DJA-012` both read explicit field lists and neither
+  fires on `fields = "__all__"`, because that case is `DJA-008` and reporting
+  it twice would teach readers to skim; the fixture therefore needs a serializer
+  written field by field with `api_key` surviving the reading. `DJA-005` only
+  fires where an object-level permission exists to skip, so the fixture needs a
+  real `IsOwner` with `has_object_permission` — on a view whose permissions are
+  all class-level, not calling the hook costs nothing.
+
+  The controls carry as much weight as the defects. `MyTicketViewSet` differs
+  from `TicketViewSet` by one `filter(owner=self.request.user)` and
+  `CommentViewSet` scopes across a relation with `filter(ticket__owner=...)`;
+  a `DJA-004` that cannot tell those apart would report every scoped API ever
+  written. Pagination is configured with both a class and a `PAGE_SIZE` and
+  every model declares `Meta.ordering`, which makes this the control for
+  `DJA-013` and `DJD-003`. Ten tests pin the reasoning the manifest cannot
+  express, including one asserting `rule_errors` is empty — a crashed rule and
+  a rule with nothing to say look identical otherwise.
 - **2.7.2** — Near-miss fixtures: correctly scoped querysets, correct read-only fields.
+
+  **Done.** `tests/fixtures/near_miss_project/catalog/` — a nine-endpoint DRF
+  app in which nothing is a defect, added to the fixture that already asked
+  this question of the settings family. A default `djaudit run` over the whole
+  project still reports nothing and exits zero.
+
+  DRF answers every question in three or four places, so this is where a rule
+  that checks one spelling reports the projects that used another. The string
+  `objects.all()` appears three times in `catalog/views.py` and is correct every
+  time: once narrowed by a mixin's `initial()` in another class (NetBox's
+  scheme), once reached only under `if self.request.user.is_staff` (pretix's),
+  and once refined through `super().get_queryset()`. `AccountSerializer` names
+  `password` and `api_key` in its field list and returns neither — one held
+  back by `extra_kwargs`, the other by `write_only=True` on the declared field
+  — and also names `password_changed_at`, which contains a secret's name and
+  holds a timestamp.
+
+  **Three false positives were found by writing it, and fixed rather than
+  annotated.** Every `@api_view` function was recorded as having declared
+  authentication and declared none, so `DJA-007` fired on any function view
+  that requires login — the class-based path had always checked whether the
+  attribute was actually assigned and the function path never did. A
+  `get_queryset` built from `super().get_queryset()` resolved to no model and
+  no scoping, so a subclass of a correctly scoped viewset read as an unscoped
+  list; `Return.delegates` had been recorded since 2.4 and never consulted.
+  And a `return Model.objects.none()` sitting beside a staff-only
+  `Model.objects.all()` did not count as narrowing, which made the safest
+  branch in the file the reason the endpoint was reported.
+
+  The last two are recall improvements as much as precision ones: a delegating
+  subclass now resolves its parent's model, so a rule that needs one is no
+  longer skipped before it reaches the question it was asked. All three
+  benchmarks are unchanged at 100% precision with nothing untriaged.
+
+  27 new tests. The fixture ones assert the surface was actually read — nine
+  routed views, five serializers, six models — because a fixture discovery
+  never reached would satisfy every silence assertion and prove nothing.
 - **2.7.3** — Validate the model graph against NetBox, which has hundreds of models — a strong correctness test.
+
+  **Done.** The precision benchmarks ask whether what we report is true. This
+  asks a different question against a different oracle: did we read the project
+  at all? A graph that silently drops half a codebase reports nothing and scores
+  100% precision, so the two gates are not substitutes.
+
+  The oracle is the target's own migrations. Django wrote them by introspecting
+  live model classes with every third-party package installed and every
+  metaclass run, so they record what actually exists rather than a second
+  opinion from the same source. `scripts/graph_coverage.py` replays
+  `CreateModel`/`DeleteModel`/`RenameModel`/`AddField`/`RemoveField`/`RenameField`
+  with `ast` — never importing — and compares the result to the graph.
+
+  It reads app labels from `apps.py` itself rather than borrowing djaudit's
+  discovery, on the principle that an oracle sharing the code under test is not
+  an oracle. That paid for itself immediately: pretix first scored 13/113
+  because the oracle keyed models by directory name while pretix declares
+  `label = 'pretixbase'`. The graph had been right; the oracle was wrong.
+
+  | target | models | fields | relations resolved |
+  |---|---|---|---|
+  | healthchecks | 12/12 (100%) | 127/127 (100%) | 8/13 — the other 5 point at `User` |
+  | netbox | 144/145 (99.3%) | 1795/1856 (96.7%) | 847/886 — 38 `ContentType`, 1 `Permission` |
+  | pretix | 103/113 (91.2%) | 1071/1075 (99.6%) | 258/261 |
+
+  The gate's value is not the percentage but the requirement that **every single
+  gap be named**. NetBox's 61 missing fields are 55 from `MPTTModel`, 4 from
+  `AbstractBaseUser` and 2 from `TagBase` — bases that live in site-packages,
+  which the static tier deliberately does not read. Attributing them means
+  walking the MRO (`dcim.Region` → `netbox.NestedGroupModel` → `MPTTModel`),
+  and for models missing from the graph entirely, consulting the class index to
+  distinguish "inherits a base outside the project" from something worse.
+  pretix produced a third bucket that had to be invented for it:
+  `Event_SettingsStore` has no `class` statement anywhere in the tree, because
+  django-hierarkey generates it while the module imports. A static reader cannot
+  see it, and saying so is more useful than a round number. An unattributed miss
+  is `None`, and `None` fails the build.
+
+  Floors and ceilings rather than equality: models/fields/relations found may
+  rise and may not fall; unexplained counts may fall and may not rise. Coverage
+  improving should not be a red build.
+
+  19 tests, which found three bugs in the oracle before the oracle could accuse
+  the graph: positional `CreateModel('Order', [...])` silently lost its field
+  list, an MPTT test fixture had a base chain that never reached `models.Model`,
+  and a "we simply missed this model" test had a premise Django would not
+  accept. Two more cover relation accounting, where counting `to='self'` and
+  `GenericForeignKey` as unresolved had invented 19 NetBox failures out of
+  nothing.
 - **2.7.4** — Triage pass on both benchmarks.
+
+  **Done.** Re-read all 62 verdicts across the three targets, looking for the
+  failure mode a triage file has that a test does not: verdicts that were
+  reasonable when written and have quietly stopped being true.
+
+  The cross-target splits held up. `DJS-009`/`DJS-010` are `true_positive` on
+  Healthchecks and `accepted_risk` on NetBox, which looks inconsistent and is
+  not: Healthchecks assigns neither flag and exposes no environment variable
+  for either, so there is no supported way to turn them on, while NetBox's
+  `False` is the documented fallback for a value the operator sets in a
+  `configuration.py` that lives outside the repository. `DJA-011` splits 5/3 on
+  NetBox along a single line — the accepted three each have a guard the rule
+  cannot see (`validate()` raising `PermissionDenied`, or a workflow where
+  naming another user is the feature), the reported five have nothing at all.
+  `DJD-002` splits 1/8 on pretix on whether the two spellings of empty are ever
+  reconciled. `DJA-014` reports a signing key as a query parameter and accepts
+  three bearer credentials that the endpoints exist to redeem. Every one of
+  these is a distinction a reader can check, so none needed changing.
+
+  What the pass did change is that the citations are now checked by machine.
+  Fingerprints deliberately ignore line numbers — that is what keeps a verdict
+  attached to its defect when the file around it moves — but it also means the
+  `file`/`line` recorded beside each verdict can rot in silence, and every note
+  in `benchmarks/` argues from that citation. Their comment said "recorded for
+  reviewability only", which is another way of saying nothing verified them.
+  `djaudit benchmark` now reports **misfiled** entries: a verdict whose
+  recorded rule, file or line disagrees with the finding it matched. Since
+  targets are pinned by SHA, a disagreement is never innocent drift — either
+  the pin moved without a re-read, or the entry was wrong when it was written.
+  Both should stop the build; neither did before.
+
+  It is deliberately not the same signal as `regressed`. A verdict whose
+  finding stopped firing entirely is a different event with a different remedy,
+  and reporting both would double-count it. All three targets are at 0 misfiled
+  today, which is the point: the check was added while it was cheap to satisfy.
 - **2.7.5** — `docs/rules/DJA.md`, plus an architecture note on the model graph.
+
+  **Done.** `scripts/gen_rule_docs.py` was hardcoded to `Family.DJS` and a
+  single output path, which meant `--check` passed cleanly while eighteen `DJA`
+  and `DJD` rules were documented nowhere. It now renders one page per family
+  that has rules and refuses to be satisfied by silence in either direction: a
+  stale page fails, and so does an **orphaned** one — a page for a family whose
+  last rule was deleted, which is exactly the moment nobody thinks to look in
+  `docs/`.
+
+  The only hand-written part of a page is the family blurb, because it is the
+  one thing no rule knows: what the family is *for*. A family with rules and no
+  blurb is a hard error rather than a page with a gap, so a future `DJI` cannot
+  quietly ship an unexplained page. Everything else is transcribed from rule
+  metadata. `docs/rules/DJS.md` regenerated byte-for-byte identical, which is
+  the evidence that generalising it changed nothing it already got right.
+
+  45 rules now documented: `DJS` 27, `DJA` 15, `DJD` 3.
+
+  `docs/architecture/model-graph.md` is the note the generator cannot write.
+  It records the decisions behind the graph rather than its API: why a model is
+  indexed under three names and `settings.AUTH_USER_MODEL` is a fourth case;
+  why `AppConfig.label` has to be read from `apps.py` (pretix's `pretixbase`,
+  where getting it wrong leaves a graph that answers every question confidently
+  and wrongly); why inheritance carries more fields than declaration does on a
+  real project — NetBox declares 935 and inherits 1475; why an unreadable base
+  is *recorded* rather than guessed at, which is what lets a rule decline
+  honestly instead of reporting on a partial picture; and why `path_to_user()`
+  returns a path rather than a boolean, since `OrderLine` reaches the user
+  through two hops and a one-hop check would call it unowned.
+
+  It also states the four things the graph deliberately does not do, each of
+  which follows from never importing the target.
+
+  README updated for Phase 2: 45 rules, six fixtures, 56 expected findings and
+  97 `must_not_report` shapes, the graph-coverage gate, and honest runtimes.
+
+  **One number moved the wrong way and is recorded rather than buried.** The
+  run was under a second on NetBox at the end of Phase 1; it is now 2s on
+  Healthchecks, 9s on NetBox and **16s on pretix**. Profiling puts ~75% of it
+  in `build_route_graph`, which walks every module's full AST three times —
+  once for router variables, once for `register()` calls, once for endpoints.
+  It is linear, not quadratic, and the fix is to walk once and collect three
+  things. Substep **3.6.3** owns the 10-second NetBox budget and risk 8 records
+  it; pretix is already over that budget before dataflow analysis has been
+  written, so 3.6.3 starts from a known deficit rather than discovering one.
 
 ---
 
@@ -1593,6 +2784,13 @@ We therefore build the dataflow foundation first, and we default this family to
 - **3.6.1** — N+1 fixture project with true positives, correctly prefetched near-misses, and `Prefetch`-object cases.
 - **3.6.2** — Injection fixture project including sanitised near-misses.
 - **3.6.3** — Performance profiling: dataflow analysis must not push a NetBox-scale run beyond 10 seconds.
+
+  **Entering position, measured at the end of Phase 2:** Healthchecks 2s,
+  NetBox 9s, pretix 16s. pretix is already over budget before any dataflow
+  exists. Profiling attributes roughly three quarters of the time to
+  `build_route_graph`, which walks each module's full AST three times — router
+  variables, `register()` calls, endpoints — so the first move is one walk that
+  collects all three, not a faster dataflow pass.
 - **3.6.4** — Triage pass; publish the N+1 false-positive rate honestly, including in the README.
 - **3.6.5** — `docs/rules/DJP.md` and `docs/rules/DJI.md`, plus a dataflow design note stating the analysis limits explicitly.
 
@@ -1804,8 +3002,8 @@ conversation.
 | 4 | Scope creep into build/monitor/debug | Medium | High | The non-goals list is binding; changes require a plan amendment |
 | 5 | Django 6.0 vs 5.2 behavioural drift | Medium | Medium | Version-aware rule gating from the detected version |
 | 6 | Live tier executes hostile code | Low | Critical | Opt-in, sandboxed, timed out, no inherited secrets, explicit consent message |
-| 7 | Model graph wrong on unusual patterns | Medium | Medium | Validated against NetBox's several hundred models |
-| 8 | Analysis too slow on large repositories | Medium | Medium | 10 s budget on NetBox enforced in CI from Phase 3 |
+| 7 | Model graph wrong on unusual patterns | Medium | Medium | Checked against each target's own migrations by `scripts/graph_coverage.py`; every gap must be attributed or the build fails |
+| 8 | Analysis too slow on large repositories | Medium | Medium | 10 s budget on NetBox enforced in CI from Phase 3. Measured at the end of Phase 2: NetBox 9 s, pretix 16 s — see 3.6.3 |
 | 9 | LLM layer erodes determinism | Medium | High | Model may never create or suppress a finding; all output labelled |
 | 10 | Benchmark repositories drift | Low | Low | Pinned by commit SHA; updated deliberately |
 
@@ -1816,14 +3014,14 @@ conversation.
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
-| 1 | Settings and deployment hardening | 10 | 55 | **Complete** — `DJS-001`…`DJS-027`, 100% precision on both real targets |
+| 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
 | 5 | Portability and external adapters | 4 | 20 | Not started |
 | 6 | LLM layer | 5 | 17 | Not started |
 | 7 | Distribution | 3 | 10 | Not started |
-| | **Total** | **51** | **230** | |
+| | **Total** | **52** | **232** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3.

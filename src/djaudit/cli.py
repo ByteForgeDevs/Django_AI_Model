@@ -4,10 +4,13 @@ Exit codes are chosen for CI:
 
 * ``0`` -- nothing at or above ``--fail-on``
 * ``1`` -- findings at or above ``--fail-on``
-* ``2`` -- the tool could not run (bad path, unreadable baseline, bad options)
+* ``2`` -- the tool could not run (bad path, unreadable baseline, bad options),
+  or ran but could not analyse enough of the project to be trusted
 
 Keeping "found problems" and "tool broke" on different codes means a pipeline
-can tell a real failure from a broken installation.
+can tell a real failure from a broken installation. Incomplete analysis belongs
+with the latter: a green build from a run that never located the settings is a
+worse outcome than a red one.
 """
 
 from __future__ import annotations
@@ -138,6 +141,27 @@ def run(
         raise typer.Exit(EXIT_OK)
 
     _emit(result, output_format, output)
+
+    # A rule that crashed reported nothing, and nothing is what a clean project
+    # also reports. Saying so on stderr keeps the two apart without corrupting
+    # JSON or SARIF on stdout.
+    if result.rule_errors:
+        stderr = Console(stderr=True)
+        for rule_id, message in sorted(result.rule_errors.items()):
+            stderr.print(f"[bold red]rule crashed:[/bold red] {rule_id}: {message}")
+        stderr.print(
+            f"[yellow]warning:[/yellow] {len(result.rule_errors)} "
+            f"rule(s) did not run; their silence is not a clean result"
+        )
+
+    # A blocking diagnostic means whole rule families never ran, so exiting 0
+    # would tell CI the project is clean when nothing actually examined it.
+    if any(d.blocking for d in result.context.diagnostics):
+        Console(stderr=True).print(
+            "[bold red]error:[/bold red] analysis was incomplete; "
+            "this result does not mean the project is clean"
+        )
+        raise typer.Exit(EXIT_ERROR)
 
     worst = result.worst_severity
     if worst is not None and worst.rank >= fail_on.rank:
@@ -343,6 +367,12 @@ def _print_benchmark(console: Console, report: BenchmarkReport) -> None:
         console.print(
             f"[green]resolved[/green] {entry.rule_id} {entry.file}:{entry.line} "
             f"[dim]known false positive, no longer reported[/dim]"
+        )
+
+    for misfiled in report.misfiled:
+        console.print(
+            f"[red]misfiled[/red] {misfiled.recorded} "
+            f"[dim]is now {misfiled.actual} -- re-read the note before trusting it[/dim]"
         )
 
     if report.scores:

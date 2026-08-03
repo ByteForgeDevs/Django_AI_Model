@@ -71,3 +71,66 @@ def test_only_the_two_informational_branches_speak_at_all(result):
 def test_the_shape_that_looks_like_the_defect_is_not_reported(result, rule_id, why):
     reported = [f for f in result.findings if f.rule_id == rule_id]
     assert reported == [], f"{rule_id} fired, but {why}"
+
+
+@pytest.mark.parametrize(
+    ("rule_id", "why"),
+    [
+        ("DJA-001", "the project default names a permission class the project wrote"),
+        ("DJA-002", "every routed view declares permission_classes itself"),
+        ("DJA-003", "no writable endpoint is left open"),
+        ("DJA-004", "all three unscoped-looking querysets are narrowed elsewhere"),
+        ("DJA-005", "get_object filters on the request and checks object permissions"),
+        ("DJA-006", "the function view states its permission through the decorator"),
+        ("DJA-007", "the empty authentication list is paired with AllowAny"),
+        ("DJA-008", "no serializer uses `__all__`"),
+        ("DJA-009", "no serializer uses `exclude`"),
+        ("DJA-010", "password and api_key are both write-only, by different spellings"),
+        ("DJA-011", "owner is in read_only_fields"),
+        ("DJA-012", "the nested serializer returns none of the secrets it can reach"),
+        ("DJA-013", "SizedPagination assigns its own page_size"),
+        ("DJA-014", "filterset_fields names two harmless columns"),
+        ("DJA-015", "the credential endpoints are throttled and the rates are set"),
+        ("DJD-001", "the retained record is PROTECT and the disposable one is CASCADE"),
+        ("DJD-002", "one nullable column is blank=True and the other is unique"),
+        ("DJD-003", "ordering comes from an abstract base or from the manager"),
+    ],
+)
+def test_the_api_shape_that_looks_like_the_defect_is_not_reported(result, rule_id, why):
+    reported = [f for f in result.findings if f.rule_id == rule_id]
+    assert reported == [], f"{rule_id} fired, but {why}"
+
+
+def test_the_catalog_app_was_actually_read(result):
+    """The silence has to be earned.
+
+    A fixture the discovery pass never reached would satisfy every assertion
+    above and prove nothing at all, which is the failure mode this whole module
+    exists to catch elsewhere.
+    """
+    surface = result.context.api_surface
+    assert len(surface.routes.routed()) == 9
+    assert len(surface.serializers) == 5
+    assert len(result.context.model_graph.models) == 6
+
+
+@pytest.mark.parametrize(
+    ("view", "why"),
+    [
+        ("BookmarkViewSet", "ScopedMixin.initial rebinds self.queryset from the request"),
+        ("InvoiceViewSet", "the unscoped return is reached only under an is_staff test"),
+        ("SubscriptionViewSet", "for_user is passed the request user"),
+        ("RecentAuditViewSet", "super().get_queryset() carries the parent's scoping"),
+    ],
+)
+def test_each_scoping_shape_is_read_rather_than_skipped(result, view, why):
+    """Which is not the same as DJA-004 staying quiet.
+
+    A queryset whose model never resolved is skipped before scoping is even
+    considered, and looks identical in the report to one the rule read and
+    cleared. `RecentAuditViewSet` was exactly that until the delegation fix:
+    silent, and silent for the wrong reason.
+    """
+    node = result.context.api_surface.querysets[f"catalog.views.{view}"]
+    assert node.model is not None, f"{view}: model unresolved, so DJA-004 never looked"
+    assert not node.unfiltered, f"{view}: read as unscoped, but {why}"

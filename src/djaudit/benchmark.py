@@ -22,6 +22,15 @@ tool can quietly get worse:
     A finding previously judged real that has stopped firing. Ordinary
     regression tests cannot catch this, because the defect lives in somebody
     else's repository.
+
+``misfiled``
+    A verdict whose recorded ``rule_id``/``file``/``line`` disagree with the
+    finding it matches. Fingerprints deliberately survive line moves, which is
+    what keeps a verdict attached to its defect -- but it also means the
+    citation beside it can rot without anything noticing, and every note in
+    these files argues from that citation. Since benchmark targets are pinned
+    by SHA, a disagreement is never innocent drift: either the pin moved
+    without a re-read, or the entry was wrong when it was written.
 """
 
 from __future__ import annotations
@@ -62,6 +71,24 @@ class FamilyScore:
         return self.correct / self.reported if self.reported else 1.0
 
 
+@dataclass(frozen=True, slots=True)
+class Misfiled:
+    """A verdict that no longer describes the finding it is attached to."""
+
+    entry: TriageEntry
+    finding: Finding
+
+    @property
+    def recorded(self) -> str:
+        return f"{self.entry.rule_id} at {self.entry.file}:{self.entry.line}"
+
+    @property
+    def actual(self) -> str:
+        return (
+            f"{self.finding.rule_id} at {self.finding.location.file}:{self.finding.location.line}"
+        )
+
+
 @dataclass(slots=True)
 class BenchmarkReport:
     """What the benchmark found, and whether that is acceptable."""
@@ -72,6 +99,7 @@ class BenchmarkReport:
     untriaged: list[Finding] = field(default_factory=list)
     regressed: list[TriageEntry] = field(default_factory=list)
     resolved: list[TriageEntry] = field(default_factory=list)
+    misfiled: list[Misfiled] = field(default_factory=list)
     scores: list[FamilyScore] = field(default_factory=list)
     rule_errors: dict[str, str] = field(default_factory=dict)
     parse_errors: dict[str, str] = field(default_factory=dict)
@@ -99,13 +127,20 @@ class BenchmarkReport:
 
     @property
     def ok(self) -> bool:
-        return not (self.untriaged or self.regressed or self.over_budget or self.rule_errors)
+        return not (
+            self.untriaged
+            or self.regressed
+            or self.misfiled
+            or self.over_budget
+            or self.rule_errors
+        )
 
     def summary(self) -> str:
         return (
             f"{self.target}: {self.python_files} files · {self.reported} reported · "
             f"precision {self.precision_display} · {len(self.untriaged)} untriaged · "
-            f"{len(self.regressed)} regressed · {len(self.rule_errors)} rule errors"
+            f"{len(self.regressed)} regressed · {len(self.misfiled)} misfiled · "
+            f"{len(self.rule_errors)} rule errors"
         )
 
 
@@ -116,6 +151,7 @@ def compare(result: RunResult, triage: Triage) -> BenchmarkReport:
 
     counts: dict[str, Counter[Verdict]] = defaultdict(Counter)
     untriaged: list[Finding] = []
+    misfiled: list[Misfiled] = []
 
     for finding in result.findings:
         seen.add(finding.fingerprint)
@@ -124,6 +160,12 @@ def compare(result: RunResult, triage: Triage) -> BenchmarkReport:
             untriaged.append(finding)
             continue
         counts[finding.family.value][entry.verdict] += 1
+        if (entry.rule_id, entry.file, entry.line) != (
+            finding.rule_id,
+            finding.location.file,
+            finding.location.line,
+        ):
+            misfiled.append(Misfiled(entry=entry, finding=finding))
 
     # A verdict whose finding no longer appears. Only correct detections count
     # as a regression -- a false positive that stopped firing is a fix, not a
@@ -156,6 +198,7 @@ def compare(result: RunResult, triage: Triage) -> BenchmarkReport:
         untriaged=untriaged,
         regressed=sorted(regressed, key=lambda e: (e.file, e.line, e.rule_id)),
         resolved=sorted(resolved, key=lambda e: (e.file, e.line, e.rule_id)),
+        misfiled=sorted(misfiled, key=lambda m: (m.entry.file, m.entry.line, m.entry.rule_id)),
         scores=scores,
         rule_errors=dict(result.rule_errors),
         parse_errors={result.context.rel(p): msg for p, msg in result.context.parse_errors.items()},

@@ -10,6 +10,7 @@ where that difference is recorded.
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Iterator
 
 from djaudit.context import ProjectContext
@@ -22,11 +23,143 @@ from djaudit.rules._base import (
     SettingsRule,
     could_be_off,
     could_be_under,
+    entries_of,
 )
 from djaudit.settings import ResolvedSetting
 from djaudit.values import Value
 
 _HTTPS_CHECKLIST = "https://docs.djangoproject.com/en/stable/howto/deployment/checklist/#https"
+
+
+class CookieMiddlewareSetting(FlagRule):
+    """A cookie flag that only means anything while Django sets the cookie.
+
+    ``SESSION_COOKIE_SECURE`` is not read by the session framework at large; it
+    is read by ``SessionMiddleware`` at the moment it writes the header. A
+    project that removes that middleware and installs its own has moved the
+    decision into code, and the setting stops being evidence of what the
+    browser receives.
+
+    pretix is the case that pins this. It replaces both the session and CSRF
+    middleware to support per-organizer domains, and each replacement passes
+    ``secure=request.is_secure()`` and upgrades the cookie to the ``__Host-``
+    prefix over HTTPS -- stricter than the setting would have been, on a
+    project that never assigns it. Read as a settings fact, DJS-009 and DJS-010
+    called those cookies insecure and were simply wrong.
+
+    Downgrading every such project would have been the easy answer and a bad
+    one: most replacements are subclasses that call ``super()``, still read the
+    setting, and deserve the finding at full strength. So the replacement is
+    resolved and read instead, and there are three outcomes:
+
+    * it sets the flag itself -- the premise is false, and nothing is reported;
+    * it is project code that never mentions the flag -- the finding stands at
+      full confidence, and is now better evidenced than before;
+    * it cannot be found or read, being third-party -- the finding stands, with
+      the uncertainty recorded and the confidence dropped to match.
+    """
+
+    django_middleware: str = ""
+    """The stock middleware whose absence hands the decision to project code."""
+
+    cookie_kwarg: str = ""
+    """The ``set_cookie`` keyword a replacement would pass to set this flag."""
+
+    def replacement(self, group: SettingGroup) -> str | None:
+        """The entry standing in for :attr:`django_middleware`, if any.
+
+        Read per branch, because a conditionally built ``MIDDLEWARE`` is not
+        one list. pretix builds three and one of them cannot be resolved, so
+        asking ``lists_entry`` whether the whole setting contains Django's
+        middleware answers "could not tell" -- and the readable branches, which
+        both drop Django's and install pretix's, get thrown away with it.
+
+        So unreadable branches are skipped rather than allowed to veto, and the
+        evidence has to be unanimous among the ones that are left: no readable
+        branch may keep Django's middleware, and at least one must name a
+        replacement. A list that is entirely unreadable, or never assigned,
+        says nothing and leaves the rule alone.
+
+        Matched on the trailing class name. A project that subclasses
+        ``SessionMiddleware`` usually keeps the name, and one that renames it
+        is indistinguishable from an unrelated middleware -- in which case this
+        stays quiet and the rule keeps its confidence, which is the right way
+        round to be wrong.
+        """
+        view = self.views.get(group.module.dotted)
+        if view is None or not view.get("MIDDLEWARE").is_assigned:
+            return None
+        branches = [b for b in entries_of(view.get("MIDDLEWARE").value) if b is not None]
+        if not branches:
+            return None
+        if any(self.django_middleware in branch for branch in branches):
+            return None
+        name = self.django_middleware.rsplit(".", 1)[-1]
+        for branch in branches:
+            for entry in branch:
+                if isinstance(entry, str) and entry.rsplit(".", 1)[-1] == name:
+                    return entry
+        return None
+
+    def sets_the_flag(self, ctx: ProjectContext, dotted: str) -> bool | None:
+        """Whether ``dotted``'s class body passes the cookie keyword itself.
+
+        ``None`` when the class cannot be found, which is the ordinary case for
+        a middleware installed from a dependency: we are a static tool and do
+        not read site-packages.
+
+        Deliberately a keyword search over the whole class body rather than an
+        attempt to follow ``set_cookie`` calls. What matters is whether the
+        replacement has an opinion about this flag at all, and a class that
+        writes ``secure=`` anywhere in it does. Following the call properly
+        would mean resolving the response object through arbitrary code for no
+        change in the answer.
+        """
+        module, _, name = dotted.rpartition(".")
+        path = ctx.module_path(module)
+        tree = None if path is None else ctx.parse(path)
+        if tree is None:
+            return None
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == name:
+                return any(
+                    isinstance(child, ast.keyword) and child.arg == self.cookie_kwarg
+                    for child in ast.walk(node)
+                )
+        return None
+
+    def applies(self, ctx: ProjectContext, group: SettingGroup) -> bool:
+        """False once we can see the replacement setting the flag for itself.
+
+        This is the only branch that drops the finding, and it needs the
+        strongest evidence of the three: the class was found in this project's
+        own source and it passes the keyword. Anything less keeps the finding.
+        """
+        replacement = self.replacement(group)
+        if replacement is None:
+            return True
+        self._unreadable = self.sets_the_flag(ctx, replacement) is None
+        self._replacement = replacement
+        return not self.sets_the_flag(ctx, replacement)
+
+    _unreadable = False
+    _replacement = ""
+
+    def delegated(self, group: SettingGroup) -> str:
+        """Only the unreadable case weakens the finding.
+
+        A replacement we read and found silent about the flag leaves the rule
+        at full confidence -- it is better evidenced than the ordinary case,
+        not worse.
+        """
+        if not self._unreadable:
+            return ""
+        stock = self.django_middleware.rsplit(".", 1)[-1]
+        return (
+            f"{self._replacement} stands in for Django's {stock} and is not part of "
+            f"this project, so whether it sets the cookie's {self.cookie_kwarg} flag "
+            f"itself could not be read"
+        )
 
 
 @register
@@ -89,13 +222,16 @@ class SslRedirectDisabled(SecurityMiddlewareSetting, FlagRule):
 
 
 @register
-class SessionCookieNotSecure(FlagRule):
+class SessionCookieNotSecure(CookieMiddlewareSetting):
     """``SESSION_COOKIE_SECURE`` is off, so the session cookie travels over HTTP."""
 
     setting = "SESSION_COOKIE_SECURE"
+    cookie_kwarg = "secure"
+    django_middleware = "django.contrib.sessions.middleware.SessionMiddleware"
     ceiling = Confidence.CERTAIN
-    """Nothing in front of Django changes this. The flag sets an attribute on the
-    cookie, and the browser is what acts on it."""
+    """No proxy changes this. The flag sets an attribute on the cookie and the
+    browser is what acts on it -- but the middleware that writes the cookie can,
+    which is what :class:`CookieMiddlewareSetting` watches for."""
 
     consequence = (
         "the browser will send the session cookie over plain HTTP, where anyone on "
@@ -129,18 +265,24 @@ class SessionCookieNotSecure(FlagRule):
             "https://cwe.mitre.org/data/definitions/614.html",
         ),
         limitations=(
-            "Nothing in front of Django changes this one, so the value is the whole story -- "
-            "but a session backend that does not use a cookie at all makes the setting moot, "
+            "A session backend that does not use a cookie at all makes the setting moot, "
             "and that is not checked.",
+            "Only speaks for Django while Django sets the cookie. A project that installs "
+            "its own session or CSRF middleware in place of the stock one is reported "
+            "tentatively instead of firmly, with the replacement named -- whether that "
+            "replacement sets the flag itself is not read, only that the decision has "
+            "moved somewhere a settings rule cannot follow.",
         ),
     )
 
 
 @register
-class CsrfCookieNotSecure(FlagRule):
+class CsrfCookieNotSecure(CookieMiddlewareSetting):
     """``CSRF_COOKIE_SECURE`` is off, so the CSRF token travels over HTTP."""
 
     setting = "CSRF_COOKIE_SECURE"
+    cookie_kwarg = "secure"
+    django_middleware = "django.middleware.csrf.CsrfViewMiddleware"
     ceiling = Confidence.CERTAIN
 
     consequence = (
@@ -176,15 +318,22 @@ class CsrfCookieNotSecure(FlagRule):
             "Reports the flag, not the deployment. A site served only over HTTPS with HSTS "
             "already in force is much less exposed than the finding's severity suggests, and "
             "neither of those is visible from the setting.",
+            "Only speaks for Django while Django sets the cookie. A project that installs "
+            "its own session or CSRF middleware in place of the stock one is reported "
+            "tentatively instead of firmly, with the replacement named -- whether that "
+            "replacement sets the flag itself is not read, only that the decision has "
+            "moved somewhere a settings rule cannot follow.",
         ),
     )
 
 
 @register
-class SessionCookieNotHttpOnly(FlagRule):
+class SessionCookieNotHttpOnly(CookieMiddlewareSetting):
     """``SESSION_COOKIE_HTTPONLY`` is off, so scripts can read the session cookie."""
 
     setting = "SESSION_COOKIE_HTTPONLY"
+    cookie_kwarg = "httponly"
+    django_middleware = "django.contrib.sessions.middleware.SessionMiddleware"
     ceiling = Confidence.CERTAIN
 
     consequence = (
@@ -220,6 +369,11 @@ class SessionCookieNotHttpOnly(FlagRule):
             "Django's default is already True, so this can only fire on an explicit assignment. "
             "A project that reads the session cookie from JavaScript through some other "
             "mechanism is not detected.",
+            "Only speaks for Django while Django sets the cookie. A project that installs "
+            "its own session or CSRF middleware in place of the stock one is reported "
+            "tentatively instead of firmly, with the replacement named -- whether that "
+            "replacement sets the flag itself is not read, only that the decision has "
+            "moved somewhere a settings rule cannot follow.",
         ),
     )
 

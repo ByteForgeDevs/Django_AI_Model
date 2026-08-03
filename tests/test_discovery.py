@@ -36,6 +36,48 @@ class TestRoleClassification:
         path = Path("conf/production/__init__.py")
         assert classify_settings_role(path) is SettingsRole.PRODUCTION
 
+    def test_a_test_directory_names_the_role_when_the_file_does_not(self, tmp_path):
+        """pretix keeps real test settings in ``pretix/testutils/settings.py``.
+
+        The stem reads as an ordinary primary settings module, so before the
+        directory was consulted its deliberate ``DEBUG = True`` and MD5 password
+        hasher were reported as critical production findings.
+        """
+        root = tmp_path / "project"
+        path = root / "src/pretix/testutils/settings.py"
+        path.parent.mkdir(parents=True)
+        path.touch()
+        assert classify_settings_role(path, root) is SettingsRole.TEST
+        assert classify_settings_role(path) is SettingsRole.PRIMARY
+
+    def test_the_filename_outranks_the_directory(self, tmp_path):
+        """``tests/production.py`` is still about production."""
+        root = tmp_path / "project"
+        path = root / "tests/production.py"
+        path.parent.mkdir(parents=True)
+        path.touch()
+        assert classify_settings_role(path, root) is SettingsRole.PRODUCTION
+
+    def test_directories_above_the_root_are_not_read(self, tmp_path):
+        """A checkout that happens to live under ``/tmp/test/`` is not test code.
+
+        This is the direction that hides findings, so it is the one worth
+        pinning: only the path below the project root may downgrade a module.
+        """
+        root = tmp_path / "test" / "project"
+        path = root / "myproj/settings.py"
+        path.parent.mkdir(parents=True)
+        path.touch()
+        assert classify_settings_role(path, root) is SettingsRole.PRIMARY
+
+    def test_a_directory_cannot_promote_to_production(self, tmp_path):
+        """Only test and development are inferred; the rest need a filename."""
+        root = tmp_path / "project"
+        path = root / "deploy/myproj.py"
+        path.parent.mkdir(parents=True)
+        path.touch()
+        assert classify_settings_role(path, root) is SettingsRole.UNKNOWN
+
     def test_unrecognised_names_stay_production_reaching(self):
         """Guessing wrong is asymmetric: mislabelling prod as dev hides findings."""
         role = classify_settings_role(Path("weird_name.py"))
@@ -139,3 +181,103 @@ class TestRobustness:
         ctx = build_context(vulnerable_project)
         path = vulnerable_project / "config" / "settings" / "base.py"
         assert ctx.parse(path) is ctx.parse(path)
+
+
+class TestModulePath:
+    """The inverse of ``dotted_path``, which the cookie rules use to read a
+    middleware class named only as a string in ``MIDDLEWARE``."""
+
+    def build(self, tmp_path: Path, *relative: str) -> Path:
+        root = tmp_path / "project"
+        for name in relative:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("")
+        return root
+
+    def test_finds_a_module_by_its_dotted_name(self, tmp_path):
+        root = self.build(tmp_path, "myproj/mw.py")
+        ctx = build_context(root)
+        assert ctx.module_path("myproj.mw") == root / "myproj/mw.py"
+
+    def test_a_src_layout_resolves_without_its_import_root(self, tmp_path):
+        """pretix's shape: modules live under ``src/`` and never say so."""
+        root = self.build(tmp_path, "src/pretix/multidomain/middlewares.py")
+        ctx = build_context(root)
+        found = ctx.module_path("pretix.multidomain.middlewares")
+        assert found == root / "src/pretix/multidomain/middlewares.py"
+
+    def test_an_ambiguous_suffix_resolves_to_nothing(self, tmp_path):
+        """Two apps ending in ``.models`` must not resolve to whichever was walked first."""
+        root = self.build(tmp_path, "a/app/models.py", "b/app/models.py")
+        ctx = build_context(root)
+        assert ctx.module_path("app.models") is None
+
+    def test_a_module_that_is_not_ours_is_not_invented(self, tmp_path):
+        ctx = build_context(self.build(tmp_path, "myproj/mw.py"))
+        assert ctx.module_path("django.contrib.sessions.middleware") is None
+
+
+class TestDiagnostics:
+    """A run that audits nothing must say so.
+
+    The failure this guards against is the quiet one: djaudit walked 951 files,
+    found no settings module, ran no DJS rule, printed "no findings" in green
+    and exited 0. Every assertion here is about refusing to do that.
+    """
+
+    def build(self, tmp_path: Path, files: dict[str, str]) -> Path:
+        root = tmp_path / "proj"
+        for name, source in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source)
+        return root
+
+    def test_a_normal_project_is_quiet(self, vulnerable_project):
+        assert build_context(vulnerable_project).diagnostics == ()
+
+    def test_class_based_settings_are_named_not_ignored(self, tmp_path):
+        root = self.build(
+            tmp_path,
+            {
+                "manage.py": "import os\n",
+                "conf/settings.py": (
+                    "from configurations import Configuration\n\n"
+                    "class Base(Configuration):\n"
+                    "    SECRET_KEY = 'x'\n"
+                    "    INSTALLED_APPS = []\n"
+                    "    DEBUG = True\n"
+                ),
+            },
+        )
+        ctx = build_context(root)
+        assert not ctx.settings_modules
+        diagnostic = ctx.diagnostics[0]
+        assert diagnostic.code == "settings-in-class-body"
+        assert diagnostic.blocking
+        assert "django-configurations" in diagnostic.detail
+        assert "INSTALLED_APPS" in diagnostic.detail
+
+    def test_a_settings_shaped_file_with_nothing_in_it_is_still_reported(self, tmp_path):
+        root = self.build(tmp_path, {"manage.py": "import os\n", "conf/settings.py": "X = 1\n"})
+        ctx = build_context(root)
+        assert [d.code for d in ctx.diagnostics] == ["no-settings-module"]
+
+    def test_a_reusable_app_stays_quiet(self, tmp_path):
+        """No manage.py and no settings file: nothing was missed, so say nothing."""
+        root = self.build(tmp_path, {"widgets/models.py": "import django\n"})
+        assert build_context(root).diagnostics == ()
+
+    def test_settings_that_parse_are_preferred_over_the_diagnostic(self, tmp_path):
+        root = self.build(
+            tmp_path,
+            {
+                "manage.py": "import os\n",
+                "conf/settings.py": "SECRET_KEY = 'x'\nINSTALLED_APPS = []\n",
+                "conf/legacy.py": "class Old:\n    SECRET_KEY = 'y'\n",
+            },
+        )
+        ctx = build_context(root)
+        assert ctx.settings_modules
+        assert ctx.diagnostics == ()

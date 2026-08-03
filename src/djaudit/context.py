@@ -6,8 +6,13 @@ import ast
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from djaudit.models import Location
+
+if TYPE_CHECKING:
+    from djaudit.api.discovery import ApiSurface
+    from djaudit.graph.nodes import ModelGraph
 
 MAX_SNIPPET_LENGTH = 240
 
@@ -47,6 +52,29 @@ class SettingsModule:
     """True when ``DJANGO_SETTINGS_MODULE`` points here."""
 
 
+@dataclass(frozen=True, slots=True)
+class Diagnostic:
+    """Something about the *analysis* that the user must be told.
+
+    Distinct from a finding, and deliberately not one. A finding says the
+    project has a problem; a diagnostic says djaudit could not see enough of the
+    project to judge. Conflating them would let a blind spot be silenced with a
+    baseline entry or a ``# djaudit: ignore`` comment, which is precisely the
+    outcome to avoid: the tool would then report a confident, permanent, and
+    entirely uninformed all-clear.
+    """
+
+    code: str
+    message: str
+    """One line, stating what could not be analysed."""
+
+    detail: str
+    """Why it happened and what the user can do about it."""
+
+    blocking: bool = True
+    """Whether the run should exit non-zero because its coverage is incomplete."""
+
+
 @dataclass
 class ProjectContext:
     """Everything a static-tier rule needs, with parsing cached across rules.
@@ -62,12 +90,78 @@ class ProjectContext:
     settings_entrypoint: str | None = None
     settings_modules: tuple[SettingsModule, ...] = ()
     django_version: str | None = None
+    diagnostics: tuple[Diagnostic, ...] = ()
+    """Gaps in what could be analysed. Reported before findings, never as one."""
+
     live: bool = False
     """Whether the target's virtualenv is available for live-tier rules."""
 
     _trees: dict[Path, ast.Module | None] = field(default_factory=dict, repr=False)
     _lines: dict[Path, list[str]] = field(default_factory=dict, repr=False)
+    _model_graph: ModelGraph | None = field(default=None, repr=False)
+    _api_surface: ApiSurface | None = field(default=None, repr=False)
+    _modules: dict[str, Path] | None = field(default=None, repr=False)
     parse_errors: dict[Path, str] = field(default_factory=dict, repr=False)
+
+    @property
+    def model_graph(self) -> ModelGraph:
+        """The project's models, reconstructed once and shared by every rule.
+
+        Built lazily because most settings rules never look at a model, and
+        walking every app's ``models`` module to answer a question nobody asked
+        would make the cheap half of a run as slow as the expensive half.
+        """
+        if self._model_graph is None:
+            # Imported here because the graph reads AUTH_USER_MODEL through the
+            # settings resolver, which needs this class. The cycle is real and
+            # deferring the import is the fix, not a workaround for one.
+            from djaudit.graph.builder import build_model_graph  # noqa: PLC0415
+
+            self._model_graph = build_model_graph(self)
+        return self._model_graph
+
+    @property
+    def api_surface(self) -> ApiSurface:
+        """Serializers, views, routes and querysets, resolved once per run.
+
+        Lazy for the same reason the model graph is: a project with no DRF pays
+        for one pass over the class index and nothing more, and a run that asks
+        only about settings never triggers it at all.
+        """
+        if self._api_surface is None:
+            from djaudit.api import build_api_surface  # noqa: PLC0415  (cycle)
+
+            self._api_surface = build_api_surface(self, self.model_graph)
+        return self._api_surface
+
+    def module_path(self, dotted: str) -> Path | None:
+        """The file a dotted module name refers to, or ``None`` if it is not ours.
+
+        The inverse of :func:`djaudit.discovery.dotted_path`, built once and
+        shared. ``None`` is the ordinary answer for anything installed from a
+        dependency: this is a static tool and does not read site-packages, so
+        "not in this project" and "does not exist" are the same answer here.
+        """
+        if self._modules is None:
+            # Imported here rather than at module scope because discovery
+            # constructs this class, so the cycle is real.
+            from djaudit.discovery import dotted_path  # noqa: PLC0415
+
+            self._modules = {dotted_path(self.root, path): path for path in self.python_files}
+        exact = self._modules.get(dotted)
+        if exact is not None:
+            return exact
+        # A src/ layout names modules from a directory that is not the
+        # repository root, so pretix's "pretix.multidomain.middlewares" is
+        # indexed here as "src.pretix.multidomain.middlewares" and an exact
+        # lookup misses every module in the project. Falling back to a suffix
+        # match fixes that for any such layout without needing to guess where
+        # the import root is -- and only when exactly one module can be meant,
+        # because two apps ending in ".models" must never resolve to whichever
+        # was walked first.
+        suffix = f".{dotted}"
+        matches = [path for name, path in self._modules.items() if name.endswith(suffix)]
+        return matches[0] if len(matches) == 1 else None
 
     def rel(self, path: Path) -> str:
         """POSIX path relative to the project root, so findings stay portable."""

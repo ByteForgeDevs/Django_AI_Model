@@ -1,0 +1,610 @@
+"""What a model is, once we have read it out of the source.
+
+These are deliberately plain records. The builder fills them in, the graph
+queries read them, and rules consume both. Nothing here parses anything; the
+separation is what keeps the extraction testable one concern at a time.
+"""
+
+from __future__ import annotations
+
+import ast
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from djaudit.graph.queries import RelationPath
+
+DJANGO_MODEL_BASES = frozenset(
+    {
+        "models.Model",
+        "django.db.models.Model",
+        "db.models.Model",
+        "Model",
+    }
+)
+"""How ``django.db.models.Model`` gets written in practice.
+
+Bare ``Model`` is in the list because ``from django.db.models import Model`` is
+legal and occasionally used. It is also the name of plenty of things that are
+not Django models, so the builder only accepts it when the module imports it
+from Django — the string alone is not evidence.
+"""
+
+
+@dataclass(slots=True)
+class RelationEdge:
+    """One relation, from the model that declares it to the model it names.
+
+    Kept separate from the field because a relation has two ends and the
+    reverse one is a property of the *target*. Keeping edges as their own
+    objects is what lets the graph be walked in either direction.
+    """
+
+    source: str
+    """Label of the model declaring the field."""
+
+    field_name: str
+    kind: str
+    """``ForeignKey``, ``OneToOneField``, ``ManyToManyField``…"""
+
+    target_ref: str | None
+    """The other model exactly as written -- ``"auth.User"``, ``"Order"``,
+    ``"self"`` -- or ``None`` when it came from ``settings.AUTH_USER_MODEL``
+    or from an expression we could not read."""
+
+    lineno: int
+    end_lineno: int
+    target: str | None = None
+    """The resolved label, or ``None`` for a model we do not have. Django's own
+    ``auth.User`` is the common case: real, referenced constantly, and not in
+    the repository."""
+
+    is_self: bool = False
+    via_user_setting: bool = False
+    """Written as ``settings.AUTH_USER_MODEL``, which is the correct way."""
+
+    points_at_user: bool = False
+    """Whether this relation reaches the project's user model, however it was
+    spelled. This is the single fact every authorization rule is built on."""
+
+    inherited_from: str | None = None
+    """The abstract base or concrete parent that declared this relation, when
+    it was not declared on :attr:`source` itself."""
+
+    implicit: bool = False
+    """Django created this relation rather than the project declaring it --
+    the ``<parent>_ptr`` link of multi-table inheritance."""
+
+    @property
+    def is_multi_valued(self) -> bool:
+        """The far side is many rows, so this hop cannot express ownership."""
+        return self.kind in self.MULTI_VALUED
+
+    MULTI_VALUED = frozenset({"ManyToManyField", "GenericRelation"})
+    """Kinds where the far side is a set of rows rather than one row.
+
+    ``GenericRelation`` belongs here despite being declared like a field: it is
+    the reverse side of a ``GenericForeignKey``, so it says other rows point at
+    this one. NetBox declares 397 of them, and treating them as forward links
+    makes almost every model look owned by whoever last ran a job against it.
+    """
+
+    null: bool = False
+    """The foreign key is nullable, so a row may point at nothing. Scoping a
+    queryset on a path through one silently drops the rows that do."""
+
+    on_delete: str | None = None
+    through: str | None = None
+
+    related_name: str | None = None
+    """``related_name`` exactly as written, placeholders and all."""
+
+    related_query_name: str | None = None
+    symmetrical: bool | None = None
+    """``ManyToManyField(symmetrical=...)``. ``None`` means Django decides, and
+    Django decides ``True`` for a relation to ``self``."""
+
+    accessor: str | None = None
+    """The attribute this relation adds to the *target* model.
+
+    ``None`` when Django adds nothing: a ``related_name`` ending in ``+``, or a
+    symmetrical self-referential many-to-many. Following the reverse side of a
+    relation that does not exist is how a query-path rule invents an ORM error.
+    """
+
+    query_name: str | None = None
+    """The name that spans this relation in a ``filter()`` from the target.
+
+    Not the same as :attr:`accessor`: ``related_query_name`` overrides it
+    independently, and Django's fallback is the bare model name with no
+    ``_set``.
+    """
+
+    hidden: bool = False
+    """``related_name`` ends in ``+``, so there is no reverse relation."""
+
+    @property
+    def is_multi(self) -> bool:
+        """Whether following this relation forwards can yield many rows."""
+        return self.kind in ("ManyToManyField", "GenericRelation")
+
+    @property
+    def is_multi_reverse(self) -> bool:
+        """Whether following it *backwards* can yield many rows.
+
+        True for everything except a one-to-one, and it is what decides the
+        ``_set`` suffix: many books per author gives ``author.book_set``, one
+        profile per account gives ``account.profile``.
+        """
+        return self.kind != "OneToOneField"
+
+    @property
+    def resolved(self) -> bool:
+        return self.target is not None
+
+
+@dataclass(slots=True)
+class FieldNode:
+    """One field declared on a model.
+
+    The three-way distinction between *absent*, *present but unreadable* and
+    *present and false* is what :attr:`unreadable` exists for. A boolean cannot
+    hold it, and collapsing it is how a tool ends up reporting that a field has
+    no default when what it really has is ``default=timezone.now``.
+    """
+
+    name: str
+    kind: str
+    """The field class, e.g. ``CharField`` — the tail of the resolved name."""
+
+    dotted: str
+    """The field class resolved through the module's imports, as far as we can."""
+
+    lineno: int
+    end_lineno: int
+    is_django: bool = True
+    """False for a field this project or a third-party package defines. Such a
+    field still behaves like one, but we cannot know what its own arguments
+    mean, so a rule may want to say less about it."""
+
+    is_relation: bool = False
+
+    null: bool = False
+    blank: bool = False
+    unique: bool = False
+    db_index: bool = False
+    primary_key: bool = False
+    editable: bool = True
+    auto_now: bool = False
+    auto_now_add: bool = False
+
+    max_length: int | None = None
+    has_default: bool = False
+    default: Any = None
+    has_choices: bool = False
+    choices: Any = None
+
+    unreadable: tuple[str, ...] = ()
+    """Keywords that were given but could not be evaluated statically.
+
+    A rule that cares about one of these should either lower its confidence or
+    stay quiet. The value stored alongside is Django's own default, so the
+    field remains usable for every question that does not turn on that keyword.
+    """
+
+    args: tuple[ast.expr, ...] = field(default_factory=tuple, repr=False, compare=False)
+    kwargs: dict[str, ast.expr] = field(default_factory=dict, repr=False, compare=False)
+    """Raw arguments, kept so relation resolution does not re-walk the tree."""
+
+    node: ast.Call | None = field(default=None, repr=False, compare=False)
+
+    def knows(self, keyword: str) -> bool:
+        """Whether this field's value for ``keyword`` is something we read.
+
+        The honest guard for any rule about to make a claim that turns on one
+        argument.
+        """
+        return keyword not in self.unreadable
+
+
+@dataclass(slots=True, frozen=True)
+class ManagerNode:
+    """One manager attached to a model.
+
+    Every ORM query starts at one of these, and on a real project it is rarely
+    Django's own: NetBox reaches most of its models through
+    ``RestrictedQuerySet.as_manager()``, whose ``restrict()`` is how permission
+    scoping happens. A rule that assumes ``objects`` is a plain ``Manager``
+    calls all of that unscoped.
+    """
+
+    name: str
+    """The attribute it is bound to -- ``objects`` unless the model says
+    otherwise."""
+
+    manager_class: str
+    dotted: str
+    queryset_class: str | None = None
+    """The queryset behind ``QuerySet.as_manager()`` or
+    ``Manager.from_queryset(QuerySet)()``, which is where any narrowing lives."""
+
+    is_plain: bool = False
+    """Django's own ``Manager``, adding nothing."""
+
+    implicit: bool = False
+    """Django created it because the model declared none."""
+
+    narrows: bool = False
+    """This manager or its queryset overrides ``get_queryset``, so it may
+    return less than the table. A soft-delete manager hiding deleted rows makes
+    a rule counting its results measure the wrong set."""
+
+    lineno: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class IndexNode:
+    """One entry of ``Meta.indexes``.
+
+    An index is the difference between a filter that scans a table and one that
+    does not, so a performance rule asking "is this column indexed?" reads
+    these. It has to distinguish the kinds, though: a ``condition`` makes the
+    index partial and it only serves queries carrying the same predicate, and
+    an expression index serves ``Lower("email")`` rather than ``email``.
+    """
+
+    fields: tuple[str, ...] = ()
+    """Column names, in order. Empty for an expression index."""
+
+    name: str | None = None
+    conditional: bool = False
+    """Has a ``condition``, so it only covers rows matching that predicate."""
+
+    expressions: bool = False
+    """Built from expressions rather than plain columns."""
+
+    lineno: int = 0
+
+    @property
+    def covers_exactly(self) -> tuple[str, ...]:
+        """The fields a plain equality filter can rely on this index for.
+
+        A partial or expression index covers nothing unconditionally, and
+        treating one as though it did is how a rule reports a table scan
+        resolved.
+        """
+        if self.conditional or self.expressions:
+            return ()
+        return tuple(f.lstrip("-") for f in self.fields)
+
+
+@dataclass(slots=True, frozen=True)
+class ConstraintNode:
+    """One entry of ``Meta.constraints``.
+
+    ``UniqueConstraint`` also creates an index, which is why a uniqueness
+    declaration answers a performance question. ``CheckConstraint`` does not,
+    and conflating them credits a model with an index it has not got.
+    """
+
+    kind: str
+    """The class as written, e.g. ``UniqueConstraint`` or ``CheckConstraint``."""
+
+    fields: tuple[str, ...] = ()
+    name: str | None = None
+    conditional: bool = False
+    lineno: int = 0
+
+    @property
+    def is_unique(self) -> bool:
+        return self.kind == "UniqueConstraint"
+
+
+@dataclass(slots=True)
+class ModelNode:
+    """One model class found in the source.
+
+    ``app_label`` follows Django's own rule -- the last component of the
+    application package -- unless an ``AppConfig`` overrides it, which the
+    builder resolves. Together with :attr:`name` it forms the label Django uses
+    in string references (``"dcim.Device"``), which is how relations are
+    resolved.
+    """
+
+    name: str
+    app_label: str
+    path: Path
+    """Absolute path of the file the class is written in."""
+
+    lineno: int
+    end_lineno: int
+    bases: tuple[str, ...] = ()
+    """Base classes exactly as written, so ``models.Model`` stays distinct from
+    a project's own ``BaseModel``. Resolution happens later."""
+
+    is_abstract: bool = False
+    """``Meta.abstract``. An abstract model has no table and cannot be queried,
+    so most rules should skip it -- but its fields are inherited, so the graph
+    still has to carry it."""
+
+    is_proxy: bool = False
+    """``Meta.proxy``. Shares its parent's table; a different Python class over
+    the same rows."""
+
+    default_related_name: str | None = None
+    """``Meta.default_related_name``, which supplies ``related_name`` for every
+    relation pointing *at* models of this class that does not set its own."""
+
+    swappable: str | None = None
+    """The setting name from ``Meta.swappable``, normally ``AUTH_USER_MODEL``.
+    This is how Django's own ``User`` declares that a project may replace it,
+    and how we recognise a custom user model without importing anything."""
+
+    managed: bool = True
+    """``Meta.managed``. ``False`` means Django does not own the table, which
+    changes what a migration rule may say about it."""
+
+    db_table: str = ""
+    """The table name, explicit or derived.
+
+    Django derives ``app_label_modelname`` when ``Meta.db_table`` is unset, so
+    a rule matching a table name out of raw SQL has to know both forms.
+    Abstract models keep this empty: they have no table.
+    """
+
+    db_table_explicit: bool = False
+    """Whether :attr:`db_table` was written down rather than derived."""
+
+    ordering: tuple[str, ...] = ()
+    """``Meta.ordering`` as written, keeping the ``-`` prefix.
+
+    Default ordering applies to every query, which makes it a performance
+    concern rather than a formatting one: unindexed default ordering is a sort
+    on every page, and ordering that spans ``__`` adds a join.
+    """
+
+    ordering_unreadable: bool = False
+    """``Meta.ordering`` exists but holds something other than plain strings,
+    normally ``F()`` expressions. The distinction matters because "no ordering"
+    and "ordering we could not read" must not produce the same finding."""
+
+    unique_together: tuple[tuple[str, ...], ...] = ()
+    """``Meta.unique_together``, normalised to a tuple of tuples the way
+    ``django.db.models.options.normalize_together`` does -- a bare
+    ``("a", "b")`` is one constraint over two columns, not two constraints."""
+
+    indexes: tuple[IndexNode, ...] = ()
+    constraints: tuple[ConstraintNode, ...] = ()
+
+    base_manager_name: str | None = None
+    default_manager_name: str | None = None
+    """``Meta.default_manager_name``. Which manager ``_default_manager`` is, and
+    therefore which queryset related lookups start from."""
+
+    mro: tuple[str, ...] = ()
+    """Ancestors nearest-first, resolved across modules. Empty for a class whose
+    only base is ``models.Model``."""
+
+    parents: tuple[str, ...] = ()
+    """Concrete ancestors -- multi-table inheritance. Each one keeps its own
+    table and its columns are reached over a join, not stored here."""
+
+    inherited: dict[str, FieldNode] = field(default_factory=dict)
+    """Fields this class gets from its abstract bases, plus the implicit
+    ``<parent>_ptr`` of multi-table inheritance. Kept apart from
+    :attr:`fields` so "declared here" stays answerable."""
+
+    managers: dict[str, ManagerNode] = field(default_factory=dict)
+    """Managers in declaration order, which is Django's tie-breaker for which
+    one is the default."""
+
+    inheritance_applied: bool = field(default=False, repr=False, compare=False)
+
+    meta_bases: tuple[str, ...] = ()
+    """Base classes of the inner ``class Meta``, as written. A ``Meta`` that
+    inherits from another carries options we cannot see in this class body."""
+
+    node: ast.ClassDef | None = field(default=None, repr=False, compare=False)
+    """The class body, kept so later passes can re-read it without re-parsing."""
+
+    relations: list[RelationEdge] = field(default_factory=list)
+    """Relations declared on this class, in declaration order."""
+
+    fields: dict[str, FieldNode] = field(default_factory=dict)
+    """Fields declared on this class, in declaration order.
+
+    Inherited fields are not included: they belong to the class that declared
+    them, and flattening an inheritance chain needs the whole project, which is
+    substep 2.1.6.
+    """
+
+    @property
+    def label(self) -> str:
+        """``app_label.ModelName`` — the identifier Django uses everywhere."""
+        return f"{self.app_label}.{self.name}"
+
+    @property
+    def default_manager(self) -> ManagerNode | None:
+        """The manager Django reaches for, following ``Options.default_manager``.
+
+        ``Meta.default_manager_name`` when it names one that exists, and
+        otherwise the first declared -- which is why declaration order is kept
+        rather than sorted.
+        """
+        named = self.managers.get(self.default_manager_name or "")
+        if named is not None:
+            return named
+        return next(iter(self.managers.values()), None)
+
+    @property
+    def base_manager(self) -> ManagerNode | None:
+        """The manager related-object lookups go through.
+
+        Deliberately not the default one: Django uses ``_base_manager`` to
+        follow a foreign key precisely so a filtered default manager cannot
+        make a related object vanish.
+        """
+        named = self.managers.get(self.base_manager_name or "")
+        if named is not None:
+            return named
+        return next(iter(self.managers.values()), None)
+
+    @property
+    def all_fields(self) -> dict[str, FieldNode]:
+        """Every field the class has, declared or inherited, declared first.
+
+        What a rule almost always wants: NetBox's models declare a handful of
+        columns each and inherit the rest, so reading only :attr:`fields`
+        misses most of the schema.
+        """
+        return {**self.fields, **self.inherited}
+
+    @property
+    def indexed_fields(self) -> frozenset[str]:
+        """Every field an unconditional index or unique constraint covers first.
+
+        Only the leading column counts: a composite index on ``(a, b)`` serves
+        a filter on ``a`` but not one on ``b`` alone, and crediting the second
+        column would silence a real table scan.
+        """
+        names: set[str] = set()
+        for fld in self.all_fields.values():
+            if fld.db_index or fld.unique or fld.primary_key:
+                names.add(fld.name)
+        for index in self.indexes:
+            covered = index.covers_exactly
+            if covered:
+                names.add(covered[0])
+        for constraint in self.constraints:
+            if constraint.is_unique and not constraint.conditional and constraint.fields:
+                names.add(constraint.fields[0].lstrip("-"))
+        for group in self.unique_together:
+            if group:
+                names.add(group[0])
+        return frozenset(names)
+
+    @property
+    def is_concrete(self) -> bool:
+        """Whether this model has a table of its own.
+
+        Abstract models have no table. Proxies share their parent's. Both are
+        real classes a rule may need to reason about, and neither is somewhere
+        rows live.
+        """
+        return not self.is_abstract and not self.is_proxy
+
+
+@dataclass(slots=True)
+class ModelGraph:
+    """Every model in the project, indexed the way lookups actually happen.
+
+    Django refers to models three ways -- by class, by ``"app.Model"`` and by
+    bare ``"Model"`` -- and a graph that only supports one of them forces every
+    caller to reimplement the other two.
+    """
+
+    models: dict[str, ModelNode] = field(default_factory=dict)
+    """Keyed by ``app_label.ModelName``."""
+
+    user_model: str = "auth.User"
+    """``AUTH_USER_MODEL`` as the project configures it, or Django's default.
+
+    Every authorization rule in this phase is a question about ownership, and
+    ownership means a path to this model. Reading it from the settings rather
+    than assuming ``auth.User`` is what makes the rules work on the many
+    projects that swap it.
+    """
+
+    incoming: dict[str, list[RelationEdge]] = field(default_factory=dict, repr=False)
+    """Edges pointing *at* each model label.
+
+    The reverse index. Walking from a model to the things that reference it is
+    exactly how an ownership path is found, and rebuilding it per question
+    would make every graph query quadratic.
+    """
+
+    unresolved_bases: dict[str, tuple[str, ...]] = field(default_factory=dict, repr=False)
+    """Base classes we could not tie to anything, per model label.
+
+    Usually a base imported from a third-party package. Kept rather than
+    dropped because a model whose ancestry we cannot see is a model whose
+    fields we may be missing, and a rule may want to say less about it.
+    """
+
+    def __len__(self) -> int:
+        return len(self.models)
+
+    def __iter__(self) -> Iterator[ModelNode]:
+        return iter(self.models.values())
+
+    def __contains__(self, label: str) -> bool:
+        return label in self.models
+
+    def get(self, ref: str, *, app_label: str | None = None) -> ModelNode | None:
+        """Resolve a model reference the way Django does.
+
+        ``"app.Model"`` is exact. A bare ``"Model"`` is looked up in
+        ``app_label`` first -- which is what Django does inside an application
+        -- and only then across the project, and an ambiguous bare name
+        resolves to nothing rather than to a guess. Two apps with a ``Comment``
+        each is a normal thing for a project to have, and picking one at random
+        would put every downstream finding on the wrong model.
+        """
+        if "." in ref:
+            return self.models.get(ref)
+        if app_label is not None:
+            local = self.models.get(f"{app_label}.{ref}")
+            if local is not None:
+                return local
+        matches = [m for m in self.models.values() if m.name == ref]
+        return matches[0] if len(matches) == 1 else None
+
+    def by_app(self, app_label: str) -> list[ModelNode]:
+        return sorted(
+            (m for m in self.models.values() if m.app_label == app_label),
+            key=lambda m: m.name,
+        )
+
+    @property
+    def apps(self) -> list[str]:
+        return sorted({m.app_label for m in self.models.values()})
+
+    @property
+    def concrete(self) -> list[ModelNode]:
+        """Models that own a table, in label order."""
+        return sorted((m for m in self.models.values() if m.is_concrete), key=lambda m: m.label)
+
+    def relation_path(self, source: str, target: str, **kwargs: int) -> RelationPath | None:
+        """The shortest forward route between two models, or ``None``."""
+        from djaudit.graph.queries import relation_path  # noqa: PLC0415  (cycle)
+
+        return relation_path(self, source, target, **kwargs)
+
+    def path_to_user(self, model: str, **kwargs: object) -> RelationPath | None:
+        """How a row of ``model`` reaches the user who owns it."""
+        from djaudit.graph.queries import path_to_user  # noqa: PLC0415  (cycle)
+
+        return path_to_user(self, model, **kwargs)  # type: ignore[arg-type]
+
+    def is_user_owned(self, model: str, **kwargs: object) -> bool:
+        """Whether rows of ``model`` belong to a user at all."""
+        from djaudit.graph.queries import is_user_owned  # noqa: PLC0415  (cycle)
+
+        return is_user_owned(self, model, **kwargs)  # type: ignore[arg-type]
+
+    def reachable_fields(self, model: str, **kwargs: object) -> dict[str, FieldNode]:
+        """Every field reachable from ``model``, keyed by its ORM lookup path."""
+        from djaudit.graph.queries import reachable_fields  # noqa: PLC0415  (cycle)
+
+        return reachable_fields(self, model, **kwargs)  # type: ignore[arg-type]
+
+    def add(self, model: ModelNode) -> None:
+        """Insert a model, keeping the first definition of a duplicated label.
+
+        A repository can legitimately contain two classes with the same label --
+        a vendored copy, a migration test app -- and the alternative to keeping
+        one is a crash on a project we were asked to audit.
+        """
+        self.models.setdefault(model.label, model)
