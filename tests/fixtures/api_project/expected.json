@@ -24,6 +24,10 @@
     {
       "rule_id": "DJS-017",
       "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJS-018",
+      "file": "config/settings.py"
     }
   ]
 }

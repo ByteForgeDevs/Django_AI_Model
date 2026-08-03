@@ -17,6 +17,7 @@ from djaudit.registry import RuleMeta, register
 from djaudit.rules._base import (
     InsecureDefaultRule,
     SettingGroup,
+    could_be_off,
     could_be_true,
 )
 from djaudit.settings import ResolvedSetting, SettingsView
@@ -597,5 +598,63 @@ class ClickjackingProtectionOff(InsecureDefaultRule):
         references=(
             "https://docs.djangoproject.com/en/stable/ref/clickjacking/",
             "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options",
+        ),
+    )
+
+
+@register
+class ContentTypeSniffingAllowed(InsecureDefaultRule):
+    """``SECURE_CONTENT_TYPE_NOSNIFF`` has been turned off."""
+
+    setting = "SECURE_CONTENT_TYPE_NOSNIFF"
+    ceiling = Confidence.FIRM
+    corrected_as = "turns it back on"
+
+    consequence = (
+        "SecurityMiddleware stops sending X-Content-Type-Options: nosniff and "
+        "browsers go back to guessing what a response really is from its bytes, "
+        "which is how a file a user uploaded gets executed as something other "
+        "than what it was served as"
+    )
+
+    def insecure(self, value: Value) -> bool:
+        # Django already ships this on. Reaching this rule means somebody wrote
+        # the line to switch it off, so the interesting question is only ever
+        # "did they", not "did they forget".
+        return could_be_off(value)
+
+    meta = RuleMeta(
+        id="DJS-018",
+        title="MIME type sniffing is allowed",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "X-Content-Type-Options: nosniff tells a browser to believe the Content-Type "
+            "it was given instead of inspecting the body and deciding for itself. Without "
+            "it, a file uploaded as a harmless type and served back can be sniffed into "
+            "HTML or JavaScript and run in the site's own origin, which turns any upload "
+            "feature into stored XSS -- and it also lets a JSON endpoint be pulled into a "
+            "<script> tag, which is the old JSON hijacking route to reading a signed-in "
+            "user's data. This is the only DJS flag Django already ships switched on, so "
+            "unlike its neighbours it can never be reported for being forgotten: the "
+            "setting has to have been written out and set to False, which usually happens "
+            "while chasing a download that a browser insisted on rendering. The fix for "
+            "that is Content-Disposition, not this."
+        ),
+        remediation=(
+            "Remove the assignment, or set SECURE_CONTENT_TYPE_NOSNIFF back to True, and "
+            "keep 'django.middleware.security.SecurityMiddleware' in MIDDLEWARE, since "
+            "that is what sends the header. If it was turned off to make a particular "
+            "response display in the browser, send that response with an explicit "
+            "Content-Type and a Content-Disposition of inline instead -- that fixes the "
+            "one response rather than every response. Serve user uploads from a separate "
+            "domain where you can, so a sniffed file lands outside this site's origin "
+            "whatever the header says."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/settings/#secure-content-type-nosniff",
+            "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options",
         ),
     )

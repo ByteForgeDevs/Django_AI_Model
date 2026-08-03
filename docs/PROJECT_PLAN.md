@@ -897,6 +897,23 @@ than after twenty-six of them disagree, is cheaper.
   two fixtures now install it and list `DJS-017` as a control.
 - **1.6.6** — `DJS-018` `SECURE_CONTENT_TYPE_NOSNIFF` disabled.
 
+  **Done.** The only flag in this family Django already ships switched on,
+  which changes what the rule can say: there is no forgotten case, so reaching
+  a finding means someone wrote the line out and set it to `False`. Both
+  targets sit at the default and stay silent, as does the whole absent case.
+
+  Worth having anyway, because of what the header stops. Without nosniff a
+  browser inspects the body and decides for itself what a response is, so a
+  file uploaded as something harmless and served back can be sniffed into
+  HTML and run in the site's own origin — any upload feature becomes stored
+  XSS. The remediation answers the reason it actually gets switched off, which
+  is a download a browser insisted on rendering: `Content-Disposition` fixes
+  that one response instead of every response.
+
+  `firm` rather than `certain`: an edge proxy commonly adds the header itself,
+  and `SecurityMiddleware` has to be installed for the setting to mean
+  anything.
+
 ### Step 1.7 — Authentication and database rules
 
 - **1.7.1** — `DJS-019` weak `PASSWORD_HASHERS` (MD5, SHA1, or unsalted) in a production-reaching module.
@@ -1300,7 +1317,7 @@ conversation.
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
-| 1 | Settings and deployment hardening | 10 | 55 | In progress — Steps 1.0–1.5 done (`DJS-001`…`DJS-012`) |
+| 1 | Settings and deployment hardening | 10 | 55 | In progress — Steps 1.0–1.6 done (`DJS-001`…`DJS-018`) |
 | 2 | Model graph and DRF authorization | 7 | 37 | Not started |
 | 3 | Performance and injection | 6 | 35 | Not started |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |

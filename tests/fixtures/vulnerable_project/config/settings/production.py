@@ -30,6 +30,9 @@ CSRF_TRUSTED_ORIGINS = ["app.example.test", "https://admin.example.test"]
 # The pre-3.5 spelling, which django-cors-headers still honours.
 CORS_ORIGIN_ALLOW_ALL = True
 
+# Switched off to make a PDF download render inline. It did not help.
+SECURE_CONTENT_TYPE_NOSNIFF = False
+
 SECURE_HSTS_SECONDS = 3600
 SECURE_HSTS_INCLUDE_SUBDOMAINS = False
 
