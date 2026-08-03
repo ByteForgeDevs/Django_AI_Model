@@ -66,6 +66,14 @@ class RelationEdge:
     """Whether this relation reaches the project's user model, however it was
     spelled. This is the single fact every authorization rule is built on."""
 
+    inherited_from: str | None = None
+    """The abstract base or concrete parent that declared this relation, when
+    it was not declared on :attr:`source` itself."""
+
+    implicit: bool = False
+    """Django created this relation rather than the project declaring it --
+    the ``<parent>_ptr`` link of multi-table inheritance."""
+
     on_delete: str | None = None
     through: str | None = None
 
@@ -319,6 +327,21 @@ class ModelNode:
     """``Meta.default_manager_name``. Which manager ``_default_manager`` is, and
     therefore which queryset related lookups start from."""
 
+    mro: tuple[str, ...] = ()
+    """Ancestors nearest-first, resolved across modules. Empty for a class whose
+    only base is ``models.Model``."""
+
+    parents: tuple[str, ...] = ()
+    """Concrete ancestors -- multi-table inheritance. Each one keeps its own
+    table and its columns are reached over a join, not stored here."""
+
+    inherited: dict[str, FieldNode] = field(default_factory=dict)
+    """Fields this class gets from its abstract bases, plus the implicit
+    ``<parent>_ptr`` of multi-table inheritance. Kept apart from
+    :attr:`fields` so "declared here" stays answerable."""
+
+    inheritance_applied: bool = field(default=False, repr=False, compare=False)
+
     meta_bases: tuple[str, ...] = ()
     """Base classes of the inner ``class Meta``, as written. A ``Meta`` that
     inherits from another carries options we cannot see in this class body."""
@@ -343,6 +366,16 @@ class ModelNode:
         return f"{self.app_label}.{self.name}"
 
     @property
+    def all_fields(self) -> dict[str, FieldNode]:
+        """Every field the class has, declared or inherited, declared first.
+
+        What a rule almost always wants: NetBox's models declare a handful of
+        columns each and inherit the rest, so reading only :attr:`fields`
+        misses most of the schema.
+        """
+        return {**self.fields, **self.inherited}
+
+    @property
     def indexed_fields(self) -> frozenset[str]:
         """Every field an unconditional index or unique constraint covers first.
 
@@ -351,7 +384,7 @@ class ModelNode:
         column would silence a real table scan.
         """
         names: set[str] = set()
-        for fld in self.fields.values():
+        for fld in self.all_fields.values():
             if fld.db_index or fld.unique or fld.primary_key:
                 names.add(fld.name)
         for index in self.indexes:

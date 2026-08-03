@@ -15,6 +15,13 @@ from typing import TYPE_CHECKING
 
 from djaudit.astutils import dotted_name, import_bindings, resolve_dotted
 from djaudit.graph.fields import extract_fields
+from djaudit.graph.inherit import apply_inheritance
+from djaudit.graph.inheritance import (
+    ClassIndex,
+    ClassRecord,
+    class_defs,
+    package_dotted,
+)
 from djaudit.graph.meta import class_attr_literal, meta_class, read_meta
 from djaudit.graph.nodes import ModelGraph, ModelNode
 from djaudit.graph.relations import DEFAULT_USER_MODEL, build_edges, resolve_edges
@@ -74,7 +81,7 @@ def _appconfig_label(apps_py: Path, ctx: ProjectContext) -> str | None:
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
             continue
-        bases = _base_names(node)
+        bases = base_names(node)
         # A project's own shared AppConfig subclass is common enough that
         # requiring a direct Django base would miss it, so a base whose name
         # ends in AppConfig counts too.
@@ -92,7 +99,7 @@ def _appconfig_label(apps_py: Path, ctx: ProjectContext) -> str | None:
     return None
 
 
-def _base_names(node: ast.ClassDef) -> list[str]:
+def base_names(node: ast.ClassDef) -> list[str]:
     """Base classes as written, skipping anything that is not a dotted name."""
     names = []
     for base in node.bases:
@@ -102,92 +109,22 @@ def _base_names(node: ast.ClassDef) -> list[str]:
     return names
 
 
-class _ModuleScanner:
-    """Finds the model classes in one module.
-
-    Kept as a class because recognising a model is iterative: a class that
-    inherits from another class *in the same module* is a model exactly when
-    that one is, and a base can be defined below its heir only in the sense
-    that Python would reject it -- so a single ordered pass over the module,
-    accumulating what it has learned, is both correct and enough.
-
-    Ancestry that crosses modules is deliberately not resolved here. It needs
-    the whole project's import graph, which is substep 2.1.6; until then such a
-    class is recorded in :attr:`unresolved` rather than silently dropped.
-    """
-
-    def __init__(self, path: Path, tree: ast.Module, app_label: str) -> None:
-        self.path = path
-        self.tree = tree
-        self.app_label = app_label
-        self.bindings = import_bindings(tree)
-        self.local_models: set[str] = set()
-        self.found: list[ModelNode] = []
-        self.unresolved: dict[str, tuple[str, ...]] = {}
-
-    def scan(self) -> None:
-        for node in self._class_defs(self.tree.body):
-            bases = tuple(_base_names(node))
-            verdict, unknown = self._classify(bases)
-            if not verdict:
-                continue
-            self.local_models.add(node.name)
-            model = self._build(node, bases)
-            self.found.append(model)
-            if unknown:
-                self.unresolved[model.label] = unknown
-
-    def _class_defs(self, body: list[ast.stmt]) -> list[ast.ClassDef]:
-        """Top-level classes, plus those inside ``if``/``try`` blocks.
-
-        Conditionally defined models are rare but real -- a model guarded by a
-        feature flag or an optional dependency still creates a table when the
-        branch is taken.
-        """
-        out: list[ast.ClassDef] = []
-        for stmt in body:
-            if isinstance(stmt, ast.ClassDef):
-                out.append(stmt)
-            elif isinstance(stmt, ast.If):
-                out.extend(self._class_defs(stmt.body))
-                out.extend(self._class_defs(stmt.orelse))
-            elif isinstance(stmt, ast.Try):
-                out.extend(self._class_defs(stmt.body))
-                for handler in stmt.handlers:
-                    out.extend(self._class_defs(handler.body))
-                out.extend(self._class_defs(stmt.orelse))
-        return out
-
-    def _classify(self, bases: tuple[str, ...]) -> tuple[bool, tuple[str, ...]]:
-        """Is this a model, and which of its bases could we not account for?"""
-        is_model = False
-        unknown: list[str] = []
-        for base in bases:
-            if resolve_dotted(self.bindings, base) in DJANGO_MODEL_ALIASES:
-                is_model = True
-            elif base in self.local_models:
-                # A base defined above it in this same module: a model exactly
-                # when that one is. Ancestry across modules is substep 2.1.6.
-                is_model = True
-            elif base.split(".")[-1] in {"object", "Enum", "TextChoices", "IntegerChoices"}:
-                continue
-            else:
-                unknown.append(base)
-        return is_model, tuple(unknown)
-
-    def _build(self, node: ast.ClassDef, bases: tuple[str, ...]) -> ModelNode:
-        model = ModelNode(
-            name=node.name,
-            app_label=self.app_label,
-            path=self.path,
-            lineno=node.lineno,
-            end_lineno=node.end_lineno or node.lineno,
-            bases=bases,
-            node=node,
-            fields=extract_fields(node, self.bindings),
-        )
-        read_meta(model, meta_class(node))
-        return model
+def build_node(record: ClassRecord, app_label: str) -> ModelNode:
+    """A graph node for one class, from what its own body says."""
+    node = record.node
+    model = ModelNode(
+        name=record.name,
+        app_label=app_label,
+        path=record.path,
+        lineno=node.lineno,
+        end_lineno=node.end_lineno or node.lineno,
+        bases=record.bases,
+        node=node,
+        fields=extract_fields(node, record.bindings),
+    )
+    read_meta(model, meta_class(node))
+    model.relations = build_edges(model, record.bindings)
+    return model
 
 
 def is_model_module(path: Path) -> bool:
@@ -240,7 +177,22 @@ def resolve_user_model(ctx: ProjectContext) -> str:
 def build_model_graph(ctx: ProjectContext) -> ModelGraph:
     """Reconstruct the project's models from source."""
     graph = ModelGraph(user_model=resolve_user_model(ctx))
+    index = ClassIndex(ctx)
     labels: dict[Path, str] = {}
+    nodes: dict[str, ModelNode] = {}
+
+    def label_for(path: Path) -> str:
+        app_dir = app_dir_for(path)
+        if app_dir not in labels:
+            labels[app_dir] = app_label_for(path, ctx)
+        return labels[app_dir]
+
+    def node_for(record: ClassRecord) -> ModelNode:
+        existing = nodes.get(record.dotted)
+        if existing is None:
+            existing = build_node(record, label_for(record.path))
+            nodes[record.dotted] = existing
+        return existing
 
     for path in ctx.python_files:
         if not is_model_module(path):
@@ -248,15 +200,29 @@ def build_model_graph(ctx: ProjectContext) -> ModelGraph:
         tree = ctx.parse(path)
         if tree is None:
             continue
-        app_dir = app_dir_for(path)
-        if app_dir not in labels:
-            labels[app_dir] = app_label_for(path, ctx)
-        scanner = _ModuleScanner(path, tree, labels[app_dir])
-        scanner.scan()
-        for model in scanner.found:
-            model.relations = build_edges(model, scanner.bindings)
+        module = package_dotted(path)
+        for node in class_defs(tree.body):
+            record = index.lookup(f"{module}.{node.name}")
+            if record is None or record.path != path or not index.is_model(record):
+                continue
+            model = node_for(record)
             graph.add(model)
-        graph.unresolved_bases.update(scanner.unresolved)
+            missing = index.unresolved_bases(record)
+            if missing:
+                graph.unresolved_bases[model.label] = missing
+
+    # Inheritance before edges are resolved: a field arriving from an abstract
+    # base is a relation like any other, and it has to be in place before
+    # anything asks what points at what.
+    for dotted, model in list(nodes.items()):
+        record = index.lookup(dotted)
+        if record is None:
+            continue
+        # Only ancestors that are themselves models take part. A plain mixin
+        # is not one: Django never contributes its attributes as fields, and
+        # counting one as a concrete parent invents a table and a join.
+        ancestors = tuple(a for a in index.ancestry(record) if index.is_model(a))
+        apply_inheritance(model, ancestors, node_for)
 
     # Deferred until every model is known: a bare "Order" may name a model in
     # a module read after the one referring to it.

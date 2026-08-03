@@ -1642,6 +1642,70 @@ building it here pays for itself twice.
   its `alert_after` index is exactly the conditional case. Neither project sets
   an explicit `db_table`, so all 75 tables came from the derivation.
 - **2.1.6** — Inheritance resolution: abstract bases, multi-table inheritance, mixins.
+
+  *Done.* Reading one file at a time is enough for a tutorial project and
+  useless on a real one. NetBox has **185** models and almost none of them
+  names `models.Model`: they inherit through a `NetBoxModel`/`PrimaryModel`
+  chain layered over a dozen feature mixins, re-exported through star imports,
+  spread across three packages. Seen a file at a time that was **63** models
+  with most of their columns missing — not wrong at the edges, wrong about
+  which models exist.
+
+  `graph/inheritance.py` does by hand the part of an import Python would do for
+  us: a base class name becomes a dotted path through the writing module's own
+  imports, that path becomes a file, and the file is parsed. Modules are read
+  only when something refers to them, so this costs 0.76s across NetBox's 1213
+  files rather than the price of parsing all of them.
+
+  Three things had to be got right, and each was found by measuring rather
+  than by reasoning:
+
+  - **Module names come from the package root**, walking up while
+    `__init__.py` keeps existing, because NetBox's code sits at
+    `<root>/netbox/netbox/models/` and every import in the project calls that
+    `netbox.models`. Anchoring on the project root names it
+    `netbox.netbox.models` and resolves nothing.
+  - **A relative import means one thing in a module and another in a
+    package.** `from .device_components import X` inside `dcim/models/power.py`
+    means `dcim.models.device_components`; the same line inside
+    `dcim/models/__init__.py` means the same module while starting a component
+    shorter. Getting this wrong left four in-project bases unresolved.
+  - **Star imports have to be followed.** `netbox/models/__init__.py` is almost
+    nothing but re-exports, and a star import binds no name we can see, so the
+    only way to know whether it supplies `ChangeLoggingMixin` is to look in the
+    module it names.
+
+  `graph/inherit.py` then applies what an ancestor declares, and Django's two
+  modes mean opposite things in the database despite looking alike in source.
+  An abstract base has no table, so each heir gets its own copy of every
+  column — that is where **1475** inherited fields come from. A concrete base
+  does have one, so the heir stores nothing locally and reaches those columns
+  over the implicit `<parent>_ptr` one-to-one, which is recorded as a relation
+  because every query on the child joins across it. A proxy is the same table
+  under a second class: columns readable, `db_table` shared, and no reverse
+  relations of its own, because those belong to the concrete model and two
+  classes claiming one accessor is a name Django never created twice.
+
+  Both of NetBox's apparent MTI children — `account.UserToken` and
+  `extras.ScriptModule` — turned out to be proxies, and both looked exactly
+  like multi-table inheritance until `Meta.proxy` was read. A plain mixin is
+  the mirror image: `TrackingModelMixin` appears in seven `dcim` base lists and
+  is not a model at all, so Django contributes none of its attributes, and
+  counting it as a concrete ancestor invented seven tables and the joins to
+  reach them.
+
+  Inherited relations are renamed for the heir rather than copied, which is the
+  entire reason `related_name="%(class)s_items"` exists: two models sharing a
+  base would otherwise claim the same attribute on the model they both point
+  at, and Django refuses to start. `Meta` follows too — an heir declaring no
+  `Meta` inherits its base's ordering, indexes and constraints, and a rule
+  reading only the heir's body would report a model with no default ordering
+  when every query it makes is sorted.
+
+  Measured on NetBox: 63 → **185 models**, 67 → **892 relation edges**, 20 → **5
+  unresolved bases**, and all five remaining are `MPTTModel` and `TagBase` from
+  django-mptt and django-taggit, which are not in the checkout. Naming what we
+  cannot see beats inventing what it contributes.
 - **2.1.7** — Custom managers and `QuerySet` subclasses, so `Model.objects` resolves to the right class.
 - **2.1.8** — Graph queries: `is_user_owned(model)` (path to the user model within N hops), `relation_path`, `reachable_fields`. This is what the authorization rules consume.
 
