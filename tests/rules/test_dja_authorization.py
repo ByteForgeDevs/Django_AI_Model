@@ -336,3 +336,61 @@ from shop.api import NoteDetail
 urlpatterns = [path('notes/<int:pk>/', NoteDetail.as_view())]
 """
         assert not run(make_project, "DJA-004", source, urls=urls)
+
+
+class TestObjectPermissions:
+    """DJA-005 -- the hook that was written and never ran."""
+
+    OWNED = """
+from rest_framework import viewsets
+from rest_framework.permissions import BasePermission
+from shop.models import Note
+
+class IsOwner(BasePermission):
+    def has_object_permission(self, request, view, obj):
+        return obj.owner_id == request.user.id
+
+class NoteViewSet(viewsets.ModelViewSet):
+    queryset = Note.objects.all()
+    permission_classes = [IsOwner]
+
+    def get_object(self):
+        return Note.objects.get(pk=self.kwargs['pk'])
+"""
+
+    def test_reports_an_override_that_skips_the_check(self, make_project) -> None:
+        found = run(make_project, "DJA-005", self.OWNED)
+        assert len(found) == 1
+        assert "check_object_permissions" in found[0].message
+
+    def test_silent_when_the_check_is_called(self, make_project) -> None:
+        source = self.OWNED.replace(
+            "        return Note.objects.get(pk=self.kwargs['pk'])",
+            "        obj = Note.objects.get(pk=self.kwargs['pk'])\n"
+            "        self.check_object_permissions(self.request, obj)\n"
+            "        return obj",
+        )
+        assert not run(make_project, "DJA-005", source)
+
+    def test_silent_when_the_fetch_is_scoped_to_the_request(self, make_project) -> None:
+        """NetBox's DashboardView: the filter is the check."""
+        source = self.OWNED.replace(
+            "        return Note.objects.get(pk=self.kwargs['pk'])",
+            "        return Note.objects.filter(owner=self.request.user).first()",
+        )
+        assert not run(make_project, "DJA-005", source)
+
+    def test_silent_when_no_permission_defines_the_hook(self, make_project) -> None:
+        source = self.OWNED.replace(
+            "    def has_object_permission(self, request, view, obj):\n"
+            "        return obj.owner_id == request.user.id",
+            "    def has_permission(self, request, view):\n        return request.user.is_staff",
+        )
+        assert not run(make_project, "DJA-005", source)
+
+    def test_silent_when_get_object_is_not_overridden(self, make_project) -> None:
+        source = self.OWNED.replace(
+            "    def get_object(self):\n        return Note.objects.get(pk=self.kwargs['pk'])\n",
+            "",
+        )
+        assert not run(make_project, "DJA-005", source)

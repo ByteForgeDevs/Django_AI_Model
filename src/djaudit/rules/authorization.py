@@ -17,6 +17,7 @@ the reading cannot cover.
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
@@ -42,6 +43,7 @@ from djaudit.settings import assignment_value, entries
 if TYPE_CHECKING:
     from djaudit.api.querysets import QuerysetNode
     from djaudit.context import ProjectContext
+    from djaudit.graph.inheritance import ClassIndex, ClassRecord
     from djaudit.graph.nodes import ModelNode
 
 DRF_DOCS = "https://www.django-rest-framework.org/api-guide/permissions/"
@@ -347,6 +349,86 @@ class UnscopedUserOwnedQueryset(ApiRule):
     )
 
 
+@register
+class ObjectPermissionsNotChecked(ApiRule):
+    """A custom ``get_object`` that never reaches ``check_object_permissions``."""
+
+    def inspect(self, ctx: ProjectContext, endpoint: Endpoint) -> Iterator[Finding]:
+        view = endpoint.view
+        if "get_object" not in view.overrides:
+            return
+        index = self.surface.index
+        if index is None:
+            return
+        record = index.lookup(view.label)
+        if record is None:
+            return
+        method = _find_method(record, "get_object", index)
+        if method is None or _calls(method, "check_object_permissions"):
+            return
+        # An override that fetches the object through the *user* has already
+        # done the check the hook would do -- NetBox's DashboardView returns
+        # Dashboard.objects.filter(user=self.request.user).first(). Narrowing
+        # by a URL capture does not count and must not: fetching by the pk the
+        # caller supplied is the vulnerability, not a defence against it.
+        if _reads_user(method):
+            return
+        # Only meaningful when an object-level permission exists to skip. A
+        # view whose permissions are all class-level loses nothing by not
+        # calling the hook, and reporting it would be noise on every project
+        # that overrides get_object for an unrelated reason.
+        if not _has_object_permission(endpoint, index):
+            return
+        yield self.finding(
+            location=self.at(ctx, view, method.lineno),
+            message=(
+                f"{view.name}.get_object is overridden and never calls "
+                f"check_object_permissions, so the has_object_permission method on "
+                f"{', '.join(endpoint.guard.classes) or 'its permission classes'} never runs"
+            ),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.AST,
+                    content=(
+                        "GenericAPIView.get_object calls self.check_object_permissions("
+                        "self.request, obj); an override that does not is the only way "
+                        "object permissions are silently skipped"
+                    ),
+                    source="djangorestframework",
+                ),
+                self.guard_evidence(endpoint.guard),
+            ),
+        )
+
+    meta = RuleMeta(
+        id="DJA-005",
+        title="Custom get_object skips object permission checks",
+        family=Family.DJA,
+        severity=Severity.HIGH,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "DRF runs object-level permissions from inside GenericAPIView.get_object. "
+            "An override that fetches the object itself and forgets the call leaves "
+            "has_object_permission written, reviewed, and never executed -- which reads "
+            "as protected in every place anyone would look."
+        ),
+        remediation=(
+            "Call self.check_object_permissions(self.request, obj) before returning, "
+            "or call super().get_object() and filter the queryset instead."
+        ),
+        references=(
+            "https://www.django-rest-framework.org/api-guide/permissions/#object-level-permissions",
+            OWASP_ACCESS,
+        ),
+        limitations=(
+            "An override that fetches the object through the request is not reported, "
+            "so an ownership check written in a way this rule cannot read will be "
+            "treated as no check at all.",
+        ),
+    )
+
+
 def _all_open(classes: object) -> bool:
     if not isinstance(classes, list | tuple):
         return False
@@ -377,3 +459,51 @@ def _ownership_fields(model: ModelNode) -> set[str]:
         for edge in model.relations
         if edge.points_at_user and edge.field_name in OWNERSHIP_FIELDS
     }
+
+
+def _find_method(record: ClassRecord, name: str, index: ClassIndex) -> ast.FunctionDef | None:
+    for link in (record, *index.ancestry(record)):
+        for stmt in link.node.body:
+            if isinstance(stmt, ast.FunctionDef) and stmt.name == name:
+                return stmt
+    return None
+
+
+def _calls(func: ast.FunctionDef, name: str) -> bool:
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == name
+        for node in ast.walk(func)
+    )
+
+
+def _reads_user(func: ast.FunctionDef) -> bool:
+    """Whether the method reaches the requesting user.
+
+    Deliberately narrower than the request-reading test the queryset pass
+    uses. That one counts ``self.kwargs['pk']``, correctly, as the queryset
+    depending on caller input -- but here caller input is the attack, and only
+    the authenticated identity can stand in for a permission check.
+    """
+    return any(
+        isinstance(node, ast.Attribute)
+        and node.attr == "user"
+        and ast.unparse(node.value) in {"request", "self.request"}
+        for node in ast.walk(func)
+    )
+
+
+def _has_object_permission(endpoint: Endpoint, index: ClassIndex) -> bool:
+    """Whether any permission class on this endpoint defines the object hook."""
+    for dotted in endpoint.guard.classes:
+        record = index.lookup(dotted)
+        if record is None:
+            continue
+        for link in (record, *index.ancestry(record)):
+            if link.dotted.startswith("rest_framework."):
+                continue
+            for stmt in link.node.body:
+                if isinstance(stmt, ast.FunctionDef) and stmt.name == "has_object_permission":
+                    return True
+    return False

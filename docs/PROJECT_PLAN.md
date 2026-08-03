@@ -2090,6 +2090,24 @@ building it here pays for itself twice.
   unfiltered querysets and NetBox's two are a detail-only view and a test
   plugin.
 - **2.3.5** — `DJA-005` object-level permissions declared but `check_object_permissions` never reached on a custom `get_object`.
+  **Done.** The hook that was written, reviewed, and never ran. DRF calls
+  object permissions from inside `GenericAPIView.get_object`, so an override
+  that fetches the object itself and forgets the call leaves
+  `has_object_permission` looking protective in every place anyone would think
+  to look. Requires an object hook to actually exist on one of the endpoint's
+  permission classes — a view that overrides `get_object` for an unrelated
+  reason loses nothing by not calling it.
+
+  The interesting decision is what counts as already having done the check.
+  2.2.5's `object_scoped` was the obvious answer and is the wrong one: its
+  `REQUEST_ROOTS` include `kwargs`, correctly, because a URL capture is caller
+  input — but here caller input is the attack. `Note.objects.get(pk=self.kwargs['pk'])`
+  is the textbook IDOR and would have been read as self-defending. So this rule
+  asks the narrower question, whether the fetch reaches `request.user`, which
+  is what NetBox's `DashboardView` does with
+  `Dashboard.objects.filter(user=self.request.user).first()` and what an
+  exploitable override does not. That view was a false positive until this
+  landed; both benchmarks are now silent.
 - **2.3.6** — `DJA-006` `@api_view` function view with no permission decorator.
 - **2.3.7** — `DJA-007` authentication classes permitting session auth only on an endpoint routed as a public API.
 
