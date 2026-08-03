@@ -142,6 +142,18 @@ def run(
 
     _emit(result, output_format, output)
 
+    # A rule that crashed reported nothing, and nothing is what a clean project
+    # also reports. Saying so on stderr keeps the two apart without corrupting
+    # JSON or SARIF on stdout.
+    if result.rule_errors:
+        stderr = Console(stderr=True)
+        for rule_id, message in sorted(result.rule_errors.items()):
+            stderr.print(f"[bold red]rule crashed:[/bold red] {rule_id}: {message}")
+        stderr.print(
+            f"[yellow]warning:[/yellow] {len(result.rule_errors)} "
+            f"rule(s) did not run; their silence is not a clean result"
+        )
+
     # A blocking diagnostic means whole rule families never ran, so exiting 0
     # would tell CI the project is clean when nothing actually examined it.
     if any(d.blocking for d in result.context.diagnostics):

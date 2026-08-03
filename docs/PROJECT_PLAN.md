@@ -2470,6 +2470,33 @@ their own. Substep 2.6.1 extends `RULE_ID_PATTERN` to admit `DJD`.
   `UniqueConstraint` as well.
 - **2.6.4** — `DJD-003` `Meta.ordering` absent on a model that is paginated, producing unstable pagination.
 
+  **Done.** `UnorderedPaginatedModel`, `orders_anywhere()` and
+  `manager_may_order()`. `LIMIT`/`OFFSET` with no `ORDER BY` lets the planner
+  return rows in whatever order the scan produced, and that order shifts as
+  rows are written, so a client walking the pages sees some records twice and
+  never sees others. Django raises `UnorderedObjectListWarning` for it; nothing
+  reaches the API.
+
+  Zero on all three benchmarks, and the two exemptions that produce that zero
+  were both found by measuring. NetBox's `RegionViewSet` and `SiteGroupViewSet`
+  paginate models with no `Meta.ordering` and are perfectly stable, because
+  `objects = TreeManager()` orders every queryset by `(tree_id, lft)` — so any
+  manager that is not Django's plain one has to buy silence. And all fourteen
+  pretix candidates declare `queryset = Model.objects.none()` as a placeholder
+  and build the real query in `get_queryset`, where the `.order_by('name')`
+  lives; reading only the `queryset` attribute would have reported fourteen
+  correctly-ordered endpoints, so ordering is credited from anywhere in the
+  view class or its ancestors.
+
+  **The first measurement of this rule was a lie.** It reported zero on all
+  three benchmarks and on its own positive control, because `ApiRule.inspect`
+  is abstract and the rule had overridden `check` instead — the class could not
+  be instantiated, the engine filed the `TypeError` under `rule_errors`, and
+  `djaudit run` never printed them. A rule that never ran and a clean project
+  were indistinguishable at the command line. `run` now writes crashed rules to
+  stderr, which is the same argument the blocking-diagnostic exit already makes,
+  and a test asserts this rule can be constructed at all.
+
 ### Step 2.7 — Benchmark and document
 
 - **2.7.1** — DRF fixture project: viewsets, serializers, routers, planted IDOR and mass-assignment defects.

@@ -12,12 +12,14 @@ return a wrong answer, which is a category the other families do not cover.
 
 from __future__ import annotations
 
+import ast
 import re
 from collections.abc import Iterator
 from itertools import pairwise
 
 from djaudit.astutils import dotted_name
 from djaudit.context import ProjectContext
+from djaudit.graph.inheritance import ClassIndex, ClassRecord
 from djaudit.graph.nodes import FieldNode, ModelNode
 from djaudit.models import (
     Confidence,
@@ -30,6 +32,7 @@ from djaudit.models import (
     Tier,
 )
 from djaudit.registry import Rule, RuleMeta, register
+from djaudit.rules._api import ApiRule, Endpoint
 
 _CAMEL = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z]*|[a-z]+|\d+")
 
@@ -324,6 +327,131 @@ class NullableStringField(ModelRule):
                         for f in bad
                     ),
                     source=ctx.rel(model.path),
+                ),
+            ),
+        )
+
+
+ORDERING_CALLS = frozenset({"order_by", "latest", "earliest"})
+"""Queryset methods that impose an order, wherever they are written."""
+
+
+def orders_anywhere(index: ClassIndex, record: ClassRecord) -> bool:
+    """Whether a view class or anything it inherits establishes an order.
+
+    Reading only the `queryset` attribute is not enough and the benchmarks say
+    so loudly: every pretix candidate declares `queryset = Model.objects.none()`
+    as a placeholder and builds the real query in `get_queryset`, where the
+    `.order_by('name')` actually lives. A rule that missed that would have
+    reported fourteen correctly-ordered endpoints.
+    """
+    for rec in (record, *index.ancestry(record)):
+        for node in ast.walk(rec.node):
+            if isinstance(node, ast.Attribute) and node.attr in ORDERING_CALLS:
+                return True
+            # DRF's OrderingFilter reads `ordering` as its default order.
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "ordering" for t in node.targets
+            ):
+                return True
+    return False
+
+
+def manager_may_order(model: ModelNode) -> bool:
+    """Whether a custom manager could be supplying the order.
+
+    NetBox's `Region` has no `Meta.ordering` and is paginated, and is perfectly
+    stable because `objects = TreeManager()` orders every queryset by
+    `(tree_id, lft)`. Any manager that is not Django's plain one can do the
+    same, and reading its `get_queryset` across a package boundary is not
+    something a static pass can promise.
+    """
+    return any(not m.is_plain and not m.implicit for m in model.managers.values())
+
+
+@register
+class UnorderedPaginatedModel(ApiRule):
+    """DJD-003 -- page two contains what page one already showed."""
+
+    meta = RuleMeta(
+        id="DJD-003",
+        title="Paginated list has no guaranteed order",
+        family=Family.DJD,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "Pagination is `LIMIT` and `OFFSET`, and neither SQL nor Postgres promises "
+            "which rows those pick when the query has no `ORDER BY`. The planner is "
+            "free to return them in whatever order the scan produced, and that order "
+            "changes as rows are inserted, updated or vacuumed -- between one request "
+            "and the next. A client walking the pages therefore sees some records "
+            "twice and never sees others, with no error anywhere and a response that "
+            "looks correct in isolation. Django's own paginator raises "
+            "`UnorderedObjectListWarning` for exactly this, which is easy to miss in "
+            "a log and impossible to see in the API."
+        ),
+        remediation=(
+            "Give the model a `Meta.ordering` ending in a unique column, usually "
+            "`['-created', 'pk']` or simply `['pk']`, so every query through it is "
+            "deterministic. Ordering on the view alone fixes one endpoint and leaves "
+            "the next one to remember; ordering that is not unique still ties, and "
+            "ties are resolved arbitrarily, so the tiebreaker matters as much as the "
+            "sort key."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/topics/pagination/",
+            "https://docs.djangoproject.com/en/stable/ref/models/options/#ordering",
+            "https://www.postgresql.org/docs/current/queries-limit.html",
+        ),
+        limitations=(
+            "A model carrying any manager other than Django's plain one is skipped, "
+            "because a custom manager may order in its `get_queryset` and reading that "
+            "across a package boundary is not something a static pass can promise.",
+            "Ordering is credited to a view if the class or any ancestor mentions "
+            "`order_by` at all, which is deliberately generous: a mention on an "
+            "unrelated queryset in the same class buys silence rather than a guess.",
+        ),
+    )
+
+    def inspect(self, ctx: ProjectContext, endpoint: Endpoint) -> Iterator[Finding]:
+        index = self.surface.index
+        view = endpoint.view
+        if index is None or not endpoint.lists:
+            return
+        paginated = view.pagination_ref or (
+            self.defaults.pagination and not view.pagination_disabled
+        )
+        if not paginated or view.queryset_model_ref is None:
+            return
+        model = ctx.model_graph.get(view.queryset_model_ref)
+        if model is None or model.ordering or model.ordering_unreadable:
+            return
+        if manager_may_order(model):
+            return
+        record = index.lookup(view.label)
+        if record is None or orders_anywhere(index, record):
+            return
+        yield self.finding(
+            message=(
+                f"{view.name} paginates {model.name}, which has no Meta.ordering, "
+                f"so the rows on each page are whatever the planner returned."
+            ),
+            location=self.at(ctx, view),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.AST,
+                    content=(f"{model.label} declares no Meta.ordering and no custom manager"),
+                    source=ctx.rel(model.path),
+                ),
+                Evidence(
+                    kind=EvidenceKind.AST,
+                    content=(
+                        f"{view.label} is paginated by "
+                        f"{view.pagination_ref or self.defaults.pagination} "
+                        f"and never calls order_by"
+                    ),
+                    source=ctx.rel(view.path),
                 ),
             ),
         )

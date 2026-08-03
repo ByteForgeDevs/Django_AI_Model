@@ -15,6 +15,14 @@ from djaudit.context import ProjectContext
 from djaudit.models import Confidence, Finding, Severity
 from djaudit.registry import all_rules
 from djaudit.rules.datamodel import camel_words, name_tokens
+from tests.api.test_permissions import (
+    DRF_DECORATORS,
+    DRF_PERMISSION_SOURCE,
+    DRF_ROUTERS,
+    DRF_VIEWS,
+    DRF_VIEWSETS,
+)
+from tests.rules.test_dja_availability import DRF_PAGINATION
 
 SETTINGS = """
 SECRET_KEY = "x"
@@ -342,3 +350,194 @@ class Memo(Owned):
 """
         found = run(make_project, "DJD-002", models_source=source)
         assert [f.location.line for f in found] == [4]
+
+
+DRF_STUBS = {
+    "rest_framework/__init__.py": "",
+    "rest_framework/views.py": DRF_VIEWS,
+    "rest_framework/generics.py": DRF_VIEWS,
+    "rest_framework/viewsets.py": DRF_VIEWSETS,
+    "rest_framework/permissions.py": DRF_PERMISSION_SOURCE,
+    "rest_framework/decorators.py": DRF_DECORATORS,
+    "rest_framework/routers.py": DRF_ROUTERS,
+    "rest_framework/pagination.py": DRF_PAGINATION,
+}
+
+PAGINATED = """
+SECRET_KEY = "x"
+DEBUG = False
+ALLOWED_HOSTS = ["example.com"]
+INSTALLED_APPS = ["shop"]
+ROOT_URLCONF = "shop.urls"
+REST_FRAMEWORK = {
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 20,
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
+}
+"""
+
+ROUTED_NOTES = """
+from rest_framework.routers import DefaultRouter
+from shop import api
+
+router = DefaultRouter()
+router.register("notes", api.NoteViewSet)
+urlpatterns = router.urls
+"""
+
+PLAIN_NOTE = """
+from django.db import models
+
+class Note(models.Model):
+    body = models.TextField()
+"""
+
+
+def api_project(
+    make_project,
+    view_source: str,
+    models_source: str = PLAIN_NOTE,
+    settings: str = PAGINATED,
+) -> ProjectContext:
+    built: ProjectContext = make_project(
+        {
+            "manage.py": "",
+            **DRF_STUBS,
+            "shop/__init__.py": "",
+            "shop/models.py": models_source,
+            "shop/api.py": view_source,
+            "shop/urls.py": ROUTED_NOTES,
+            "shop/settings.py": settings,
+        }
+    )
+    return built
+
+
+def paginated(make_project, view_source: str, **kwargs) -> list[Finding]:
+    ctx = api_project(make_project, view_source, **kwargs)
+    rule = next(r for r in all_rules() if r.meta.id == "DJD-003")()
+    return list(rule.check(ctx))
+
+
+BARE = """
+from rest_framework import viewsets
+from shop.models import Note
+
+class NoteViewSet(viewsets.ModelViewSet):
+    queryset = Note.objects.all()
+"""
+
+
+class TestUnorderedPaginatedModel:
+    """DJD-003 -- page two contains what page one already showed."""
+
+    def test_reports_an_unordered_paginated_list(self, make_project) -> None:
+        found = paginated(make_project, BARE)
+        assert len(found) == 1
+        assert found[0].severity is Severity.MEDIUM
+        assert "Note" in found[0].message
+
+    def test_the_rule_can_be_constructed(self) -> None:
+        # It could not. ApiRule.inspect is abstract and this rule overrode
+        # check instead, so instantiation raised, the engine filed it under
+        # rule_errors, and three benchmarks reported a clean zero that meant
+        # the rule had never run.
+        rule = next(r for r in all_rules() if r.meta.id == "DJD-003")()
+        assert rule.meta.id == "DJD-003"
+
+    def test_silent_when_the_model_declares_ordering(self, make_project) -> None:
+        models_source = """
+from django.db import models
+
+class Note(models.Model):
+    body = models.TextField()
+
+    class Meta:
+        ordering = ["pk"]
+"""
+        assert paginated(make_project, BARE, models_source=models_source) == []
+
+    def test_silent_when_the_queryset_orders(self, make_project) -> None:
+        source = """
+from rest_framework import viewsets
+from shop.models import Note
+
+class NoteViewSet(viewsets.ModelViewSet):
+    queryset = Note.objects.order_by("pk")
+"""
+        assert paginated(make_project, source) == []
+
+    def test_silent_when_get_queryset_orders(self, make_project) -> None:
+        # Every pretix candidate is this shape: queryset = Model.objects.none()
+        # as a placeholder, with the real ordering inside get_queryset.
+        source = """
+from rest_framework import viewsets
+from shop.models import Note
+
+class NoteViewSet(viewsets.ModelViewSet):
+    queryset = Note.objects.none()
+
+    def get_queryset(self):
+        return Note.objects.order_by("pk")
+"""
+        assert paginated(make_project, source) == []
+
+    def test_silent_when_the_view_declares_ordering(self, make_project) -> None:
+        source = """
+from rest_framework import viewsets
+from shop.models import Note
+
+class NoteViewSet(viewsets.ModelViewSet):
+    queryset = Note.objects.all()
+    ordering = ["pk"]
+"""
+        assert paginated(make_project, source) == []
+
+    def test_silent_when_an_ancestor_orders(self, make_project) -> None:
+        source = """
+from rest_framework import viewsets
+from shop.models import Note
+
+class OrderedBase(viewsets.ModelViewSet):
+    def get_queryset(self):
+        return super().get_queryset().order_by("pk")
+
+class NoteViewSet(OrderedBase):
+    queryset = Note.objects.all()
+"""
+        assert paginated(make_project, source) == []
+
+    def test_silent_when_a_custom_manager_could_order(self, make_project) -> None:
+        # NetBox's Region has no Meta.ordering and is paginated, and is stable
+        # because objects = TreeManager() orders by (tree_id, lft).
+        models_source = """
+from django.db import models
+from mptt.managers import TreeManager
+
+class Note(models.Model):
+    body = models.TextField()
+    objects = TreeManager()
+"""
+        assert paginated(make_project, BARE, models_source=models_source) == []
+
+    def test_silent_when_pagination_is_switched_off(self, make_project) -> None:
+        source = """
+from rest_framework import viewsets
+from shop.models import Note
+
+class NoteViewSet(viewsets.ModelViewSet):
+    queryset = Note.objects.all()
+    pagination_class = None
+"""
+        assert paginated(make_project, source) == []
+
+    def test_silent_when_the_project_does_not_paginate(self, make_project) -> None:
+        settings = PAGINATED.replace(
+            '"DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",', ""
+        ).replace('"PAGE_SIZE": 20,', "")
+        assert paginated(make_project, BARE, settings=settings) == []
+
+    def test_evidence_names_both_halves(self, make_project) -> None:
+        found = paginated(make_project, BARE)
+        blob = " ".join(e.content for e in found[0].evidence)
+        assert "Meta.ordering" in blob and "order_by" in blob
