@@ -37,9 +37,11 @@ dev = [
     # Installed so tests can check our defaults table against the real
     # django.conf.global_settings instead of trusting a transcription.
     "django>=5.2",
-    # Same reason: 2.2.4 resolves REST_FRAMEWORK against api_settings.DEFAULTS,
-    # and a transcribed copy of that table would rot silently.
-    "djangorestframework>=3.15",
+    # Same reason, and the floor matters: our DRF defaults table is checked
+    # against rest_framework.settings.DEFAULTS by tests/test_drf_defaults.py,
+    # so the installed release decides which version those values are true of.
+    # 3.17 is what the support matrix in docs/PROJECT_PLAN.md claims.
+    "djangorestframework>=3.17",
 ]
 
 [tool.hatch.build.targets.wheel]
