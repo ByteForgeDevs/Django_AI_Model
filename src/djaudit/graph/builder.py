@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 from djaudit.astutils import UNKNOWN, dotted_name, import_bindings, literal, resolve_dotted
 from djaudit.graph.fields import extract_fields
 from djaudit.graph.nodes import ModelGraph, ModelNode
+from djaudit.graph.relations import DEFAULT_USER_MODEL, build_edges, resolve_edges
+from djaudit.settings import resolve_all
 
 if TYPE_CHECKING:
     from djaudit.context import ProjectContext
@@ -246,9 +248,40 @@ def is_model_module(path: Path) -> bool:
     return parent.name == "models" and (parent / "__init__.py").exists()
 
 
+def resolve_user_model(ctx: ProjectContext) -> str:
+    """``AUTH_USER_MODEL`` for the project, or Django's default.
+
+    A project that swaps its user model does so in exactly one place, and every
+    ownership question in Phase 2 turns on getting it right -- assume
+    ``auth.User`` on a project with a custom user and every IDOR rule goes
+    quiet on the one relation that mattered.
+
+    Where several settings modules disagree, the production-reachable ones are
+    read first: that is the deployment the rules are reasoning about. A value
+    we cannot resolve falls back to the default rather than to nothing, because
+    Django's default is what an unset setting actually means.
+    """
+    views = resolve_all(ctx)
+    ordered = sorted(
+        ctx.settings_modules,
+        key=lambda m: (not m.is_entrypoint, not m.role.reaches_production, m.dotted),
+    )
+    for module in ordered:
+        view = views.get(module.dotted)
+        if view is None:
+            continue
+        resolved = view.get("AUTH_USER_MODEL")
+        if not resolved.is_assigned:
+            continue
+        label = resolved.value.literal
+        if isinstance(label, str) and "." in label:
+            return label
+    return DEFAULT_USER_MODEL
+
+
 def build_model_graph(ctx: ProjectContext) -> ModelGraph:
     """Reconstruct the project's models from source."""
-    graph = ModelGraph()
+    graph = ModelGraph(user_model=resolve_user_model(ctx))
     labels: dict[Path, str] = {}
 
     for path in ctx.python_files:
@@ -263,7 +296,11 @@ def build_model_graph(ctx: ProjectContext) -> ModelGraph:
         scanner = _ModuleScanner(path, tree, labels[app_dir])
         scanner.scan()
         for model in scanner.found:
+            model.relations = build_edges(model, scanner.bindings)
             graph.add(model)
         graph.unresolved_bases.update(scanner.unresolved)
 
+    # Deferred until every model is known: a bare "Order" may name a model in
+    # a module read after the one referring to it.
+    resolve_edges(graph.models, graph.user_model)
     return graph

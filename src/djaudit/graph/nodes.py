@@ -31,6 +31,55 @@ from Django — the string alone is not evidence.
 
 
 @dataclass(slots=True)
+class RelationEdge:
+    """One relation, from the model that declares it to the model it names.
+
+    Kept separate from the field because a relation has two ends and the
+    reverse one is a property of the *target*. Keeping edges as their own
+    objects is what lets the graph be walked in either direction.
+    """
+
+    source: str
+    """Label of the model declaring the field."""
+
+    field_name: str
+    kind: str
+    """``ForeignKey``, ``OneToOneField``, ``ManyToManyField``…"""
+
+    target_ref: str | None
+    """The other model exactly as written -- ``"auth.User"``, ``"Order"``,
+    ``"self"`` -- or ``None`` when it came from ``settings.AUTH_USER_MODEL``
+    or from an expression we could not read."""
+
+    lineno: int
+    end_lineno: int
+    target: str | None = None
+    """The resolved label, or ``None`` for a model we do not have. Django's own
+    ``auth.User`` is the common case: real, referenced constantly, and not in
+    the repository."""
+
+    is_self: bool = False
+    via_user_setting: bool = False
+    """Written as ``settings.AUTH_USER_MODEL``, which is the correct way."""
+
+    points_at_user: bool = False
+    """Whether this relation reaches the project's user model, however it was
+    spelled. This is the single fact every authorization rule is built on."""
+
+    on_delete: str | None = None
+    through: str | None = None
+
+    @property
+    def is_multi(self) -> bool:
+        """Whether one row on this side can have many on the other."""
+        return self.kind in ("ManyToManyField", "GenericRelation")
+
+    @property
+    def resolved(self) -> bool:
+        return self.target is not None
+
+
+@dataclass(slots=True)
 class FieldNode:
     """One field declared on a model.
 
@@ -137,6 +186,9 @@ class ModelNode:
     node: ast.ClassDef | None = field(default=None, repr=False, compare=False)
     """The class body, kept so later passes can re-read it without re-parsing."""
 
+    relations: list[RelationEdge] = field(default_factory=list)
+    """Relations declared on this class, in declaration order."""
+
     fields: dict[str, FieldNode] = field(default_factory=dict)
     """Fields declared on this class, in declaration order.
 
@@ -172,6 +224,15 @@ class ModelGraph:
 
     models: dict[str, ModelNode] = field(default_factory=dict)
     """Keyed by ``app_label.ModelName``."""
+
+    user_model: str = "auth.User"
+    """``AUTH_USER_MODEL`` as the project configures it, or Django's default.
+
+    Every authorization rule in this phase is a question about ownership, and
+    ownership means a path to this model. Reading it from the settings rather
+    than assuming ``auth.User`` is what makes the rules work on the many
+    projects that swap it.
+    """
 
     unresolved_bases: dict[str, tuple[str, ...]] = field(default_factory=dict, repr=False)
     """Base classes we could not tie to anything, per model label.

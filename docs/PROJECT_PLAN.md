@@ -1532,6 +1532,36 @@ building it here pays for itself twice.
   Raw `args` and `kwargs` are kept on the node so relation resolution does not
   re-walk the tree. 244 fields extracted from NetBox, 128 from Healthchecks.
 - **2.1.3** — Relationship edges: `ForeignKey`, `OneToOneField`, `ManyToManyField`, including string references, `self`, and `settings.AUTH_USER_MODEL`.
+
+  **Done.** `graph/relations.py` turns every relation field into a
+  `RelationEdge`, kept as its own object rather than folded into the field
+  because a relation has two ends and the reverse one belongs to the target —
+  edges are what let the graph be walked in either direction, which 2.1.8 needs.
+
+  Django accepts five spellings for the other end: the class itself,
+  `"app.Model"`, a bare `"Model"`, `"self"`, and `settings.AUTH_USER_MODEL`.
+  All five occur in the benchmark targets, and understanding four of them
+  means going quiet on the fifth — which will be the one pointing at the user,
+  because every authorization rule in this phase is a question about ownership.
+
+  Resolution is deferred until every model is known, since a bare `"Order"` can
+  name a model in a module read later. `AUTH_USER_MODEL` comes from the Phase 1
+  settings resolver, reading production-reachable modules first. That pays for
+  itself immediately: NetBox resolves to `users.User`, not `auth.User`, so
+  assuming the default would have silenced every ownership rule on the project.
+
+  Two honest limits, both measured. A target we do not have stays unresolved
+  rather than invented — `contenttypes.ContentType` is real, referenced eleven
+  times in NetBox, and never in a repository. And a plain reference to Django's
+  own `User` still sets `points_at_user`, because Healthchecks writes all five
+  of its user relations that way and the class is not in the checkout; that
+  fallback fires only on an *unresolved* reference, so a project with its own
+  `User` in some other app resolves to that model and is not mistaken for the
+  user.
+
+  Totals: NetBox 67 edges, 8 reaching the user, 3 self-referential; Healthchecks
+  13 edges, 5 reaching the user. `on_delete` is read from both the keyword and
+  the positional form, including `models.SET(...)`.
 - **2.1.4** — Reverse relation naming: `related_name`, `related_query_name`, and Django's default `_set` accessor.
 - **2.1.5** — `Meta` handling: `ordering`, `indexes`, `constraints`, `unique_together`, `abstract`, `db_table`.
 - **2.1.6** — Inheritance resolution: abstract bases, multi-table inheritance, mixins.

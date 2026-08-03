@@ -6,10 +6,12 @@ import ast
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from djaudit.graph.builder import build_model_graph
-from djaudit.graph.nodes import ModelGraph
 from djaudit.models import Location
+
+if TYPE_CHECKING:
+    from djaudit.graph.nodes import ModelGraph
 
 MAX_SNIPPET_LENGTH = 240
 
@@ -81,6 +83,11 @@ class ProjectContext:
         would make the cheap half of a run as slow as the expensive half.
         """
         if self._model_graph is None:
+            # Imported here because the graph reads AUTH_USER_MODEL through the
+            # settings resolver, which needs this class. The cycle is real and
+            # deferring the import is the fix, not a workaround for one.
+            from djaudit.graph.builder import build_model_graph  # noqa: PLC0415
+
             self._model_graph = build_model_graph(self)
         return self._model_graph
 
