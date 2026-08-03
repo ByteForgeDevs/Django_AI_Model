@@ -143,3 +143,52 @@ def star_import_targets(tree: ast.Module) -> list[str]:
         and node.module is not None
         and any(alias.name == "*" for alias in node.names)
     ]
+
+
+def import_bindings(tree: ast.Module) -> dict[str, str]:
+    """Map every name a module imports to the dotted path it came from.
+
+    Recognising a Django model means recognising ``models.Model``, but the name
+    ``models`` is only Django's because of an import at the top of the file, and
+    plenty of projects write ``from django.db import models as db_models`` or
+    ``from django.db.models import Model``. Matching on the spelling alone gives
+    both false positives and false negatives; matching on what the name is bound
+    to gives neither.
+
+    A relative import keeps its dots (``from .base import Card`` binds ``Card``
+    to ``.base.Card``) so a later pass can resolve it against the package it was
+    written in. Star imports are not bindings and are handled by
+    :func:`star_imports`.
+    """
+    bindings: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                # ``import a.b.c`` binds ``a``; ``import a.b.c as x`` binds ``x``
+                # to the full path. Only the aliased form is unambiguous.
+                if alias.asname:
+                    bindings[alias.asname] = alias.name
+                else:
+                    bindings[alias.name.partition(".")[0]] = alias.name.partition(".")[0]
+        elif isinstance(node, ast.ImportFrom):
+            prefix = "." * node.level + (node.module or "")
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                bindings[alias.asname or alias.name] = f"{prefix}.{alias.name}"
+    return bindings
+
+
+def resolve_dotted(bindings: dict[str, str], name: str) -> str:
+    """Expand a dotted name through a module's imports.
+
+    ``models.Model`` with ``models`` bound to ``django.db.models`` resolves to
+    ``django.db.models.Model``. A name with no binding is returned unchanged --
+    it may be defined in this module, which is a different question and one the
+    caller is better placed to answer.
+    """
+    head, dot, rest = name.partition(".")
+    origin = bindings.get(head)
+    if origin is None:
+        return name
+    return f"{origin}{dot}{rest}" if rest else origin

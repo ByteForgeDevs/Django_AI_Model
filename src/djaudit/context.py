@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from djaudit.graph.builder import build_model_graph
+from djaudit.graph.nodes import ModelGraph
 from djaudit.models import Location
 
 MAX_SNIPPET_LENGTH = 240
@@ -67,7 +69,20 @@ class ProjectContext:
 
     _trees: dict[Path, ast.Module | None] = field(default_factory=dict, repr=False)
     _lines: dict[Path, list[str]] = field(default_factory=dict, repr=False)
+    _model_graph: ModelGraph | None = field(default=None, repr=False)
     parse_errors: dict[Path, str] = field(default_factory=dict, repr=False)
+
+    @property
+    def model_graph(self) -> ModelGraph:
+        """The project's models, reconstructed once and shared by every rule.
+
+        Built lazily because most settings rules never look at a model, and
+        walking every app's ``models`` module to answer a question nobody asked
+        would make the cheap half of a run as slow as the expensive half.
+        """
+        if self._model_graph is None:
+            self._model_graph = build_model_graph(self)
+        return self._model_graph
 
     def rel(self, path: Path) -> str:
         """POSIX path relative to the project root, so findings stay portable."""

@@ -1461,6 +1461,47 @@ building it here pays for itself twice.
 ### Step 2.1 — Model graph construction
 
 - **2.1.1** — `ModelNode`: name, app label, abstract/proxy/swappable flags, source location, base classes.
+
+  **Done.** New `djaudit.graph` package: `nodes.py` holds the records,
+  `builder.py` reads them out of source, and `ProjectContext.model_graph`
+  builds the graph once and lazily, so a settings-only run never walks an app's
+  models at all.
+
+  Recognising a model is the whole substep, and it is harder than matching
+  `models.Model`. That string is only Django's because of an import at the top
+  of the file, and `from pydantic import BaseModel as Model` produces the same
+  spelling with none of the meaning. So `astutils` gained `import_bindings()`
+  and `resolve_dotted()`, which map each name to what it is actually bound to;
+  the four ways of writing Django's base all resolve to
+  `django.db.models.Model` and the impostor resolves to pydantic.
+
+  Two boundaries drawn deliberately. Only an app's `models` module counts,
+  because that is the only module Django imports looking for models — and it
+  keeps us out of `migrations/`, where every historical version of every model
+  is written out in full and none of them is the current schema. And ancestry
+  is resolved *within* a module only: a class inheriting from a base defined
+  above it is a model exactly when that one is, but a base imported from
+  another module needs the project's whole import graph, which is 2.1.6. Such a
+  base is recorded in `unresolved_bases` rather than dropped, since a model
+  whose parents we cannot see is a model whose fields we may be missing.
+
+  That boundary is measurable, which is the point of recording it: Healthchecks
+  resolves completely — 12 models, 4 apps, nothing unresolved — while NetBox
+  yields 63 models and 20 unresolved bases, all of them NetBox's own
+  `NetBoxModel` / `PrimaryModel` / `TrackingModelMixin` hierarchy in a shared
+  module. 2.1.6 has a number to beat.
+
+  App labels follow Django's rule — the tail of the application's module path —
+  with `apps.py` read first, because two installed apps whose directories share
+  a name *must* override the label and every string reference in the project
+  then uses the override. `models/` packages resolve to the app above them,
+  which is how NetBox splits every one of its apps.
+
+  Lookups match how Django refers to models: `"app.Model"` exactly, a bare
+  `"Model"` in the local app first and the project second. An ambiguous bare
+  name resolves to `None` rather than to a guess — two apps with a `Comment`
+  each is ordinary, and picking one would put every downstream finding on the
+  wrong model.
 - **2.1.2** — Field extraction with parameters (`null`, `blank`, `unique`, `db_index`, `max_length`, `default`, `choices`).
 - **2.1.3** — Relationship edges: `ForeignKey`, `OneToOneField`, `ManyToManyField`, including string references, `self`, and `settings.AUTH_USER_MODEL`.
 - **2.1.4** — Reverse relation naming: `related_name`, `related_query_name`, and Django's default `_set` accessor.

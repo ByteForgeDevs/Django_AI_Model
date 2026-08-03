@@ -1,9 +1,14 @@
+import textwrap
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from djaudit import fingerprint
 from djaudit.models import Confidence, Family, Finding, Location, Severity, Tier
+
+if TYPE_CHECKING:
+    from djaudit.context import ProjectContext
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -69,3 +74,25 @@ def make_findings(rule_id: str, count: int) -> list[Finding]:
     so varying only the line would produce one shared identity.
     """
     return [make_finding(rule_id, file=f"app/mod{n}.py") for n in range(count)]
+
+
+@pytest.fixture
+def make_project(tmp_path: Path):
+    """Write a throwaway project from a ``{path: source}`` mapping.
+
+    Model-graph tests are about one construct at a time -- an abstract base, a
+    swapped user model, an app label overridden in ``apps.py`` -- and a shared
+    on-disk fixture would either grow a case per test or force each test to
+    read around the others. Building the two files the test is about keeps the
+    thing under test visible in the test.
+    """
+    from djaudit.discovery import build_context
+
+    def build(files: dict[str, str]) -> "ProjectContext":
+        for name, source in files.items():
+            target = tmp_path / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
+        return build_context(tmp_path)
+
+    return build
