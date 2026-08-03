@@ -13,6 +13,7 @@ along the way; nothing about its name or location says what it is.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,12 @@ from djaudit.api.serializers import (
     SERIALIZER_BASES,
     SerializerNode,
     build_serializer,
+)
+from djaudit.api.views import (
+    VIEW_BASES,
+    ViewNode,
+    build_function_view,
+    build_view,
 )
 from djaudit.astutils import resolve_dotted
 from djaudit.graph.inheritance import ClassIndex
@@ -37,6 +44,9 @@ class ApiSurface:
     """Every serializer in the project, and the models they expose."""
 
     serializers: dict[str, SerializerNode] = field(default_factory=dict)
+
+    views: dict[str, ViewNode] = field(default_factory=dict)
+    """Every view, class-based or decorated function, keyed by dotted label."""
 
     by_model: dict[str, list[SerializerNode]] = field(default_factory=dict)
     """Serializers keyed by the model label they serialise. A model reachable
@@ -57,6 +67,16 @@ class ApiSurface:
     @property
     def model_serializers(self) -> list[SerializerNode]:
         return [s for s in self.serializers.values() if s.is_model_serializer]
+
+    @property
+    def viewsets(self) -> list[ViewNode]:
+        return [v for v in self.views.values() if v.is_viewset]
+
+    @property
+    def writable_views(self) -> list[ViewNode]:
+        """Views through which data can change, which is where authorization
+        rules start rather than the full set."""
+        return [v for v in self.views.values() if v.writes]
 
     def __len__(self) -> int:
         return len(self.serializers)
@@ -118,4 +138,55 @@ def build_api_surface(
             unresolved.append(node.model_ref)
 
     surface.unresolved_models = tuple(sorted(set(unresolved)))
+
+    for record in index.records():
+        if index.inherits(record, VIEW_BASES):
+            view = build_view(record, index)
+            surface.views[view.label] = view
+
+    for view in discover_function_views(ctx, index):
+        surface.views[view.label] = view
+
     return surface
+
+
+def discover_function_views(ctx: ProjectContext, index: ClassIndex) -> Iterator[ViewNode]:
+    """Functions carrying ``@api_view``, which no class index can find.
+
+    Walked at module scope only. A view defined inside another function is
+    not routable without the enclosing call having run, which is not something
+    a static read can claim happened.
+    """
+    from djaudit.discovery import dotted_path  # noqa: PLC0415 - discovery builds ProjectContext
+
+    for path in ctx.python_files:
+        tree = ctx.parse(path)
+        if tree is None or not _mentions_api_view(tree):
+            continue
+        module = dotted_path(ctx.root, path)
+        bindings = index.bindings_for(module)
+        for stmt in tree.body:
+            if not isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            view = build_function_view(stmt, module, path, bindings)
+            if view is not None:
+                yield view
+
+
+def _mentions_api_view(tree: ast.Module) -> bool:
+    """Cheap gate before walking a module's functions.
+
+    ``api_view`` has to be imported to be used, and the import is at module
+    scope, so a module that never names it cannot contain a function view.
+    Over a thousand files this is the difference between reading imports and
+    reading every decorator in the project.
+    """
+    for stmt in tree.body:
+        if isinstance(stmt, ast.ImportFrom):
+            if (stmt.module or "").startswith("rest_framework"):
+                return True
+        elif isinstance(stmt, ast.Import) and any(
+            alias.name.startswith("rest_framework") for alias in stmt.names
+        ):
+            return True
+    return False

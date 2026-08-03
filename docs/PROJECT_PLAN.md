@@ -1827,6 +1827,23 @@ building it here pays for itself twice.
   check `ALL_FIELDS` and the base names against the installed DRF rather than
   trusting the transcription.
 - **2.2.2** — View discovery: `APIView`, generics, `ViewSet`, `ModelViewSet`, plus function views decorated with `@api_view`.
+  **Done.** `api/views.py` reads all four spellings into one `ViewNode`, whose
+  `writes` property answers "can this change data" the same way for an HTTP
+  method on a generic, an action on a viewset, and an `@action` on either.
+  DRF's ancestry has to be enumerated rather than followed — the class index
+  stops at the first name that leaves the project — so the concrete generics'
+  handlers and the mixins' actions are transcribed from
+  `rest_framework/generics.py` and `viewsets.py`; the bare mixins are
+  deliberately excluded from `VIEW_BASES` so a base class is not counted as an
+  endpoint. NetBox: **157 views** (143 viewsets, 13 `APIView`, 1 generic), 136
+  `get_queryset` overrides, 141 with a `queryset`, 24 `@action` routes from 12
+  declarations. pretix: **77 views** (62 viewsets, 15 `APIView`/generic — an
+  exact match for its 15 hand-written `APIView` classes), 55 `@action` routes
+  of which 12 are `detail=False`. Healthchecks: **0**, which is correct, as it
+  uses no DRF. Measurement found two defects: `queryset = Cable.objects.all()`
+  read as absent because a call has no dotted name, and `@action` declared on
+  a mixin — 2 of NetBox's 12 — missed entirely, which lost real writable routes
+  on dozens of viewsets. 21 tests.
 - **2.2.3** — Router and URL graph: `DefaultRouter.register`, `path`, `re_path`, `include`, resolving view to route to HTTP methods.
 - **2.2.4** — Permission and authentication resolution: class attributes, `get_permissions` overrides, `@permission_classes`, falling back to `REST_FRAMEWORK` defaults via the settings resolver.
 - **2.2.5** — Queryset resolution: the `queryset` attribute and `get_queryset` return expressions, including filters applied.
