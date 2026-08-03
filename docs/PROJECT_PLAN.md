@@ -2309,6 +2309,24 @@ building it here pays for itself twice.
 ### Step 2.5 — Availability rules
 
 - **2.5.1** — `DJA-013` list endpoint with no pagination and no bounded queryset.
+
+  **Done.** The rule has two branches, and the second one is why it exists.
+  Naming a `DEFAULT_PAGINATION_CLASS` without setting `PAGE_SIZE` does
+  *nothing*: `PageNumberPagination.page_size` is `api_settings.PAGE_SIZE` and
+  `paginate_queryset` returns `None` when it is falsy, so the settings file
+  reads as solved while every list endpoint still returns its whole table.
+  NetBox has exactly this shape and is correct anyway, because
+  `NetBoxPagination.__init__` assigns `default_limit` from runtime config — so
+  `supplies_its_own_size()` walks the named class and its ancestry for a size
+  attribute or a `get_limit`/`get_page_size` override. That check then had to
+  learn that `page_size = api_settings.PAGE_SIZE` is a redirect and not an
+  answer, or DRF's own base class would have vouched for every subclass of it.
+  A view setting `pagination_class = None` is reported against the view and
+  excluded from the settings finding, so one endpoint never draws two.
+  Suppressed entirely when the project has no DRF views: healthchecks has none,
+  and DRF's defaults are not facts about a library it does not install.
+  Benchmarks 0/0/0, both branches confirmed against a positive control.
+  11 tests.
 - **2.5.2** — `DJA-014` filter backend permitting arbitrary field lookups (`filterset_fields = '__all__'`).
 - **2.5.3** — `DJA-015` no throttling on authentication or password-reset endpoints.
 

@@ -89,12 +89,25 @@ class ApiRule(Rule):
     surface: ApiSurface
     defaults: Defaults
     settings_module: str | None
+    settings_view: SettingsView | None
 
     def check(self, ctx: ProjectContext) -> Iterator[Finding]:
+        for endpoint in self.endpoints(ctx):
+            yield from self.inspect(ctx, endpoint)
+
+    def endpoints(self, ctx: ProjectContext) -> Iterator[Endpoint]:
+        """Every routed view, resolved once.
+
+        Separated from :meth:`check` so a rule that also has something to say
+        about the project as a whole can count the endpoints its answer
+        applies to without running its own judgement over them twice.
+        """
         self.surface = ctx.api_surface
-        view = production_settings(ctx)
-        self.defaults = read_defaults(view)
-        self.settings_module = view.module.dotted if view is not None else None
+        self.settings_view = production_settings(ctx)
+        self.defaults = read_defaults(self.settings_view)
+        self.settings_module = (
+            self.settings_view.module.dotted if self.settings_view is not None else None
+        )
         index = self.surface.index
         if not self.surface.views or index is None:
             return
@@ -103,18 +116,15 @@ class ApiRule(Rule):
             node = self.surface.views.get(label)
             if node is None:
                 continue
-            yield from self.inspect(
-                ctx,
-                Endpoint(
-                    view=node,
-                    guard=guard,
-                    queryset=self.surface.querysets.get(label),
-                    methods=frozenset(m.upper() for m in self.surface.routes.methods_for(label)),
-                    collection_methods=frozenset(
-                        e.method.upper()
-                        for e in self.surface.routes.for_view(label)
-                        if e.kind == "list"
-                    ),
+            yield Endpoint(
+                view=node,
+                guard=guard,
+                queryset=self.surface.querysets.get(label),
+                methods=frozenset(m.upper() for m in self.surface.routes.methods_for(label)),
+                collection_methods=frozenset(
+                    e.method.upper()
+                    for e in self.surface.routes.for_view(label)
+                    if e.kind == "list"
                 ),
             )
 

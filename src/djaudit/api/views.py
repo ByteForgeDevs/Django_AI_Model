@@ -32,6 +32,7 @@ which is also what keeps a bare mixin from being mistaken for a view.
 from __future__ import annotations
 
 import ast
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -237,6 +238,28 @@ class ViewNode:
     does the name exist -- rather than membership of a fixed list.
     """
 
+    pagination_ref: str | None = None
+    """``pagination_class`` as written, or ``None`` when nobody set one."""
+
+    pagination_disabled: bool = False
+    """``pagination_class = None``, which switches the project default off.
+
+    Distinct from never setting it, because one is a decision and the other is
+    a default, and a finding that cannot tell them apart names the wrong file.
+    """
+
+    filter_backend_refs: tuple[str, ...] = ()
+    filterset_ref: str | None = None
+    filterset_fields_node: ast.expr | None = None
+    """``filterset_fields`` as written, kept unevaluated so ``'__all__'`` and a
+    list are distinguishable without a second pass."""
+
+    throttle_refs: tuple[str, ...] = ()
+    throttle_scope: str | None = None
+    throttles_unset: bool = True
+    """No ``throttle_classes`` anywhere in the ancestry, so
+    ``DEFAULT_THROTTLE_CLASSES`` decides -- which DRF ships empty."""
+
     bases: tuple[str, ...] = ()
 
     @property
@@ -417,6 +440,59 @@ def _inherited_actions(chain: tuple[ClassRecord, ...]) -> tuple[ExtraAction, ...
     return tuple(found.values())
 
 
+@dataclass(slots=True)
+class _Availability:
+    """The four class attributes that decide how much work one request can ask for.
+
+    Read in a pass of their own rather than inside the main ancestry walk,
+    because they answer a different question from authorization and grouping
+    them keeps either from having to be understood to change the other.
+    """
+
+    pagination_ref: str | None = None
+    pagination_disabled: bool = False
+    filter_backend_refs: tuple[str, ...] = ()
+    filterset_ref: str | None = None
+    filterset_fields_node: ast.expr | None = None
+    throttle_refs: tuple[str, ...] = ()
+    throttle_scope: str | None = None
+    throttles_unset: bool = True
+
+
+def _read_availability(chain: Sequence[ClassRecord]) -> _Availability:
+    """Nearest declaration wins, as everywhere else in this pass."""
+    out = _Availability()
+    for link in chain:
+        body = link.node.body
+        if out.pagination_ref is None and not out.pagination_disabled:
+            declared = _assigned(body, "pagination_class")
+            if declared is not None:
+                # `pagination_class = None` switches the project default off
+                # deliberately; never setting it accepts whatever the default
+                # is. A rule that cannot tell those apart names the wrong file.
+                if isinstance(declared, ast.Constant) and declared.value is None:
+                    out.pagination_disabled = True
+                else:
+                    out.pagination_ref = dotted_name(declared)
+        if not out.filter_backend_refs:
+            out.filter_backend_refs = _class_refs(body, "filter_backends")
+        if out.filterset_ref is None:
+            declared = _assigned(body, "filterset_class")
+            out.filterset_ref = dotted_name(declared) if declared is not None else None
+        if out.filterset_fields_node is None:
+            out.filterset_fields_node = _assigned(body, "filterset_fields")
+        if out.throttles_unset:
+            throttles = _class_refs(body, "throttle_classes")
+            if throttles or _assigned(body, "throttle_classes") is not None:
+                out.throttles_unset = False
+                out.throttle_refs = throttles
+        if out.throttle_scope is None:
+            declared = _assigned(body, "throttle_scope")
+            scope = literal(declared) if declared is not None else None
+            out.throttle_scope = scope if isinstance(scope, str) else None
+    return out
+
+
 def build_view(record: ClassRecord, index: ClassIndex) -> ViewNode:
     """Read one view class, following its ancestry for anything inherited."""
     targets = base_targets(record, index)
@@ -484,6 +560,8 @@ def build_view(record: ClassRecord, index: ClassIndex) -> ViewNode:
             if authentication or _assigned(link.node.body, "authentication_classes") is not None:
                 authentication_source = link.dotted
 
+    availability = _read_availability(chain)
+
     kind = (
         "viewset"
         if is_viewset
@@ -508,6 +586,14 @@ def build_view(record: ClassRecord, index: ClassIndex) -> ViewNode:
         permission_source=permission_source,
         authentication_source=authentication_source,
         permissions_unset=permissions_unset,
+        pagination_ref=availability.pagination_ref,
+        pagination_disabled=availability.pagination_disabled,
+        filter_backend_refs=availability.filter_backend_refs,
+        filterset_ref=availability.filterset_ref,
+        filterset_fields_node=availability.filterset_fields_node,
+        throttle_refs=availability.throttle_refs,
+        throttle_scope=availability.throttle_scope,
+        throttles_unset=availability.throttles_unset,
         overrides=frozenset(overrides),
         defined=frozenset(defined),
         bases=record.bases,

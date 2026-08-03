@@ -42,6 +42,10 @@ if TYPE_CHECKING:
 
 DEFAULT_PERMISSION_SETTING = "DEFAULT_PERMISSION_CLASSES"
 DEFAULT_AUTHENTICATION_SETTING = "DEFAULT_AUTHENTICATION_CLASSES"
+DEFAULT_PAGINATION_SETTING = "DEFAULT_PAGINATION_CLASS"
+PAGE_SIZE_SETTING = "PAGE_SIZE"
+DEFAULT_THROTTLE_SETTING = "DEFAULT_THROTTLE_CLASSES"
+THROTTLE_RATES_SETTING = "DEFAULT_THROTTLE_RATES"
 DRF_SETTING = "REST_FRAMEWORK"
 
 DRF_DEFAULT_PERMISSIONS = ("rest_framework.permissions.AllowAny",)
@@ -170,6 +174,25 @@ class Defaults:
     """``DEFAULT_PERMISSION_CLASSES`` is assigned but could not be evaluated,
     so the fallback is genuinely unknown rather than DRF's."""
 
+    pagination: str | None = None
+    """``DEFAULT_PAGINATION_CLASS``. DRF ships this as ``None``."""
+
+    page_size: int | None = None
+    """``PAGE_SIZE``, which DRF also ships as ``None``.
+
+    Kept separate from :attr:`pagination` because the pair is the whole point:
+    ``PageNumberPagination.page_size`` *is* ``api_settings.PAGE_SIZE``, and
+    ``paginate_queryset`` returns ``None`` when it is falsy. A project that
+    names a pagination class and never sets a page size has configured
+    pagination that does nothing at all, and looks paginated in every review.
+    """
+
+    throttles: tuple[str, ...] = ()
+    """``DEFAULT_THROTTLE_CLASSES``, which DRF ships empty."""
+
+    throttle_rates: tuple[str, ...] = ()
+    """The scope names in ``DEFAULT_THROTTLE_RATES`` that have a rate set."""
+
 
 def read_defaults(view: SettingsView | None) -> Defaults:
     """Read ``REST_FRAMEWORK`` out of one settings module.
@@ -194,6 +217,15 @@ def read_defaults(view: SettingsView | None) -> Defaults:
 
     permissions = block.get(DEFAULT_PERMISSION_SETTING)
     authentication = block.get(DEFAULT_AUTHENTICATION_SETTING)
+    pagination = block.get(DEFAULT_PAGINATION_SETTING)
+    page_size = block.get(PAGE_SIZE_SETTING)
+    throttles = block.get(DEFAULT_THROTTLE_SETTING)
+    rates = block.get(THROTTLE_RATES_SETTING)
+
+    pagination_value = pagination.value.literal if pagination is not None else None
+    size_value = page_size.value.literal if page_size is not None else None
+    throttle_value = _string_list(throttles.value.literal) if throttles is not None else None
+    rate_value = rates.value.literal if rates is not None else None
 
     resolved = _string_list(permissions.value.literal) if permissions is not None else None
     authenticators = (
@@ -210,6 +242,16 @@ def read_defaults(view: SettingsView | None) -> Defaults:
         settings_node=value_node,
         declared_by=module,
         permissions_unreadable=permissions is not None and resolved is None,
+        pagination=pagination_value if isinstance(pagination_value, str) else None,
+        page_size=(
+            size_value if isinstance(size_value, int) and not isinstance(size_value, bool) else None
+        ),
+        throttles=throttle_value if throttle_value is not None else (),
+        throttle_rates=(
+            tuple(str(k) for k, v in rate_value.items() if v)
+            if isinstance(rate_value, dict)
+            else ()
+        ),
     )
 
 
