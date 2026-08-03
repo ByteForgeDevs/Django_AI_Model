@@ -109,7 +109,20 @@ class Return:
 
     @property
     def scoped(self) -> bool:
-        return bool(self.scoping) or self.guarded
+        """Whether this return can be trusted not to hand over other people's rows.
+
+        ``none()`` counts. The pair
+
+            if self.request.user.is_staff:
+                return Model.objects.all()
+            return Model.objects.none()
+
+        is one of the most common ways a Django project spells a staff-only
+        list, and the second return leaks nothing by construction -- reading it
+        as an unscoped queryset makes the safest branch in the file the reason
+        the endpoint is reported.
+        """
+        return bool(self.scoping) or self.guarded or "none" in self.calls
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,20 +261,24 @@ def _object_scoping(chain: tuple[ClassRecord, ...]) -> tuple[str, ...]:
     return ()
 
 
-def _declared(view: ViewNode, chain: tuple[ClassRecord, ...]) -> QuerysetNode:
+def _declared(view: ViewNode, chain: tuple[ClassRecord, ...], start: int = 0) -> QuerysetNode:
     """The nearest ``get_queryset`` or ``queryset`` in the chain.
 
     A ``get_queryset`` override beats an attribute even when the attribute is
     nearer, because DRF only ever calls the method -- ``GenericAPIView`` reads
     ``self.queryset`` from inside its own ``get_queryset``, so an override
     replaces the attribute entirely rather than refining it.
+
+    ``start`` resumes the search past a link already read, which is how a
+    method built from ``super().get_queryset()`` reaches the declaration it
+    defers to.
     """
     providers = _providers(chain)
-    for link in chain:
+    for index, link in enumerate(chain[start:], start=start):
         method = _method(link.node, "get_queryset")
         if method is not None:
             returns = tuple(_returns(method, providers))
-            return QuerysetNode(
+            node = QuerysetNode(
                 source=Source.METHOD,
                 declared_by=f"{link.dotted}.get_queryset",
                 model_ref=_single(r.model_ref for r in returns),
@@ -270,6 +287,9 @@ def _declared(view: ViewNode, chain: tuple[ClassRecord, ...]) -> QuerysetNode:
                 unread=not returns,
                 lineno=method.lineno,
             )
+            if returns and all(r.delegates for r in returns):
+                return _inherit(node, _declared(view, chain, index + 1))
+            return node
         assigned = _assigned(link.node, "queryset")
         if assigned is not None:
             return QuerysetNode(
@@ -281,7 +301,7 @@ def _declared(view: ViewNode, chain: tuple[ClassRecord, ...]) -> QuerysetNode:
                 scoping=request_refs(assigned),
                 lineno=assigned.lineno,
             )
-    if view.queryset_ref is not None:
+    if start == 0 and view.queryset_ref is not None:
         return QuerysetNode(
             source=Source.ATTRIBUTE,
             declared_by=view.label,
@@ -290,6 +310,45 @@ def _declared(view: ViewNode, chain: tuple[ClassRecord, ...]) -> QuerysetNode:
             lineno=view.lineno,
         )
     return QuerysetNode(source=Source.ABSENT)
+
+
+def _inherit(node: QuerysetNode, parent: QuerysetNode) -> QuerysetNode:
+    """Carry a parent declaration's answers into a method that only refines it.
+
+    ``return super().get_queryset().order_by('-created')`` is the ordinary way
+    to add one clause to what a base class already decided, and read on its own
+    it is a queryset with no model and no request in it -- which is to say, an
+    unscoped list of nothing. Both halves of that are wrong, and the second is
+    wrong in the direction that reports a subclass of a correctly scoped
+    viewset.
+
+    Nothing is invented: when the parent is not scoped either, the delegating
+    return stays unscoped and is reported, which is the case where the
+    subclass really did inherit the defect.
+    """
+    if parent.source is Source.ABSENT:
+        return node
+    inherited = (
+        tuple(dict.fromkeys((*parent.scoping, *(s for r in parent.returns for s in r.scoping))))
+        if parent.scoped
+        else ()
+    )
+    return replace(
+        node,
+        model_ref=node.model_ref or parent.model_ref,
+        unread=node.unread or parent.unread,
+        returns=tuple(
+            replace(
+                candidate,
+                scoping=candidate.scoping or inherited,
+                # A parent scoped only by the condition its return sits under
+                # has no expression to hand down, and the child is protected
+                # by it just the same.
+                guarded=candidate.guarded or (parent.scoped and not inherited),
+            )
+            for candidate in node.returns
+        ),
+    )
 
 
 def _replace_scoping(

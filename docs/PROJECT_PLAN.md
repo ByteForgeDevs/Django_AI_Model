@@ -2540,6 +2540,43 @@ their own. Substep 2.6.1 extends `RULE_ID_PATTERN` to admit `DJD`.
   express, including one asserting `rule_errors` is empty — a crashed rule and
   a rule with nothing to say look identical otherwise.
 - **2.7.2** — Near-miss fixtures: correctly scoped querysets, correct read-only fields.
+
+  **Done.** `tests/fixtures/near_miss_project/catalog/` — a nine-endpoint DRF
+  app in which nothing is a defect, added to the fixture that already asked
+  this question of the settings family. A default `djaudit run` over the whole
+  project still reports nothing and exits zero.
+
+  DRF answers every question in three or four places, so this is where a rule
+  that checks one spelling reports the projects that used another. The string
+  `objects.all()` appears three times in `catalog/views.py` and is correct every
+  time: once narrowed by a mixin's `initial()` in another class (NetBox's
+  scheme), once reached only under `if self.request.user.is_staff` (pretix's),
+  and once refined through `super().get_queryset()`. `AccountSerializer` names
+  `password` and `api_key` in its field list and returns neither — one held
+  back by `extra_kwargs`, the other by `write_only=True` on the declared field
+  — and also names `password_changed_at`, which contains a secret's name and
+  holds a timestamp.
+
+  **Three false positives were found by writing it, and fixed rather than
+  annotated.** Every `@api_view` function was recorded as having declared
+  authentication and declared none, so `DJA-007` fired on any function view
+  that requires login — the class-based path had always checked whether the
+  attribute was actually assigned and the function path never did. A
+  `get_queryset` built from `super().get_queryset()` resolved to no model and
+  no scoping, so a subclass of a correctly scoped viewset read as an unscoped
+  list; `Return.delegates` had been recorded since 2.4 and never consulted.
+  And a `return Model.objects.none()` sitting beside a staff-only
+  `Model.objects.all()` did not count as narrowing, which made the safest
+  branch in the file the reason the endpoint was reported.
+
+  The last two are recall improvements as much as precision ones: a delegating
+  subclass now resolves its parent's model, so a rule that needs one is no
+  longer skipped before it reaches the question it was asked. All three
+  benchmarks are unchanged at 100% precision with nothing untriaged.
+
+  27 new tests. The fixture ones assert the surface was actually read — nine
+  routed views, five serializers, six models — because a fixture discovery
+  never reached would satisfy every silence assertion and prove nothing.
 - **2.7.3** — Validate the model graph against NetBox, which has hundreds of models — a strong correctness test.
 - **2.7.4** — Triage pass on both benchmarks.
 - **2.7.5** — `docs/rules/DJA.md`, plus an architecture note on the model graph.

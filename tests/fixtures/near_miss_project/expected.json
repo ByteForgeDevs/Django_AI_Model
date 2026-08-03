@@ -1,5 +1,5 @@
 {
-  "description": "Correct settings written in the shapes that look wrong. There are no defects in this project. Every line exists because a plausible implementation of some rule fires on it, and every one of those would be the kind of false positive that arrives on a team who did the work, gets dismissed, and takes the tool's credibility with it. The recall fixtures ask whether a rule fires, which is the easy half; this one asks the question that decides whether anybody keeps the tool installed. The entries are real deployment patterns, not contrived strings: ALLOWED_HOSTS with Django's leading-dot subdomain syntax, which is not the wildcard; PASSWORD_HASHERS with MD5 present but last, which is the correct way to keep verifying legacy hashes on an Argon2 project; ATOMIC_REQUESTS inside the DATABASES alias rather than at module level; an empty PASSWORD on a connection that authenticates by client certificate; CORS credentials allowed against an explicit origin list; X_FRAME_OPTIONS at Django's own SAMEORIGIN default; debug tooling behind `if DEBUG` and in requirements-dev.txt; and a reporter filter that extends Django's rather than replacing it. Two rules do speak here, and that is the second thing this fixture pins. DJS-012 and DJS-014 both have branches that describe a correct-looking configuration whose safety depends on something the source cannot see -- who terminates TLS, and who can create a subdomain. Both are capped at tentative on purpose, which puts them below the CLI's default confidence floor: a default `djaudit run` over this project reports nothing at all and exits zero, and the two findings are only reachable by asking for them. Pinning their grades here means any change that escalates an informational branch into a default-visible one breaks the gate.",
+  "description": "Correct settings written in the shapes that look wrong. There are no defects in this project. Every line exists because a plausible implementation of some rule fires on it, and every one of those would be the kind of false positive that arrives on a team who did the work, gets dismissed, and takes the tool's credibility with it. The recall fixtures ask whether a rule fires, which is the easy half; this one asks the question that decides whether anybody keeps the tool installed. The entries are real deployment patterns, not contrived strings: ALLOWED_HOSTS with Django's leading-dot subdomain syntax, which is not the wildcard; PASSWORD_HASHERS with MD5 present but last, which is the correct way to keep verifying legacy hashes on an Argon2 project; ATOMIC_REQUESTS inside the DATABASES alias rather than at module level; an empty PASSWORD on a connection that authenticates by client certificate; CORS credentials allowed against an explicit origin list; X_FRAME_OPTIONS at Django's own SAMEORIGIN default; debug tooling behind `if DEBUG` and in requirements-dev.txt; and a reporter filter that extends Django's rather than replacing it. Two rules do speak here, and that is the second thing this fixture pins. DJS-012 and DJS-014 both have branches that describe a correct-looking configuration whose safety depends on something the source cannot see -- who terminates TLS, and who can create a subdomain. Both are capped at tentative on purpose, which puts them below the CLI's default confidence floor: a default `djaudit run` over this project reports nothing at all and exits zero, and the two findings are only reachable by asking for them. Pinning their grades here means any change that escalates an informational branch into a default-visible one breaks the gate. The catalog app extends the same question to the API family, where it is harder: DRF answers every question in three or four places, and a rule that checks one spelling reports the projects that used another. The string `objects.all()` appears three times in catalog/views.py and is correct every time -- once narrowed by a mixin's `initial()` in another class, once reached only under `if self.request.user.is_staff`, and once refined through `super().get_queryset()`. `AccountSerializer` names `password` and `api_key` in its field list and returns neither, by two different spellings of write-only, and names `password_changed_at`, which contains a secret's name and holds a timestamp. Two false positives were found by writing this app and fixed rather than annotated: every `@api_view` function was recorded as having declared authentication and declared none, which reported DJA-007 on any function view requiring login; and a `get_queryset` built from `super().get_queryset()` resolved to no model and no scoping, so a subclass of a correctly scoped viewset read as an unscoped list. Nothing in this project is suppressed -- a default `djaudit run` over it reports nothing at all and exits zero.",
   "expected": [
     {
       "rule_id": "DJS-014",
@@ -11,7 +11,7 @@
     {
       "rule_id": "DJS-012",
       "file": "config/settings.py",
-      "line": 143,
+      "line": 146,
       "severity": "low",
       "confidence": "tentative"
     }
@@ -116,6 +116,78 @@
     {
       "rule_id": "DJS-026",
       "file": "config/urls.py"
+    },
+    {
+      "rule_id": "DJA-001",
+      "file": "config/settings.py"
+    },
+    {
+      "rule_id": "DJA-002",
+      "file": "catalog/views.py"
+    },
+    {
+      "rule_id": "DJA-003",
+      "file": "catalog/views.py"
+    },
+    {
+      "rule_id": "DJA-004",
+      "file": "catalog/views.py"
+    },
+    {
+      "rule_id": "DJA-005",
+      "file": "catalog/views.py"
+    },
+    {
+      "rule_id": "DJA-006",
+      "file": "catalog/views.py"
+    },
+    {
+      "rule_id": "DJA-007",
+      "file": "catalog/views.py"
+    },
+    {
+      "rule_id": "DJA-008",
+      "file": "catalog/serializers.py"
+    },
+    {
+      "rule_id": "DJA-009",
+      "file": "catalog/serializers.py"
+    },
+    {
+      "rule_id": "DJA-010",
+      "file": "catalog/serializers.py"
+    },
+    {
+      "rule_id": "DJA-011",
+      "file": "catalog/serializers.py"
+    },
+    {
+      "rule_id": "DJA-012",
+      "file": "catalog/serializers.py"
+    },
+    {
+      "rule_id": "DJA-013",
+      "file": "catalog/views.py"
+    },
+    {
+      "rule_id": "DJA-014",
+      "file": "catalog/views.py"
+    },
+    {
+      "rule_id": "DJA-015",
+      "file": "catalog/views.py"
+    },
+    {
+      "rule_id": "DJD-001",
+      "file": "catalog/models.py"
+    },
+    {
+      "rule_id": "DJD-002",
+      "file": "catalog/models.py"
+    },
+    {
+      "rule_id": "DJD-003",
+      "file": "catalog/models.py"
     }
   ]
 }

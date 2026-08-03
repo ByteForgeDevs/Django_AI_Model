@@ -630,6 +630,7 @@ def build_function_view(
         decorators = [
             dotted_name(d.func if isinstance(d, ast.Call) else d) or "" for d in node.decorator_list
         ]
+        applied = {resolve_dotted(bindings, d) for d in decorators}
         return ViewNode(
             name=node.name,
             module=module,
@@ -641,9 +642,20 @@ def build_function_view(
             permission_refs=_decorator_refs(node, bindings, "permission_classes"),
             authentication_refs=_decorator_refs(node, bindings, "authentication_classes"),
             permission_source=f"{module}.{node.name}",
-            authentication_source=f"{module}.{node.name}",
-            permissions_unset="rest_framework.decorators.permission_classes"
-            not in {resolve_dotted(bindings, d) for d in decorators},
+            # Only when the decorator is actually applied. A function view that
+            # never mentions authentication inherits
+            # DEFAULT_AUTHENTICATION_CLASSES exactly as a class-based one does,
+            # and naming the function as the source says the opposite -- that
+            # this view decided, and decided on nothing. DJA-007 reads that as
+            # authentication switched off under a permission that still demands
+            # a user, and reports every @api_view in the project that requires
+            # login.
+            authentication_source=(
+                f"{module}.{node.name}"
+                if "rest_framework.decorators.authentication_classes" in applied
+                else None
+            ),
+            permissions_unset="rest_framework.decorators.permission_classes" not in applied,
             bases=(API_VIEW_DECORATOR,),
         )
     return None

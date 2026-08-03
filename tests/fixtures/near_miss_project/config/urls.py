@@ -5,10 +5,11 @@ in INSTALLED_APPS because a third-party package needs its templates, which is
 common and is not the same thing as exposing the login form.
 """
 
-from django.urls import path
+from django.urls import include, path
 
 from . import views
 
 urlpatterns = [
     path("healthz/", views.healthz),
+    path("api/", include("catalog.urls")),
 ]

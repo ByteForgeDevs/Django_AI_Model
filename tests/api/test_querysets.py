@@ -434,6 +434,104 @@ class TestAncestryHooks:
         assert node.returns[0].delegates
         assert node.declared_by == "shop.api.ProjectViewSet.get_queryset"
 
+    def test_delegating_to_a_scoped_parent_is_scoped(self, make_project):
+        """The subclass adds a clause; it does not undo the parent's filter.
+
+        Read on its own, ``super().get_queryset().order_by(...)`` has no model
+        in it and no request in it -- which is to say it reads as an unscoped
+        list of nothing, and reporting it would report a subclass of a
+        correctly scoped viewset. Found by writing the near-miss fixture.
+        """
+        node = node_for(
+            make_project,
+            """
+            from rest_framework import viewsets
+            from shop.models import Project
+
+            class BaseViewSet(viewsets.ModelViewSet):
+                def get_queryset(self):
+                    return Project.objects.filter(owner=self.request.user)
+
+            class ProjectViewSet(BaseViewSet):
+                def get_queryset(self):
+                    return super().get_queryset().order_by('name')
+            """,
+        )
+        assert node.scoped
+        assert not node.unfiltered
+        assert node.returns[0].scoping == ("self.request.user",)
+        # The parent's model as well, so a rule that needs one is not skipped
+        # before it reaches the question it was asked.
+        assert node.model_ref == "Project"
+
+    def test_delegating_to_an_unscoped_parent_stays_unscoped(self, make_project):
+        """Nothing is invented. The subclass inherited the defect too."""
+        node = node_for(
+            make_project,
+            """
+            from rest_framework import viewsets
+            from shop.models import Project
+
+            class BaseViewSet(viewsets.ModelViewSet):
+                def get_queryset(self):
+                    return Project.objects.all()
+
+            class ProjectViewSet(BaseViewSet):
+                def get_queryset(self):
+                    return super().get_queryset().order_by('name')
+            """,
+        )
+        assert not node.scoped
+        assert node.unfiltered
+        assert node.model_ref == "Project"
+
+    def test_delegating_to_a_parent_scoped_only_by_a_condition(self, make_project):
+        """pretix's shape, one subclass down.
+
+        The parent has no scoping expression to hand over -- what protects it
+        is the ``if`` its return sits under -- so the child inherits the guard
+        rather than a filter it could quote.
+        """
+        node = node_for(
+            make_project,
+            """
+            from rest_framework import viewsets
+            from shop.models import Project
+
+            class BaseViewSet(viewsets.ModelViewSet):
+                def get_queryset(self):
+                    if self.request.user.is_staff:
+                        return Project.objects.all()
+                    return Project.objects.none()
+
+            class ProjectViewSet(BaseViewSet):
+                def get_queryset(self):
+                    return super().get_queryset().order_by('name')
+            """,
+        )
+        assert node.returns[0].guarded
+        assert node.scoped
+
+    def test_delegating_when_the_parent_declares_only_an_attribute(self, make_project):
+        """``super().get_queryset()`` on a base with a ``queryset`` attribute
+        reaches DRF's own ``GenericAPIView.get_queryset``, which returns it."""
+        node = node_for(
+            make_project,
+            """
+            from rest_framework import viewsets
+            from shop.models import Project
+
+            class BaseViewSet(viewsets.ModelViewSet):
+                queryset = Project.objects.filter(archived=False)
+
+            class ProjectViewSet(BaseViewSet):
+                def get_queryset(self):
+                    return super().get_queryset().order_by('name')
+            """,
+        )
+        assert node.model_ref == "Project"
+        assert not node.scoped
+
     def test_get_object_scoping_is_kept_apart_from_the_queryset(self, make_project):
         """NetBox's ``DashboardView``: ``queryset`` is every dashboard in the
         install and ``get_object`` returns only the caller's. That protects a
