@@ -1,8 +1,9 @@
 """The rule documentation has to be true, and it has to stay true.
 
-``docs/rules/DJS.md`` is generated from the registry, so the only way it can be
-wrong is if somebody edits the page instead of the rule, or edits the rule and
-forgets to regenerate. Both are caught here rather than in review.
+Every page under ``docs/rules/`` is generated from the registry, so the only
+way one can be wrong is if somebody edits the page instead of the rule, or
+edits the rule and forgets to regenerate. Both are caught here rather than in
+review.
 
 The rest of these tests are about the ``limitations`` field itself. It is the
 one piece of rule metadata whose absence is invisible -- a rule with no stated
@@ -19,12 +20,11 @@ from pathlib import Path
 import pytest
 
 from djaudit import registry
-from djaudit.models import Family
 from djaudit.registry import Rule
 
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "scripts" / "gen_rule_docs.py"
-DOC = ROOT / "docs" / "rules" / "DJS.md"
+DOCS = ROOT / "docs" / "rules"
 
 
 @pytest.fixture(scope="module")
@@ -66,7 +66,7 @@ class TestLimitations:
 
 
 class TestGeneratedDoc:
-    def test_committed_copy_is_current(self) -> None:
+    def test_committed_copies_are_current(self) -> None:
         result = subprocess.run(
             [sys.executable, str(GENERATOR), "--check"],
             capture_output=True,
@@ -74,15 +74,54 @@ class TestGeneratedDoc:
             check=False,
         )
         assert result.returncode == 0, (
-            f"docs/rules/DJS.md is stale; run scripts/gen_rule_docs.py\n{result.stderr}"
+            f"docs/rules/ is stale; run scripts/gen_rule_docs.py\n{result.stderr}"
         )
 
-    def test_every_djs_rule_has_a_section(self, rules: list[type[Rule]]) -> None:
-        text = DOC.read_text(encoding="utf-8")
+    def test_every_rule_has_a_section_on_its_family_page(self, rules: list[type[Rule]]) -> None:
+        # The generator used to be hardcoded to DJS, so DJA and DJD rules were
+        # documented nowhere while the check still passed. Reading each rule's
+        # own family means a new family cannot ship undocumented.
+        pages = {path.stem: path.read_text(encoding="utf-8") for path in DOCS.glob("*.md")}
         for rule in rules:
-            if rule.meta.family is not Family.DJS:
-                continue
-            assert f"### {rule.meta.id} — {rule.meta.title}" in text
+            family = rule.meta.family.value
+            assert family in pages, f"{rule.meta.id} has no {family} page"
+            assert f"### {rule.meta.id} — {rule.meta.title}" in pages[family]
 
-    def test_it_says_not_to_edit_by_hand(self) -> None:
-        assert "Do not edit by hand" in DOC.read_text(encoding="utf-8")
+    def test_a_page_exists_for_every_family_that_has_rules(self, rules: list[type[Rule]]) -> None:
+        families = {r.meta.family.value for r in rules}
+        assert families <= {p.stem for p in DOCS.glob("*.md")}
+
+    def test_no_page_exists_for_a_family_with_no_rules(self, rules: list[type[Rule]]) -> None:
+        # An empty family's page would describe rules that no longer run, which
+        # is the failure mode generation exists to prevent.
+        families = {r.meta.family.value for r in rules}
+        assert {p.stem for p in DOCS.glob("*.md")} <= families
+
+    def test_an_orphaned_page_fails_the_check(self, tmp_path: Path) -> None:
+        orphan = DOCS / "DJX.md"
+        assert not orphan.exists()
+        orphan.write_text("# DJX\n", encoding="utf-8")
+        try:
+            result = subprocess.run(
+                [sys.executable, str(GENERATOR), "--check"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        finally:
+            orphan.unlink()
+        assert result.returncode == 1
+        assert "ORPHANED" in result.stderr
+
+    def test_every_page_says_not_to_edit_by_hand(self) -> None:
+        for path in DOCS.glob("*.md"):
+            assert "Do not edit by hand" in path.read_text(encoding="utf-8"), path
+
+    def test_every_family_page_names_what_the_family_covers(self, rules) -> None:
+        # The one part of a page no rule can supply. A missing blurb would
+        # otherwise render as a heading with a blank line under it.
+        for path in DOCS.glob("*.md"):
+            text = path.read_text(encoding="utf-8")
+            heading = next(ln for ln in text.splitlines() if ln.startswith("# "))
+            assert heading.startswith(f"# `{path.stem}` — "), heading
+            assert len(heading) > len(f"# `{path.stem}` — ") + 10, heading
