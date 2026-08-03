@@ -2147,6 +2147,35 @@ building it here pays for itself twice.
 ### Step 2.4 — Data exposure rules
 
 - **2.4.1** — `DJA-008` `ModelSerializer` using `fields = '__all__'`.
+
+  **Done.** `src/djaudit/rules/serialization.py` — `SerializerRule` base plus
+  `DJA-008`. The base carries the loop and the two exclusions every rule in the
+  step shares: skip anything that is not a model serializer, because a plain
+  `Serializer` publishes exactly what it declares and has no model to
+  over-share; and skip anything with no `Meta` of its own, because that is an
+  abstract mixin whose field list is chosen by whichever concrete subclass uses
+  it, and reporting the mixin would name a file that cannot be fixed while
+  missing the one that ships. That second exclusion removes 38 classes on
+  NetBox and 27 on pretix.
+
+  The finding is raised **once per serializer, never per endpoint**. A
+  serializer is reused across views far more often than it is written, so a
+  field list that is wrong is wrong everywhere; reporting per route would
+  repeat one defect and imply the routes it did not name were fine. The cost —
+  that reachability is unknown — is stated in the rule's limitations instead of
+  being hidden behind a confidence level.
+
+  Every finding carries the columns `'__all__'` expands to *today*, read from
+  the model graph. A reader looking at that line sees one word, and the
+  argument for changing it is almost always a column in the expansion they had
+  forgotten was there.
+
+  **Zero on all three benchmarks, and the zero was verified against source**
+  rather than inferred from a clean report — neither NetBox nor pretix uses
+  `'__all__'` anywhere, and the single grep hit in NetBox is a class generated
+  inside a function, correctly not discovered. Recall is demonstrated by seven
+  tests, including one where the serializer's base is a package we cannot read,
+  which is how pretix spells all of its.
 - **2.4.2** — `DJA-009` serializer using `exclude`, which silently exposes every field added later.
 - **2.4.3** — `DJA-010` serializer exposing sensitive fields (`password`, `is_staff`, `is_superuser`, `token`, `secret`).
 - **2.4.4** — `DJA-011` writable field that should be read-only (`id`, `user`, `owner`, `created_by`) — mass assignment.
