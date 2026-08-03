@@ -1272,6 +1272,36 @@ than after twenty-six of them disagree, is cheaper.
   `tests/test_env_settings_fixture.py` asserting the confidence gap directly
   rather than only through the manifest.
 - **1.9.2** — Near-miss fixtures: the correct-looking shapes each rule must *not* flag.
+
+  **Done.** Seven rules — `DJS-002`, `DJS-003`, `DJS-011`, `DJS-016`,
+  `DJS-019`, `DJS-023`, `DJS-027` — had no control case anywhere, and most of
+  the rest had one only incidentally. **`tests/fixtures/near_miss_project`**
+  closes that: a project with no defects in it at all, where every line is
+  present because a plausible implementation of some rule fires on it.
+
+  The entries are real deployment patterns rather than contrived strings.
+  `ALLOWED_HOSTS = [".example.test"]` uses Django's leading-dot subdomain
+  syntax, which `validate_host` treats nothing like the wildcard. `MD5` is in
+  `PASSWORD_HASHERS` but *last*, which is the correct way to keep verifying
+  legacy hashes on an Argon2 project — Django only ever hashes with the first
+  entry. `ATOMIC_REQUESTS` is inside the `DATABASES` alias, where Django reads
+  it, rather than at module level where `DJS-023` reports it. `PASSWORD` is the
+  empty string because the connection authenticates by client certificate.
+  Credentials are allowed against an explicit CORS origin list, which is
+  `DJS-016`'s precondition without `DJS-016`'s defect. `X_FRAME_OPTIONS` is at
+  Django's own `SAMEORIGIN` default. The toolbar is behind `if DEBUG` and in
+  `requirements-dev.txt`. The reporter filter *extends* Django's.
+
+  Two rules do speak, and pinning them is the second thing the fixture is for.
+  `DJS-012` and `DJS-014` each have a branch describing a configuration that is
+  correct on its face and whose safety depends on something the source cannot
+  see — who terminates TLS, and who is allowed to create a subdomain under the
+  trusted domain. Both are capped at `tentative` deliberately, which puts them
+  under the CLI's default confidence floor. **A default `djaudit run` over this
+  project reports nothing and exits zero**; the two are reachable only by
+  asking. `tests/test_near_miss_fixture.py` asserts that directly, so any
+  change that promotes an informational branch into a default-visible one
+  breaks the gate rather than quietly landing on users.
 - **1.9.3** — Full triage pass over Healthchecks and NetBox; every finding classified with a written justification.
 - **1.9.4** — Tune severity and confidence based on the triage; document every downgrade.
 - **1.9.5** — `docs/rules/DJS.md` — one section per rule: what, why, remediation, references, and known limitations.

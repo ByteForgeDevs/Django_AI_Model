@@ -28,6 +28,11 @@ def env_settings_project() -> Path:
     return FIXTURES / "env_settings_project"
 
 
+@pytest.fixture
+def near_miss_project() -> Path:
+    return FIXTURES / "near_miss_project"
+
+
 def make_finding(
     rule_id: str = "DJS-001",
     file: str = "app/views.py",

@@ -1,0 +1,4 @@
+Django==6.0.7
+django-cors-headers==4.9.0
+argon2-cffi==25.1.0
+psycopg[binary]==3.3.4

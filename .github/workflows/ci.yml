@@ -97,6 +97,8 @@ jobs:
             --summary "$GITHUB_STEP_SUMMARY"
           uv run djaudit eval tests/fixtures/env_settings_project \
             --summary "$GITHUB_STEP_SUMMARY"
+          uv run djaudit eval tests/fixtures/near_miss_project \
+            --summary "$GITHUB_STEP_SUMMARY"
 
   false_positives:
     name: precision gate (${{ matrix.target.name }})
