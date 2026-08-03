@@ -859,6 +859,42 @@ than after twenty-six of them disagree, is cheaper.
   so the deferral is enforced by the eval gate rather than only by unit tests.
   It also pins `DJS-012`'s informational branch, which nothing else exercised.
 - **1.6.5** — `DJS-017` `X_FRAME_OPTIONS` permissive or `XFrameOptionsMiddleware` absent.
+
+  **Done.** First, the gap this exposed: `DJANGO_DEFAULTS` had no
+  `X_FRAME_OPTIONS`, so an unset one read as *absent* rather than as `DENY`.
+  Healthchecks never mentions the setting and was therefore invisible to a rule
+  that had not been written yet. Added, no version gate needed — Django moved
+  the default from `SAMEORIGIN` to `DENY` in 3.0, well below our 5.2 floor.
+
+  The header defines two values and browsers ignore anything else outright,
+  with no fallback, so `ALLOWALL` is worse than silence: framable, and the
+  settings file says otherwise. `ALLOW-FROM` sits in the same group and gets
+  its own sentence, since it reads like a precise policy and Chrome never
+  implemented it. `SAMEORIGIN` is not reported — NetBox sets exactly that, and
+  Django's own `W019` calls `DENY` a preference rather than a requirement.
+
+  The second way to be framable is to have no `XFrameOptionsMiddleware`, which
+  is a defect in a different setting with the same consequence and the same
+  fix, so it is one rule. `InsecureDefaultRule` gained `insecure_here()`, which
+  judges a situation where `insecure()` judges a value. It is suppressed when a
+  CSP is configured, because `frame-ancestors` supersedes this header and a
+  project that has moved on has not left anything switched off.
+
+  Grading that branch took a correction worth recording. It arrived at
+  `tentative`, because the shared policy charges a step of confidence when a
+  setting is at its Django default — but this branch does not depend on the
+  value at all; its evidence is `MIDDLEWARE`, read directly. Both branches have
+  the same consequence and the same single uncertainty (an edge proxy may send
+  the header itself), so `ceiling_for()` starts this one at `certain` and lets
+  the step land it beside its sibling at `firm`, rather than a grade below and
+  out of default runs.
+
+  `installs_middleware()` also needed fixing: it answered "not installed" for a
+  list where only some branches were readable. NetBox is exactly that shape,
+  so the bug was one conditional import away from a false positive.
+
+  Recall came free — `vulnerable_project` never had the middleware. The other
+  two fixtures now install it and list `DJS-017` as a control.
 - **1.6.6** — `DJS-018` `SECURE_CONTENT_TYPE_NOSNIFF` disabled.
 
 ### Step 1.7 — Authentication and database rules

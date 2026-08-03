@@ -505,9 +505,20 @@ class InsecureDefaultRule(SettingsRule):
         """
         return True
 
+    def insecure_here(self, ctx: ProjectContext, group: SettingGroup) -> bool:
+        """Whether this is the failure, judged against everything in scope.
+
+        ``insecure()`` judges a value; this judges a situation. They differ for
+        the settings whose protection can be missing rather than wrong -- a
+        header that is never emitted because its middleware is not installed is
+        the same defect as one emitted with a value browsers ignore, and both
+        have the same fix, so they are one rule and one finding.
+        """
+        return self.insecure(group.setting.value)
+
     def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
         resolved = group.setting
-        if not self.insecure(resolved.value):
+        if not self.insecure_here(ctx, group):
             return
         if not self.applies(ctx, group):
             return

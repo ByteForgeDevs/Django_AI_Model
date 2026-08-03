@@ -484,6 +484,7 @@ DJANGO_DEFAULTS: dict[str, Any] = {
     "SESSION_COOKIE_SAMESITE": "Lax",
     "SESSION_COOKIE_SECURE": False,
     "USE_X_FORWARDED_HOST": False,
+    "X_FRAME_OPTIONS": "DENY",
 }
 
 # Defaults that Django changed between supported releases. Reporting the wrong

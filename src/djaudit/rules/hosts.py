@@ -315,14 +315,17 @@ def installs_middleware(view: SettingsView, dotted: str) -> bool | None:
 
     The three-valued answer is the point. A setting that configures middleware
     which is not installed does nothing, so silence is right -- but only when we
-    genuinely read the list and it was not there. Plenty of projects build
+    genuinely read the whole list and it was not there. Plenty of projects build
     ``MIDDLEWARE`` conditionally, and treating "could not read" as "not
-    installed" would turn every one of those into a missed finding.
+    installed" would turn every one of those into a missed finding. NetBox is
+    the case that pins the shape: its ``MIDDLEWARE`` resolves to three branches
+    of which one is unreadable, so a partial read has to answer ``None`` unless
+    the entry turned up in a branch we could see.
     """
-    middleware = view.get("MIDDLEWARE")
-    if all(entries is None for entries in entries_of(middleware.value)):
-        return None
-    return any_entry(middleware.value, lambda entry: entry == dotted)
+    branches = entries_of(view.get("MIDDLEWARE").value)
+    if any(entries is not None and dotted in entries for entries in branches):
+        return True
+    return False if all(entries is not None for entries in branches) else None
 
 
 @register
@@ -461,5 +464,138 @@ class CorsWildcardWithCredentials(InsecureDefaultRule):
             _CORS_DOCS,
             "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Credentials",
             "https://owasp.org/www-community/attacks/CORS_OriginHeaderScrutiny",
+        ),
+    )
+
+
+FRAMING_MIDDLEWARE = "django.middleware.clickjacking.XFrameOptionsMiddleware"
+HONOURED_FRAME_OPTIONS = ("DENY", "SAMEORIGIN")
+
+
+def framing_values(value: Value) -> tuple[str, ...]:
+    """Every ``X_FRAME_OPTIONS`` string this value could be, as written."""
+    if value.is_conditional:
+        return tuple(item for branch in value.branches for item in framing_values(branch))
+    return (value.literal,) if isinstance(value.literal, str) else ()
+
+
+def framing_honoured(item: str) -> bool:
+    """Whether a browser acts on this value.
+
+    Django uppercases the setting before sending it, so a lowercase ``deny``
+    works and is not a finding -- but the comparison is the only place that
+    should uppercase anything, since a message quoting a mangled version of
+    what someone wrote is harder to act on than one quoting their own line.
+    """
+    return item.upper() in HONOURED_FRAME_OPTIONS
+
+
+@register
+class ClickjackingProtectionOff(InsecureDefaultRule):
+    """The site can be framed: no ``X-Frame-Options`` header, or one browsers ignore."""
+
+    setting = "X_FRAME_OPTIONS"
+    ceiling = Confidence.FIRM
+    corrected_as = "sets a value browsers honour"
+
+    def insecure(self, value: Value) -> bool:
+        values = framing_values(value)
+        return bool(values) and any(not framing_honoured(item) for item in values)
+
+    def _missing_middleware(self, group: SettingGroup) -> bool:
+        view = self.views.get(group.module.dotted)
+        if view is None:
+            return False
+        if installs_middleware(view, FRAMING_MIDDLEWARE) is not False:
+            return False
+        # Content-Security-Policy frame-ancestors supersedes X-Frame-Options
+        # wherever both are understood, and it is the direction the web is
+        # going, so a project that has moved to it has not left anything off.
+        # django-csp names it CSP_FRAME_ANCESTORS before 4.0 and puts it inside
+        # CONTENT_SECURITY_POLICY after; Django 6.0 ships SECURE_CSP.
+        return not any(
+            view.get(name).is_assigned
+            for name in ("CONTENT_SECURITY_POLICY", "CSP_FRAME_ANCESTORS", "SECURE_CSP")
+        )
+
+    def insecure_here(self, ctx: ProjectContext, group: SettingGroup) -> bool:
+        return self.insecure(group.setting.value) or self._missing_middleware(group)
+
+    def ceiling_for(self, resolved: ResolvedSetting) -> Confidence | None:
+        """Raise the ceiling on the branch the shared policy misjudges.
+
+        Both branches deserve the same grade: they have the same consequence
+        and the same single uncertainty, which is that an edge proxy might send
+        the header itself. The value branch gets it, because an explicit
+        X_FRAME_OPTIONS costs nothing. The middleware branch does not, because
+        the setting is at its default and the policy charges a step for that --
+        but that step is measuring confidence in a value this branch does not
+        depend on. Its evidence is MIDDLEWARE, read directly. Starting from
+        certain lets the step land it beside its sibling instead of a grade
+        below, and out of a default run.
+        """
+        if all(framing_honoured(item) for item in framing_values(resolved.value)):
+            return Confidence.CERTAIN
+        return None
+
+    def describe_state(self, resolved: ResolvedSetting) -> str:
+        rejected = [
+            item for item in framing_values(resolved.value) if item not in HONOURED_FRAME_OPTIONS
+        ]
+        if not rejected:
+            return "is never sent, because XFrameOptionsMiddleware is not installed"
+        listed = ", ".join(repr(item) for item in rejected)
+        if any(item.upper().startswith("ALLOW-FROM") for item in rejected):
+            return f"is {listed}, which every current browser has dropped support for"
+        return f"is {listed}, which is not a value the X-Frame-Options header defines"
+
+    def consequence_for(self, resolved: ResolvedSetting) -> str:
+        if not any(item not in HONOURED_FRAME_OPTIONS for item in framing_values(resolved.value)):
+            return (
+                "no browser is told anything about framing this site and every one of "
+                "them will allow it"
+            )
+        return (
+            "browsers ignore the header rather than falling back to a safe default, "
+            "which leaves the site framable by anyone while the setting reads as though "
+            "framing had been considered"
+        )
+
+    meta = RuleMeta(
+        id="DJS-017",
+        title="Clickjacking protection is off",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "X-Frame-Options decides whether another site may load this one in a frame "
+            "and trick a signed-in user into clicking something inside it. The header "
+            "defines exactly two values, DENY and SAMEORIGIN, and browsers ignore "
+            "anything else outright -- there is no falling back to a safe default. That "
+            "makes the invented values people copy from answers online, ALLOWALL in "
+            "particular, worse than leaving the setting alone: the site is framable and "
+            "the settings file says otherwise. ALLOW-FROM belongs in the same group; "
+            "Chrome never implemented it and Firefox dropped it in 70, so it is now a "
+            "policy that reads precisely and does nothing. The other way to end up "
+            "unprotected is to have no XFrameOptionsMiddleware, since the setting alone "
+            "sends no header. SAMEORIGIN is not reported: framing your own pages is a "
+            "normal thing to need, and Django's own check calls DENY a preference rather "
+            "than a requirement."
+        ),
+        remediation=(
+            "Set X_FRAME_OPTIONS to 'DENY', or to 'SAMEORIGIN' if the site frames its own "
+            "pages, and keep "
+            "'django.middleware.clickjacking.XFrameOptionsMiddleware' in MIDDLEWARE. To "
+            "allow one specific external site to frame you, X-Frame-Options cannot "
+            "express that at all -- use a Content-Security-Policy frame-ancestors "
+            "directive, which is what replaced ALLOW-FROM and is honoured in preference "
+            "to this header wherever both are present. Individual views that must be "
+            "framable are better handled with the xframe_options_exempt decorator than "
+            "by loosening the site-wide setting."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/clickjacking/",
+            "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options",
         ),
     )
