@@ -7,6 +7,9 @@ on:
     branches: [main, 'phase-*']
   pull_request:
 
+env:
+  UV_VERSION: "0.12.1"
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -20,7 +23,13 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
         with:
+          # Pinned, not floating. Resolving "latest" costs an anonymous GitHub
+          # API call from a shared runner IP, which has already rate-limited
+          # and failed a green commit; and an unpinned toolchain means CI can
+          # break on a morning when nobody changed anything.
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - run: uv sync
 
@@ -66,7 +75,13 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
         with:
+          # Pinned, not floating. Resolving "latest" costs an anonymous GitHub
+          # API call from a shared runner IP, which has already rate-limited
+          # and failed a green commit; and an unpinned toolchain means CI can
+          # break on a morning when nobody changed anything.
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - run: uv sync
 
@@ -99,7 +114,13 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
         with:
+          # Pinned, not floating. Resolving "latest" costs an anonymous GitHub
+          # API call from a shared runner IP, which has already rate-limited
+          # and failed a green commit; and an unpinned toolchain means CI can
+          # break on a morning when nobody changed anything.
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - run: uv sync
 
