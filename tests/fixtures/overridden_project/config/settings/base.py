@@ -39,6 +39,10 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": "fixture",
+        # Control for DJS-021: connections are reused, so the rule must not
+        # report this alias.
+        "CONN_MAX_AGE": 60,
+        "CONN_HEALTH_CHECKS": True,
     }
 }
 

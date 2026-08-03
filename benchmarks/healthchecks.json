@@ -73,6 +73,14 @@
       "file": "hc/settings.py",
       "line": 1,
       "note": "Real, and the rule's own caveat is the reason it needs a written answer. hc/settings.py never mentions AUTH_PASSWORD_VALIDATORS, so Django's validate_password() returns without checking anything, and that is a fact rather than an inference. Healthchecks is not left with no policy at all, though: hc/accounts/forms.py declares SetPasswordForm.password as forms.CharField(min_length=8), so the one form that sets a password does enforce a length. That is a partial mitigation and it is exactly the shape the rule warns it cannot see. It is still graded true_positive rather than accepted_risk for two reasons. First, min_length=8 alone accepts \"12345678\" and \"password\", which is precisely what credential stuffing tries first -- CommonPasswordValidator is the validator that matters here and there is no equivalent. Second, the check lives on one form, so it does not cover hc/accounts/management/commands/createsuperuser.py, which has to reimplement its own validate_password() to compensate; that duplication is itself the argument for moving the policy behind a validator, where every path that sets a password goes through it. Reported at medium/firm, which is the right size: this weakens passwords, it does not hand anyone an account."
+    },
+    {
+      "fingerprint": "1c91c02f9536ee0e",
+      "rule_id": "DJS-021",
+      "verdict": "accepted_risk",
+      "file": "hc/settings.py",
+      "line": 229,
+      "note": "Correctly identified and correctly graded low/tentative, which is the point of this entry. hc/settings.py:229 is `\"CONN_MAX_AGE\": envint(\"DB_CONN_MAX_AGE\", \"0\")` inside the Postgres branch, so an instance that does not set DB_CONN_MAX_AGE opens and closes a connection per request. That is real and it is what the rule says. It is accepted_risk rather than true_positive because Healthchecks is self-hosted software rather than one deployment: the setting is deliberately exposed as an environment variable and documented, so the project has handed the decision to the operator, which is the correct thing for it to do. The value of the finding is for the operator reading their own deployment, not for the project. The confidence lands at tentative on its own -- the value is env-dependent and the assignment sits inside an `if`, and the shared policy charges for both -- which keeps it below the default output threshold, exactly where a performance nudge with an invisible mitigation belongs."
     }
   ]
 }

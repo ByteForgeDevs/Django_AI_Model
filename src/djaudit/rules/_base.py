@@ -93,6 +93,15 @@ class SettingsRule(Rule):
     Resolution quality degrades it from here. A rule that observes a value
     directly can start at CERTAIN; one that infers intent should not.
     """
+    caveats: tuple[str, ...] = ()
+    """Doubt this rule always carries, attached to every finding it makes.
+
+    Distinct from :attr:`ceiling`, and the distinction matters. A ceiling is
+    for doubt about the *value*, and it is compounded by how well the value
+    resolved. This is for doubt about the *consequence* -- something outside
+    the settings that could make the finding moot -- which resolution quality
+    says nothing about, so charging it as a grade would both double-count and
+    hide the finding rather than qualify it."""
 
     views: dict[str, SettingsView]
     """Every production-reachable and development module, resolved once per run.
@@ -246,8 +255,9 @@ class SettingsRule(Rule):
         """Build a finding about ``group``, graded by the shared policy."""
         module, resolved = group.module, group.setting
         graded = assess(resolved, ceiling=ceiling or self.ceiling)
-        if extra_caveats:
-            graded = Assessment(graded.confidence, (*graded.caveats, *extra_caveats))
+        carried = tuple(c for c in (*self.caveats, *extra_caveats) if c not in graded.caveats)
+        if carried:
+            graded = Assessment(graded.confidence, (*graded.caveats, *carried))
 
         definition = resolved.definition
         path = definition.module if definition else module.path
@@ -507,16 +517,6 @@ class InsecureDefaultRule(SettingsRule):
     corrected_as = "sets it"
     """How to describe an heir that fixes the value, mid-sentence."""
 
-    caveats: tuple[str, ...] = ()
-    """Doubt this rule always carries, attached to every finding it makes.
-
-    Distinct from :attr:`ceiling`, and the distinction matters. A ceiling is
-    for doubt about the *value*, and it is compounded by how well the value
-    resolved. This is for doubt about the *consequence* -- something outside
-    the settings that could make the finding moot -- which resolution quality
-    says nothing about, so charging it as a grade would both double-count and
-    hide the finding rather than qualify it."""
-
     @abstractmethod
     def insecure(self, value: Value) -> bool:
         """Whether ``value`` is the unsafe one, on any branch."""
@@ -584,7 +584,7 @@ class InsecureDefaultRule(SettingsRule):
 
         severity: Severity | None = self.severity_for(resolved)
         ceiling: Confidence | None = self.ceiling_for(resolved)
-        caveats: tuple[str, ...] = self.caveats
+        caveats: tuple[str, ...] = ()
         corrected = self.overridden(group.module, lambda rs: not self.insecure(rs.value))
         if resolved.is_default and self.overridden(
             group.module, lambda rs: rs.is_assigned or not self.insecure(rs.value)

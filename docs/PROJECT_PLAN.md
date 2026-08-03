@@ -979,6 +979,40 @@ than after twenty-six of them disagree, is cheaper.
   silent. The vulnerable fixture carries the forgotten case; the other two
   fixtures gained validators and are the controls.
 - **1.7.3** — `DJS-021` `CONN_MAX_AGE` at the default of 0, forcing a new connection per request.
+
+  **Done.** The first rule about the *contents* of a nested mapping, so most of
+  the work is a new `database.py` that two more rules will reuse. Two problems
+  had to be solved. A real `DATABASES` block always holds something from the
+  environment, so the setting resolves to unknown and a rule waiting on it
+  would never fire — `entries()` is applied twice, once per level. And projects
+  assign `DATABASES` more than once: Healthchecks writes it three times, once
+  plainly and twice inside `if` statements keyed on `DB`, so the value the
+  resolver settles on is the *last* branch. Reading only that would have
+  inspected the MySQL block of a project deployed on Postgres. `DatabaseAliasRule`
+  therefore walks every live assignment — everything from the last
+  unconditional one onward, since a plain reassignment makes what precedes it
+  dead code — and hands each rule one alias with all of its possible shapes.
+
+  The rule itself is deliberately the narrowest in the family. `CONN_MAX_AGE`
+  at 0 is Django's default, so stated broadly it fires on nearly every project
+  ever written. Three exclusions make it mean something: SQLite (opening a file
+  is not a handshake, and Django warns that persistent connections there cause
+  locking problems), a configured `OPTIONS['pool']` (Django refuses to start
+  with both, so a pool is a deliberate answer), and any branch that reuses
+  connections. A branch whose `ENGINE` is unreadable also suppresses it, since
+  that branch might be the one that runs.
+
+  Graded `low`, ceiling `FIRM`, with a permanent caveat: an external pooler
+  makes 0 correct and is invisible from the settings. Wiring that caveat up
+  moved the `caveats` hook from `InsecureDefaultRule` to `SettingsRule`, where
+  `report()` — the single funnel every rule passes through — applies it.
+
+  Measured: Healthchecks reports once, at the Postgres branch's
+  `envint("DB_CONN_MAX_AGE", "0")`, landing at `tentative` on its own because
+  the value is env-dependent *and* conditional; triaged `accepted_risk`, since
+  self-hosted software exposing the knob has handed the decision to the
+  operator. NetBox builds `DATABASES` from an unreadable `configuration` object
+  and stays silent, which is the correct answer rather than a lucky one.
 - **1.7.4** — `DJS-022` Postgres connection without `sslmode=require`.
 - **1.7.5** — `DJS-023` `ATOMIC_REQUESTS` disabled where the project otherwise implies it — informational, low severity.
 

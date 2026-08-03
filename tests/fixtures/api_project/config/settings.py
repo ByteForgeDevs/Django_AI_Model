@@ -51,6 +51,8 @@ DATABASES = {
         "USER": os.environ["DB_USER"],
         "PASSWORD": os.environ["DB_PASSWORD"],
         "HOST": os.environ["DB_HOST"],
+        # Control for DJS-021: an alias that reuses connections.
+        "CONN_MAX_AGE": 600,
     }
 }
 

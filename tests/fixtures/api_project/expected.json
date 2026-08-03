@@ -1,17 +1,17 @@
 {
-  "description": "A browser-facing API in a single settings module, which is the shape most Django projects have and the one the split-settings pair does not cover: a rule that quietly assumes there is a base module to inherit from shows up here. Everything is deliberately configured correctly except one pairing. CORS is opened to every origin while credentials are allowed, and django-cors-headers responds by dropping the wildcard and reflecting the caller's own origin with Access-Control-Allow-Credentials: true -- so DJS-016 reports it as critical, and DJS-015 must stay silent, because the two rules carry inverse preconditions and one open CORS policy is one defect. SECURE_PROXY_SSL_HEADER is set correctly and is still reported at low/tentative: that is DJS-012's informational branch, which nothing else exercises, and it is here so that a change to it is a visible change.",
+  "description": "A browser-facing API in a single settings module, which is the shape most Django projects have and the one the split-settings pair does not cover: a rule that quietly assumes there is a base module to inherit from shows up here. Everything is deliberately configured correctly except one pairing. CORS is opened to every origin while credentials are allowed, and django-cors-headers responds by dropping the wildcard and reflecting the caller's own origin with Access-Control-Allow-Credentials: true -- so DJS-016 reports it as critical, and DJS-015 must stay silent, because the two rules carry inverse preconditions and one open CORS policy is one defect. SECURE_PROXY_SSL_HEADER is set correctly and is still reported at low/tentative: that is DJS-012's informational branch, which nothing else exercises, and it is here so that a change to it is a visible change. The 'default' alias sets CONN_MAX_AGE, which is the control for DJS-021.",
   "expected": [
     {
       "rule_id": "DJS-016",
       "file": "config/settings.py",
-      "line": 59,
+      "line": 61,
       "severity": "critical",
       "confidence": "certain"
     },
     {
       "rule_id": "DJS-012",
       "file": "config/settings.py",
-      "line": 67,
+      "line": 69,
       "severity": "low",
       "confidence": "tentative"
     }
