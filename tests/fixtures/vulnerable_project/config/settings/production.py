@@ -37,3 +37,9 @@ SECURE_HSTS_SECONDS = 3600
 SECURE_HSTS_INCLUDE_SUBDOMAINS = False
 
 SECURE_PROXY_SSL_HEADER = ("X-Forwarded-Proto", "https")
+
+# PLANTED DEFECT: ATOMIC_REQUESTS at module level (DJS-023), which is not a
+# Django setting at all -- it is a key inside a DATABASES alias. The line does
+# nothing, nothing warns, and whoever added it now believes a view that raises
+# halfway through rolls back.
+ATOMIC_REQUESTS = True

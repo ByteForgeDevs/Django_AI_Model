@@ -436,3 +436,149 @@ class PostgresWithoutTls(DatabaseAliasRule):
             "https://cwe.mitre.org/data/definitions/319.html",
         ),
     )
+
+
+PER_ALIAS_KEYS: dict[str, tuple[Severity, str]] = {
+    "ATOMIC_REQUESTS": (
+        Severity.MEDIUM,
+        "every view is wrapped in a transaction and rolls back as a unit when it "
+        "raises, when in fact each statement commits on its own and a view that "
+        "fails halfway leaves half its writes behind",
+    ),
+    "AUTOCOMMIT": (
+        Severity.MEDIUM,
+        "transactions are being managed explicitly, when Django is in fact "
+        "committing after every statement",
+    ),
+    "CONN_MAX_AGE": (
+        Severity.LOW,
+        "connections are reused between requests, when in fact every request still "
+        "opens and closes its own",
+    ),
+    "CONN_HEALTH_CHECKS": (
+        Severity.LOW,
+        "a connection dropped while idle is replaced before it is used, when in "
+        "fact the first query on it raises",
+    ),
+    "DISABLE_SERVER_SIDE_CURSORS": (
+        Severity.LOW,
+        "server-side cursors are switched off, which is the setting a connection "
+        "pooler in transaction mode needs, when in fact they are still in use",
+    ),
+}
+"""Keys Django reads only from inside a ``DATABASES`` alias.
+
+Deliberately limited to the five that change behaviour. Nobody writes ``ENGINE``
+at module level believing Django will read it, but people write ``CONN_MAX_AGE``
+there constantly, because every article showing the fix shows the line without
+the surrounding dictionary.
+"""
+
+
+def references(view: SettingsView, name: str) -> bool:
+    """Whether ``DATABASES`` in this module mentions ``name``.
+
+    ``CONN_MAX_AGE = int(os.getenv(...))`` followed by ``"CONN_MAX_AGE":
+    CONN_MAX_AGE`` inside the alias is a perfectly good way to write this, and
+    it is indistinguishable from the mistake until you look for the reference.
+    """
+    return any(
+        isinstance(child, ast.Name) and child.id == name
+        for definition in view.get("DATABASES").definitions
+        for child in ast.walk(definition.node)
+    )
+
+
+@register
+class DatabaseKeyAtModuleLevel(SettingsRule):
+    """A per-alias database key written where Django will never read it.
+
+    This is the same class of defect as DJS-012 and DJS-014 and the most
+    valuable thing this analyzer does: a line that looks like configuration,
+    reads like configuration, survives every review, and has no effect
+    whatsoever. Nothing warns. ``manage.py check --deploy`` says nothing,
+    because there is no such setting to complain about.
+    """
+
+    setting = ""
+    ceiling = Confidence.CERTAIN
+    """Django's ConnectionHandler reads these out of the alias mapping and
+    nowhere else. That is not an inference about a deployment, it is what the
+    framework does."""
+
+    caveats = (
+        "a project is free to read a name like this out of its own settings for its "
+        "own purposes, which would not be visible here",
+    )
+
+    def selects(self, name: str) -> bool:
+        return name in PER_ALIAS_KEYS
+
+    def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
+        resolved = group.setting
+        if not resolved.is_explicit:
+            return
+        if any(references(view, resolved.name) for view in self.views.values()):
+            return
+
+        severity, belief = PER_ALIAS_KEYS[resolved.name]
+        where = group.module.dotted or ctx.rel(group.module.path)
+        yield self.report(
+            ctx,
+            group,
+            severity=severity,
+            message=(
+                f"{resolved.name} is assigned at module level in {where}"
+                f"{group.describe_reach()}, but Django only ever reads it from inside "
+                f"a DATABASES alias, so the line does nothing -- and someone reading "
+                f"it will believe {belief}"
+            ),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.CONFIG,
+                    content=(
+                        f"{resolved.name} = {resolved.value.describe()}\n"
+                        f"read by Django from: DATABASES[alias][{resolved.name!r}]"
+                    ),
+                    source="djaudit settings resolver",
+                ),
+            ),
+        )
+
+    meta = RuleMeta(
+        id="DJS-023",
+        title="a per-alias database key is set where Django cannot see it",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "ATOMIC_REQUESTS, AUTOCOMMIT, CONN_MAX_AGE, CONN_HEALTH_CHECKS and "
+            "DISABLE_SERVER_SIDE_CURSORS are not Django settings. They are keys inside "
+            "a DATABASES alias: ConnectionHandler.configure_settings() fills their "
+            "defaults in per connection, and django.core.handlers.base reads "
+            "settings_dict['ATOMIC_REQUESTS'] rather than settings.ATOMIC_REQUESTS. "
+            "None of them appear in global_settings.py at all, so assigning one at "
+            "module level is not overriding anything -- it is creating a new setting "
+            "nothing reads. Nothing warns about it. There is no system check for a "
+            "setting that does not exist, `manage.py check --deploy` is silent, and "
+            "the application behaves exactly as it did before the line was added, "
+            "which is the problem: with ATOMIC_REQUESTS the author now believes "
+            "failed views roll back, and they do not."
+        ),
+        remediation=(
+            "Move the key inside the alias it is meant to configure: "
+            "DATABASES['default']['ATOMIC_REQUESTS'] = True, or write it into the "
+            "dictionary literal. If a module-level constant is wanted for readability, "
+            "keep it and reference it from inside the alias -- CONN_MAX_AGE at module "
+            "level is only a defect when nothing puts it into DATABASES. Note that "
+            "ATOMIC_REQUESTS applies per alias, so a project with a replica has to "
+            "decide for each one, and that Django will refuse to start if it is "
+            "combined with an async view."
+        ),
+        references=(
+            _DATABASES_DOCS,
+            "https://docs.djangoproject.com/en/stable/topics/db/transactions/#tying-transactions-to-http-requests",
+            "https://docs.djangoproject.com/en/stable/ref/settings/#std-setting-DATABASE-ATOMIC_REQUESTS",
+        ),
+    )

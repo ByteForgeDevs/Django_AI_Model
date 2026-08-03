@@ -1050,7 +1050,45 @@ than after twenty-six of them disagree, is cheaper.
   one; triaged `accepted_risk`, because self-hosted software exposing the knob
   is doing the right thing and many self-hosters are on a Unix socket. NetBox
   stays silent.
-- **1.7.5** — `DJS-023` `ATOMIC_REQUESTS` disabled where the project otherwise implies it — informational, low severity.
+- **1.7.5** — `DJS-023` a per-alias database key assigned at module level, where Django never reads it.
+
+  **Done.** This substep originally read "`ATOMIC_REQUESTS` disabled where the
+  project otherwise implies it — informational, low severity", and measuring it
+  killed it. `False` is Django's default *and* what Django's own documentation
+  recommends for most projects, so a rule reporting its absence would fire on
+  nearly every Django application ever written while telling each one to adopt
+  a setting the framework advises against. There was no version of it worth
+  shipping.
+
+  Reading Django's source turned up something much better in the same place.
+  `ATOMIC_REQUESTS`, `AUTOCOMMIT`, `CONN_MAX_AGE`, `CONN_HEALTH_CHECKS` and
+  `DISABLE_SERVER_SIDE_CURSORS` are **not settings**. They are keys inside a
+  `DATABASES` alias: `ConnectionHandler.configure_settings()` fills their
+  defaults in per connection and `django.core.handlers.base` reads
+  `settings_dict["ATOMIC_REQUESTS"]`. None appear in `global_settings.py` at
+  all, so assigning one at module level does not override anything — it invents
+  a setting nothing reads. Nothing warns, because there is no system check for
+  a setting that does not exist, and the application behaves exactly as it did
+  before the line was added. That is the danger: with `ATOMIC_REQUESTS = True`
+  the author now believes a view that raises halfway through rolls back.
+
+  So DJS-023 became the third member of this phase's "silently does nothing"
+  family, after DJS-012 and DJS-014 — the shape this analyzer is best at and
+  that no linter or deploy check covers. `medium`/`certain` for the two
+  transaction keys, `low` for the three connection keys, graded by what the
+  reader would wrongly believe.
+
+  The one false positive worth defending against is the module-level constant
+  that *is* referenced from inside the alias, which is a perfectly good way to
+  write it; `references()` walks the `DATABASES` assignments of every
+  production-reaching module looking for the name. `ENGINE`, `NAME` and the
+  credential keys are deliberately excluded — nobody writes them at module
+  level believing Django reads them, and they are far too common as ordinary
+  helper constants.
+
+  Measured: neither target assigns any of these at module level, so both stay
+  silent and recall comes from the fixture, where `production.py` now carries
+  `ATOMIC_REQUESTS = True`.
 
 ### Step 1.8 — Introspection exposure rules
 
