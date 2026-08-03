@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Iterator
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from djaudit.astutils import literal
 from djaudit.context import ProjectContext
+from djaudit.graph.meta import meta_class
 from djaudit.models import (
     Confidence,
     Evidence,
@@ -33,9 +37,13 @@ from djaudit.models import (
 )
 from djaudit.registry import RuleMeta, register
 from djaudit.rules._api import ApiRule, Endpoint
+from djaudit.rules.serialization import SECRET_FIELDS
 
 if TYPE_CHECKING:
+    from djaudit.api.permissions import Defaults
+    from djaudit.api.views import ViewNode
     from djaudit.graph.inheritance import ClassIndex
+    from djaudit.graph.nodes import ModelNode
 
 SIZE_ATTRIBUTES = frozenset({"page_size", "default_limit", "max_limit", "page_size_query_param"})
 """Attributes a pagination class sets to supply its own bound.
@@ -266,3 +274,340 @@ class UnboundedListEndpoint(ApiRule):
                 ),
             ),
         )
+
+
+ALL_FIELDS = "__all__"
+
+FILTER_BACKEND_MARKERS = ("DjangoFilterBackend", "FilterBackend", "filters.")
+"""Substrings that identify a backend which reads ``filterset_fields``.
+
+Deliberately loose. django-filter is normally imported as
+``django_filters.rest_framework.DjangoFilterBackend``, projects subclass it
+constantly, and a view naming ``filterset_fields`` with no backend anywhere is
+inert -- so the check exists to suppress that case, not to enumerate every
+backend in existence.
+"""
+
+ORACLE_LOOKUPS = frozenset(
+    {
+        "startswith",
+        "istartswith",
+        "endswith",
+        "iendswith",
+        "contains",
+        "icontains",
+        "regex",
+        "iregex",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "range",
+    }
+)
+"""Lookups that answer *part* of a value rather than confirming a whole one.
+
+``?password__startswith=a`` is a character-by-character read of a column the
+API never renders: one bit of the secret per request, no authentication beyond
+whatever the list endpoint already granted. ``exact`` on the same column only
+confirms a value the caller already had.
+"""
+
+
+def filter_backend_is_installed(endpoint: Endpoint, defaults: Defaults) -> bool:
+    """Whether anything is actually going to read the view's filter attributes.
+
+    ``filterset_fields`` is inert without a backend: DRF calls
+    ``filter_queryset`` over ``filter_backends``, and django-filter's
+    ``DjangoFilterBackend`` is the only thing that looks at the attribute.
+    """
+    refs = [*endpoint.view.filter_backend_refs, *defaults.filters]
+    return any(marker in ref for ref in refs for marker in FILTER_BACKEND_MARKERS)
+
+
+@dataclass
+class FilterSurface:
+    """What a view's filter configuration expands to, and where it was written."""
+
+    everything: bool = False
+    """Every model field is filterable: ``'__all__'``, or a filterset that
+    named an ``exclude`` and no ``fields``, which django-filter resolves to the
+    same thing."""
+
+    fields: tuple[str, ...] = ()
+    """Explicitly named filterable fields."""
+
+    excluded: tuple[str, ...] = ()
+    """Names an ``exclude`` list removed from the everything case, so a message
+    does not accuse a project of exposing the one column it remembered."""
+
+    lookups: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    """Per-field lookups, when the configuration was a dict."""
+
+    origin: str = ""
+    """How it was declared, for the message."""
+
+    line: int | None = None
+    path: Path | None = None
+
+
+def _field_names(node: ast.expr | None) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
+    value = literal(node)
+    if isinstance(value, dict):
+        lookups = {
+            str(k): tuple(str(x) for x in v)
+            for k, v in value.items()
+            if isinstance(v, list | tuple)
+        }
+        return tuple(lookups), lookups
+    if isinstance(value, list | tuple):
+        return tuple(str(v) for v in value), {}
+    return (), {}
+
+
+def read_filter_surface(endpoint: Endpoint, index: ClassIndex | None) -> FilterSurface | None:
+    """Resolve what the view actually made filterable.
+
+    ``filterset_class`` wins outright: ``DjangoFilterBackend.get_filterset_class``
+    returns it before it ever looks at ``filterset_fields``, so a view that sets
+    both has a dead attribute and reporting the dead one names a line that does
+    nothing.
+    """
+    view = endpoint.view
+    if view.filterset_ref is not None:
+        if index is None:
+            return None
+        # `filterset_class = filtersets.DeviceFilterSet` is written against the
+        # view module's imports, not as a dotted path, so looking it up
+        # verbatim finds nothing -- which is indistinguishable from a project
+        # that has no over-broad filtersets. NetBox declares 129 of these.
+        record = index.lookup(index.resolve_name(view.module, view.filterset_ref))
+        declaration = (
+            record.node if record is not None else nested_class(view, view.filterset_ref, index)
+        )
+        if declaration is None:
+            return None
+        meta = meta_class(declaration)
+        if meta is None:
+            return None
+        fields_node = _assigned_in(meta, "fields")
+        exclude_node = _assigned_in(meta, "exclude")
+        surface = FilterSurface(
+            origin=f"{view.filterset_ref}.Meta",
+            line=meta.lineno,
+            path=record.path if record is not None else view.path,
+        )
+        if fields_node is not None and literal(fields_node) == ALL_FIELDS:
+            surface.everything = True
+        elif fields_node is not None:
+            surface.fields, surface.lookups = _field_names(fields_node)
+        elif exclude_node is not None:
+            # django-filter: "Setting exclude with no fields implies all other
+            # fields." An exclude list is `__all__` with a hole in it, and the
+            # hole is the fields somebody remembered.
+            surface.everything = True
+            surface.origin = f"{view.filterset_ref}.Meta.exclude"
+            surface.excluded, _ = _field_names(exclude_node)
+        else:
+            return None
+        return surface
+
+    node = view.filterset_fields_node
+    if node is None:
+        return None
+    surface = FilterSurface(origin="filterset_fields", line=node.lineno, path=view.path)
+    if literal(node) == ALL_FIELDS:
+        surface.everything = True
+        return surface
+    surface.fields, surface.lookups = _field_names(node)
+    return surface if surface.fields else None
+
+
+def nested_class(view: ViewNode, name: str, index: ClassIndex) -> ast.ClassDef | None:
+    """A FilterSet written inside the viewset that uses it.
+
+    Not an edge case: pretix declares 23 of its 31 filtersets this way, and a
+    nested class is invisible to a module-level index, so without this the rule
+    would be blind to most of one benchmark and read as having found nothing.
+    """
+    if "." in name:
+        return None
+    owner = index.lookup(view.label)
+    if owner is None:
+        return None
+    for stmt in owner.node.body:
+        if isinstance(stmt, ast.ClassDef) and stmt.name == name:
+            return stmt
+    return None
+
+
+def _assigned_in(meta: ast.ClassDef, name: str) -> ast.expr | None:
+    for stmt in meta.body:
+        if isinstance(stmt, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == name for t in stmt.targets
+        ):
+            return stmt.value
+        if (
+            isinstance(stmt, ast.AnnAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.target.id == name
+        ):
+            return stmt.value
+    return None
+
+
+@register
+class ArbitraryFilterLookups(ApiRule):
+    """DJA-014 -- the list endpoint that will answer questions about a column
+    it never renders."""
+
+    meta = RuleMeta(
+        id="DJA-014",
+        title="Filter backend exposes every model field",
+        family=Family.DJA,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "django-filter resolves `'__all__'` through `get_all_model_fields`, which "
+            "returns every concrete field and every many-to-many on the model, minus "
+            "auto primary keys and parent links. Nothing about that list is reviewed: "
+            "adding a column to the model adds a query parameter to the public API. "
+            "When one of those columns holds credential material the endpoint becomes "
+            "an oracle -- the caller cannot read the value but can ask whether it "
+            "starts with a given character, one request at a time, and a filter that "
+            "answers is a filter that leaks. The same applies to `Meta.exclude` on a "
+            "FilterSet, which django-filter documents as meaning all other fields."
+        ),
+        remediation=(
+            "Name the fields the API is meant to filter on. `filterset_fields = "
+            "['status', 'created']` is the whole fix, and a dict form "
+            "`{'created': ['gte', 'lte']}` keeps the ranges worth having. Never list "
+            "a credential column, and prefer `exact` over substring and comparison "
+            "lookups on anything a caller should not be able to read."
+        ),
+        references=(
+            "https://django-filter.readthedocs.io/en/stable/guide/rest_framework.html",
+            "https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html",
+        ),
+        limitations=(
+            "A filterset built at runtime by `filterset_factory` or returned from an "
+            "overridden `get_filterset_class` is not read, so a project that generates "
+            "its filtersets dynamically will not be reported here.",
+            "The lookups a project considers dangerous depend on the column, and this "
+            "rule judges by field name alone, so a non-credential column holding "
+            "sensitive data under an ordinary name is not covered.",
+        ),
+    )
+
+    def check(self, ctx: ProjectContext) -> Iterator[Finding]:
+        seen: set[str] = set()
+        for endpoint in self.endpoints(ctx):
+            # Filtering is a class attribute, so a viewset routed to six
+            # methods has one filter surface and deserves one finding.
+            if endpoint.view.label in seen:
+                continue
+            seen.add(endpoint.view.label)
+            yield from self.inspect(ctx, endpoint)
+
+    def inspect(self, ctx: ProjectContext, endpoint: Endpoint) -> Iterator[Finding]:
+        if not filter_backend_is_installed(endpoint, self.defaults):
+            # No backend reads these attributes, so whatever they say, nothing
+            # happens. Reporting it would be reporting a comment.
+            return
+        surface = read_filter_surface(endpoint, self.surface.index)
+        if surface is None:
+            return
+        model = ctx.model_graph.get(endpoint.view.queryset_model_ref or "")
+        if surface.everything:
+            yield self.report_everything(ctx, endpoint, surface, model)
+            return
+        yield from self.report_named(ctx, endpoint, surface)
+
+    def where(self, ctx: ProjectContext, endpoint: Endpoint, surface: FilterSurface) -> Location:
+        path = surface.path or endpoint.view.path
+        line = surface.line or endpoint.view.lineno
+        return Location(file=ctx.rel(path), line=line, snippet=ctx.snippet(path, line))
+
+    def report_everything(
+        self,
+        ctx: ProjectContext,
+        endpoint: Endpoint,
+        surface: FilterSurface,
+        model: ModelNode | None,
+    ) -> Finding:
+        held_back = set(surface.excluded)
+        columns = sorted(
+            f for f in (model.fields if model is not None else {}) if f not in held_back
+        )
+        leaked = [f for f in columns if f in SECRET_FIELDS]
+        subject = model.label if model is not None else "its queryset model"
+        evidence = [
+            Evidence(
+                kind=EvidenceKind.AST,
+                content=f"{endpoint.view.label}: {surface.origin} = '__all__'",
+                source=ctx.rel(surface.path or endpoint.view.path),
+            )
+        ]
+        if model is not None and columns:
+            evidence.append(
+                Evidence(
+                    kind=EvidenceKind.AST,
+                    content=f"{model.label} is filterable on: {', '.join(columns)}",
+                    source="djaudit model graph",
+                )
+            )
+        if leaked:
+            message = (
+                f"{endpoint.view.name} makes every field of {subject} filterable, "
+                f"including {', '.join(leaked)}, so a caller can ask the API "
+                f"questions about a column it never returns."
+            )
+        else:
+            trailer = (
+                f" {surface.origin.rsplit('.', 1)[-1]} holds back "
+                f"{', '.join(sorted(held_back))}, but not anything added after it."
+                if held_back
+                else ""
+            )
+            message = (
+                f"{endpoint.view.name} makes every field of {subject} filterable, so any "
+                f"column added to the model later becomes a public query parameter.{trailer}"
+            )
+        return self.finding(
+            message=message,
+            location=self.where(ctx, endpoint, surface),
+            evidence=tuple(evidence),
+            severity=Severity.HIGH if leaked else Severity.MEDIUM,
+            confidence=Confidence.FIRM if leaked else Confidence.TENTATIVE,
+        )
+
+    def report_named(
+        self, ctx: ProjectContext, endpoint: Endpoint, surface: FilterSurface
+    ) -> Iterator[Finding]:
+        for name in surface.fields:
+            if name.split("__", 1)[0] not in SECRET_FIELDS:
+                continue
+            lookups = surface.lookups.get(name, ())
+            oracles = sorted(set(lookups) & ORACLE_LOOKUPS)
+            detail = (
+                f" with {', '.join(oracles)}, which reads it a character at a time"
+                if oracles
+                else ""
+            )
+            yield self.finding(
+                message=(
+                    f"{endpoint.view.name} lets callers filter on {name}{detail}, so the "
+                    f"endpoint answers questions about credential material."
+                ),
+                location=self.where(ctx, endpoint, surface),
+                evidence=(
+                    Evidence(
+                        kind=EvidenceKind.AST,
+                        content=f"{endpoint.view.label}: {surface.origin} includes {name}",
+                        source=ctx.rel(surface.path or endpoint.view.path),
+                    ),
+                ),
+                severity=Severity.HIGH,
+                confidence=Confidence.FIRM,
+            )

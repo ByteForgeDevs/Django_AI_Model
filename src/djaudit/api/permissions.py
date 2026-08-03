@@ -46,6 +46,7 @@ DEFAULT_PAGINATION_SETTING = "DEFAULT_PAGINATION_CLASS"
 PAGE_SIZE_SETTING = "PAGE_SIZE"
 DEFAULT_THROTTLE_SETTING = "DEFAULT_THROTTLE_CLASSES"
 THROTTLE_RATES_SETTING = "DEFAULT_THROTTLE_RATES"
+DEFAULT_FILTER_SETTING = "DEFAULT_FILTER_BACKENDS"
 DRF_SETTING = "REST_FRAMEWORK"
 
 DRF_DEFAULT_PERMISSIONS = ("rest_framework.permissions.AllowAny",)
@@ -174,6 +175,13 @@ class Defaults:
     """``DEFAULT_PERMISSION_CLASSES`` is assigned but could not be evaluated,
     so the fallback is genuinely unknown rather than DRF's."""
 
+    filters: tuple[str, ...] = ()
+    """``DEFAULT_FILTER_BACKENDS``, which DRF ships empty.
+
+    A view can name ``filterset_fields`` all it likes; without a backend
+    installed to read them, django-filter is never invoked and the attribute is
+    decoration."""
+
     pagination: str | None = None
     """``DEFAULT_PAGINATION_CLASS``. DRF ships this as ``None``."""
 
@@ -221,11 +229,13 @@ def read_defaults(view: SettingsView | None) -> Defaults:
     page_size = block.get(PAGE_SIZE_SETTING)
     throttles = block.get(DEFAULT_THROTTLE_SETTING)
     rates = block.get(THROTTLE_RATES_SETTING)
+    filters = block.get(DEFAULT_FILTER_SETTING)
 
     pagination_value = pagination.value.literal if pagination is not None else None
     size_value = page_size.value.literal if page_size is not None else None
     throttle_value = _string_list(throttles.value.literal) if throttles is not None else None
     rate_value = rates.value.literal if rates is not None else None
+    filter_value = _string_list(filters.value.literal) if filters is not None else None
 
     resolved = _string_list(permissions.value.literal) if permissions is not None else None
     authenticators = (
@@ -246,6 +256,7 @@ def read_defaults(view: SettingsView | None) -> Defaults:
         page_size=(
             size_value if isinstance(size_value, int) and not isinstance(size_value, bool) else None
         ),
+        filters=filter_value if filter_value is not None else (),
         throttles=throttle_value if throttle_value is not None else (),
         throttle_rates=(
             tuple(str(k) for k, v in rate_value.items() if v)

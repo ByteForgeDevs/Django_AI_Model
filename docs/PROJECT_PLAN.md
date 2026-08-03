@@ -2328,6 +2328,33 @@ building it here pays for itself twice.
   Benchmarks 0/0/0, both branches confirmed against a positive control.
   11 tests.
 - **2.5.2** — `DJA-014` filter backend permitting arbitrary field lookups (`filterset_fields = '__all__'`).
+
+  **Done.** django-filter resolves `'__all__'` through `get_all_model_fields`,
+  which returns every concrete field and every m2m on the model. Nothing about
+  that list is reviewed, so adding a column adds a query parameter — and when
+  the column is credential material the endpoint becomes an oracle: the caller
+  cannot read `password` but can ask whether it starts with `a`, one request at
+  a time. `Meta.exclude` with no `Meta.fields` is the same thing, because
+  django-filter documents it as meaning all other fields; the excluded names
+  are subtracted from the message so the finding does not accuse a project of
+  exposing the one column it remembered.
+
+  Three precision guards came out of the source. `filterset_class` wins
+  outright — `get_filterset_class` returns it before it looks at
+  `filterset_fields` — so the dead attribute is never named. `filterset_fields`
+  with no filter backend, on the view or in `DEFAULT_FILTER_BACKENDS`, is
+  decoration and stays silent. And one finding per view, not per route.
+
+  Both zeros were nearly fake. `filterset_class = filtersets.DeviceFilterSet`
+  is written against the view module's imports, not as a dotted path, so
+  looking it up verbatim resolved **0 of NetBox's 129** filtersets — a
+  measurement identical to a clean project. Resolving through
+  `ClassIndex.resolve_name` took it to 129/129, all explicit. pretix then
+  resolved 3 of 31, because it declares its filtersets inside
+  `with scopes_disabled():` and `class_defs` walked `if` and `try` but not
+  `with`; extending it took pretix to 29/31 and left every other benchmark
+  count unchanged. Benchmarks 0/0/0, with four firing branches confirmed
+  against a positive control. 13 tests.
 - **2.5.3** — `DJA-015` no throttling on authentication or password-reset endpoints.
 
 ### Step 2.6 — Model correctness rules

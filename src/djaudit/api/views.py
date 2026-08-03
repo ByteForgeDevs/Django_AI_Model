@@ -480,7 +480,11 @@ def _read_availability(chain: Sequence[ClassRecord]) -> _Availability:
             declared = _assigned(body, "filterset_class")
             out.filterset_ref = dotted_name(declared) if declared is not None else None
         if out.filterset_fields_node is None:
-            out.filterset_fields_node = _assigned(body, "filterset_fields")
+            # `filter_fields` is django-filter's pre-2.0 spelling, still
+            # accepted with a deprecation warning and still in real code.
+            out.filterset_fields_node = _assigned(body, "filterset_fields") or _assigned(
+                body, "filter_fields"
+            )
         if out.throttles_unset:
             throttles = _class_refs(body, "throttle_classes")
             if throttles or _assigned(body, "throttle_classes") is not None:

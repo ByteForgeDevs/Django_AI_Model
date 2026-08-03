@@ -325,11 +325,17 @@ def absolute(dotted: str, module: str, *, is_package: bool = False) -> str:
 
 
 def class_defs(body: list[ast.stmt]) -> list[ast.ClassDef]:
-    """Top-level classes, plus those inside ``if``/``try`` blocks.
+    """Top-level classes, plus those inside ``if``/``try``/``with`` blocks.
 
     Conditionally defined models are rare but real -- a model guarded by a
     feature flag or an optional dependency still creates a table when the
     branch is taken.
+
+    ``with`` is not rare at all. django-scopes asks projects to define
+    tenant-scoped classes inside ``with scopes_disabled():``, and pretix
+    declares 23 of its filtersets that way. A class in a ``with`` block is an
+    ordinary module-level class with a context manager wrapped around its
+    definition, and skipping it makes a whole project look like it has none.
     """
     out: list[ast.ClassDef] = []
     for stmt in body:
@@ -338,6 +344,8 @@ def class_defs(body: list[ast.stmt]) -> list[ast.ClassDef]:
         elif isinstance(stmt, ast.If):
             out.extend(class_defs(stmt.body))
             out.extend(class_defs(stmt.orelse))
+        elif isinstance(stmt, ast.With | ast.AsyncWith):
+            out.extend(class_defs(stmt.body))
         elif isinstance(stmt, ast.Try):
             out.extend(class_defs(stmt.body))
             for handler in stmt.handlers:

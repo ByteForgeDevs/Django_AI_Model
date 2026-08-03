@@ -246,3 +246,278 @@ class TestUnboundedListEndpoint:
         found = run(make_project, "DJA-013")
         blob = " ".join(e.content for e in found[0].evidence)
         assert "shop.api.NoteViewSet lists Note" in blob
+
+
+DJANGO_FILTERS = """
+class FilterSet:
+    pass
+"""
+
+ACCOUNT = """
+from django.db import models
+
+class Account(models.Model):
+    email = models.EmailField()
+    password = models.CharField(max_length=128)
+    status = models.CharField(max_length=20)
+"""
+
+FILTERED = """
+from rest_framework import viewsets
+from rest_framework.permissions import IsAuthenticated
+from django_filters.rest_framework import DjangoFilterBackend
+from shop.models import Account
+
+class AccountViewSet(viewsets.ModelViewSet):
+    queryset = Account.objects.all()
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+"""
+
+ACCOUNT_ROUTED = """
+from rest_framework import routers
+from shop.api import AccountViewSet
+
+router = routers.DefaultRouter()
+router.register('accounts', AccountViewSet)
+urlpatterns = router.urls
+"""
+
+
+def filtered(make_project, view_body: str, **extra: str) -> list[Finding]:
+    return run(
+        make_project,
+        "DJA-014",
+        api_source=FILTERED + view_body,
+        urls=ACCOUNT_ROUTED,
+        **{
+            "shop/models.py": ACCOUNT,
+            "django_filters/__init__.py": DJANGO_FILTERS,
+            "django_filters/rest_framework.py": (
+                "from django_filters import FilterSet\n\nclass DjangoFilterBackend:\n    pass\n"
+            ),
+            **extra,
+        },
+    )
+
+
+class TestArbitraryFilterLookups:
+    """DJA-014 -- the query parameter nobody reviewed."""
+
+    def test_reports_all_fields_inline(self, make_project) -> None:
+        found = filtered(make_project, "    filterset_fields = '__all__'\n")
+        assert len(found) == 1
+        assert found[0].severity is Severity.HIGH
+        assert "password" in found[0].message
+
+    def test_reports_the_legacy_attribute_name(self, make_project) -> None:
+        """`filter_fields` is django-filter's pre-2.0 spelling and still works."""
+        found = filtered(make_project, "    filter_fields = '__all__'\n")
+        assert len(found) == 1
+
+    def test_reports_a_filterset_class(self, make_project) -> None:
+        found = filtered(
+            make_project,
+            "    filterset_class = AccountFilter\n",
+            **{
+                "shop/filters.py": (
+                    "from django_filters import FilterSet\n"
+                    "from shop.models import Account\n\n"
+                    "class AccountFilter(FilterSet):\n"
+                    "    class Meta:\n"
+                    "        model = Account\n"
+                    "        fields = '__all__'\n"
+                ),
+                "shop/api.py": FILTERED.replace(
+                    "from shop.models import Account",
+                    "from shop.models import Account\nfrom shop.filters import AccountFilter",
+                )
+                + "    filterset_class = AccountFilter\n",
+            },
+        )
+        assert len(found) == 1
+        assert found[0].location.file == "shop/filters.py"
+        assert found[0].severity is Severity.HIGH
+
+    def test_resolves_the_filterset_through_the_view_module_imports(self, make_project) -> None:
+        """`filterset_class = filters.AccountFilter` is not a dotted path.
+
+        Looking it up verbatim finds nothing, which reads exactly like a
+        project with no over-broad filtersets. NetBox declares 129 of these.
+        """
+        found = filtered(
+            make_project,
+            "from shop import filters\n\n"
+            "class Wide(viewsets.ModelViewSet):\n"
+            "    queryset = Account.objects.all()\n"
+            "    permission_classes = [IsAuthenticated]\n"
+            "    filter_backends = [DjangoFilterBackend]\n"
+            "    filterset_class = filters.AccountFilter\n",
+            **{
+                "shop/filters.py": (
+                    "from django_filters import FilterSet\n"
+                    "from shop.models import Account\n\n"
+                    "class AccountFilter(FilterSet):\n"
+                    "    class Meta:\n"
+                    "        model = Account\n"
+                    "        fields = '__all__'\n"
+                ),
+                "shop/urls.py": (
+                    "from rest_framework import routers\n"
+                    "from shop.api import AccountViewSet, Wide\n\n"
+                    "router = routers.DefaultRouter()\n"
+                    "router.register('accounts', AccountViewSet)\n"
+                    "router.register('wide', Wide)\n"
+                    "urlpatterns = router.urls\n"
+                ),
+            },
+        )
+        assert len(found) == 1
+        assert found[0].location.file == "shop/filters.py"
+
+    def test_silent_on_a_filterset_with_no_meta(self, make_project) -> None:
+        """A FilterSet that only declares filters exposes exactly those."""
+        found = filtered(
+            make_project,
+            "    filterset_class = AccountFilter\n",
+            **{
+                "shop/filters.py": (
+                    "import django_filters\n"
+                    "from django_filters import FilterSet\n\n"
+                    "class AccountFilter(FilterSet):\n"
+                    "    status = django_filters.CharFilter()\n"
+                ),
+                "shop/api.py": FILTERED.replace(
+                    "from shop.models import Account",
+                    "from shop.models import Account\nfrom shop.filters import AccountFilter",
+                )
+                + "    filterset_class = AccountFilter\n",
+            },
+        )
+        assert found == []
+
+    def test_exclude_is_not_accused_of_exposing_what_it_removed(self, make_project) -> None:
+        found = filtered(
+            make_project,
+            "    filterset_class = AccountFilter\n",
+            **{
+                "shop/filters.py": (
+                    "from django_filters import FilterSet\n"
+                    "from shop.models import Account\n\n"
+                    "class AccountFilter(FilterSet):\n"
+                    "    class Meta:\n"
+                    "        model = Account\n"
+                    "        exclude = ['password']\n"
+                ),
+                "shop/api.py": FILTERED.replace(
+                    "from shop.models import Account",
+                    "from shop.models import Account\nfrom shop.filters import AccountFilter",
+                )
+                + "    filterset_class = AccountFilter\n",
+            },
+        )
+        assert len(found) == 1
+        assert "including password" not in found[0].message
+        assert "holds back password" in found[0].message
+        assert found[0].severity is Severity.MEDIUM
+
+    def test_finds_a_filterset_nested_in_a_with_block(self, make_project) -> None:
+        """pretix declares 23 of its filtersets inside `with scopes_disabled():`."""
+        found = filtered(
+            make_project,
+            "    filterset_class = AccountFilter\n",
+            **{
+                "shop/filters.py": (
+                    "from django_filters import FilterSet\n"
+                    "from django_scopes import scopes_disabled\n"
+                    "from shop.models import Account\n\n"
+                    "with scopes_disabled():\n"
+                    "    class AccountFilter(FilterSet):\n"
+                    "        class Meta:\n"
+                    "            model = Account\n"
+                    "            fields = '__all__'\n"
+                ),
+                "shop/api.py": FILTERED.replace(
+                    "from shop.models import Account",
+                    "from shop.models import Account\nfrom shop.filters import AccountFilter",
+                )
+                + "    filterset_class = AccountFilter\n",
+            },
+        )
+        assert len(found) == 1
+        assert found[0].location.file == "shop/filters.py"
+
+    def test_reports_a_substring_lookup_on_a_secret(self, make_project) -> None:
+        found = filtered(
+            make_project,
+            "    filterset_fields = {'password': ['startswith'], 'status': ['exact']}\n",
+        )
+        assert len(found) == 1
+        assert "startswith" in found[0].message
+        assert found[0].severity is Severity.HIGH
+
+    def test_silent_on_an_explicit_safe_field_list(self, make_project) -> None:
+        found = filtered(make_project, "    filterset_fields = ['status', 'email']\n")
+        assert found == []
+
+    def test_silent_without_a_backend_to_read_it(self, make_project) -> None:
+        """`filterset_fields` with no filter backend is a comment."""
+        found = run(
+            make_project,
+            "DJA-014",
+            api_source=FILTERED.replace("    filter_backends = [DjangoFilterBackend]\n", "")
+            + "    filterset_fields = '__all__'\n",
+            urls=ACCOUNT_ROUTED,
+            **{
+                "shop/models.py": ACCOUNT,
+                "django_filters/__init__.py": DJANGO_FILTERS,
+                "django_filters/rest_framework.py": "class DjangoFilterBackend:\n    pass\n",
+            },
+        )
+        assert found == []
+
+    def test_a_project_default_backend_counts(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJA-014",
+            api_source=FILTERED.replace("    filter_backends = [DjangoFilterBackend]\n", "")
+            + "    filterset_fields = '__all__'\n",
+            urls=ACCOUNT_ROUTED,
+            settings=settings_with(
+                DEFAULT_FILTER_BACKENDS=("['django_filters.rest_framework.DjangoFilterBackend']")
+            ),
+            **{
+                "shop/models.py": ACCOUNT,
+                "django_filters/__init__.py": DJANGO_FILTERS,
+                "django_filters/rest_framework.py": "class DjangoFilterBackend:\n    pass\n",
+            },
+        )
+        assert len(found) == 1
+
+    def test_reports_once_for_a_viewset_routed_to_many_methods(self, make_project) -> None:
+        found = filtered(make_project, "    filterset_fields = '__all__'\n")
+        assert len(found) == 1
+
+    def test_filterset_class_wins_over_filterset_fields(self, make_project) -> None:
+        """`get_filterset_class` returns the class before reading the fields."""
+        found = filtered(
+            make_project,
+            "    filterset_fields = '__all__'\n",
+            **{
+                "shop/api.py": FILTERED.replace(
+                    "from shop.models import Account",
+                    "from shop.models import Account\nfrom shop.filters import AccountFilter",
+                )
+                + "    filterset_class = AccountFilter\n"
+                + "    filterset_fields = '__all__'\n",
+                "shop/filters.py": (
+                    "from django_filters import FilterSet\n"
+                    "from shop.models import Account\n\n"
+                    "class AccountFilter(FilterSet):\n"
+                    "    class Meta:\n"
+                    "        model = Account\n"
+                    "        fields = ['status']\n"
+                ),
+            },
+        )
+        assert found == []
