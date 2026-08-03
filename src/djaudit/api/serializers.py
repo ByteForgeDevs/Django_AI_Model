@@ -176,6 +176,20 @@ class SerializerNode:
             or bool(declared and declared.read_only)
         )
 
+    def field_line(self, name: str) -> int:
+        """The most useful line to point a finding at for one field.
+
+        A field declared in this class's own body has a line worth citing. One
+        inherited from a base does not -- its line number belongs to another
+        file, and pairing it with this file's path would send the reader to
+        whatever happens to sit there. In that case the class declaration is
+        the honest answer.
+        """
+        declared = self.declared.get(name)
+        if declared is not None and self.lineno <= declared.lineno <= self.end_lineno:
+            return declared.lineno
+        return self.lineno
+
     def is_write_only(self, name: str) -> bool:
         """Whether the field is accepted on input but never returned.
 

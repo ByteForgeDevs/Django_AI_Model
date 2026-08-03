@@ -75,6 +75,86 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-03",
       "note": "django-debug-toolbar in base_requirements.txt:15, pinned through to requirements.txt:4. NetBox handles this about as well as it can be handled with a single distribution: settings.py:472 lists debug_toolbar in INSTALLED_APPS and settings.py:511 removes it again under `if not DEBUG and 'collectstatic' not in sys.argv`, so the app is not installed on a normal production run. That is precisely why DJS-024 stays silent here and why this rule speaks instead: the package is still on the machine, and what keeps the toolbar off is the value of DEBUG rather than the absence of the code. NetBox is a self-hosted product whose operators are told to enable DEBUG when troubleshooting -- shipping the toolbar so that it works when they do is a deliberate product decision, not an oversight, and splitting the image in two to avoid it would cost their users more than it saves. Accepted rather than false positive because the statement is true and the exposure is real: an operator who leaves DEBUG on after an incident gets a SQL panel, and NetBox's own threat model would rather they knew that. The rule is low severity for exactly this reason -- it is a fact about the deployment, not an accusation."
+    },
+    {
+      "fingerprint": "2a90d8d66199b623",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/extras/api/serializers_/events.py",
+      "line": 44,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading. Webhook.secret is the HMAC key NetBox signs outgoing payloads with, and the model's own help text says it is deliberately not transmitted in the request -- because it is transmitted here instead, in every GET of the webhook. The endpoint requires the extras.view_webhook permission, so this is an administrative disclosure rather than an open one, and NetBox intends it: an operator has to read the secret back to configure the receiving end. Accepted as designed. The rule is right that a shared signing key is served on every read, and a reviewer who does not already know that should be told."
+    },
+    {
+      "fingerprint": "a962e1def2056c5b",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/tokens.py",
+      "line": 18,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, and deliberate. Token.key is the API token's stored value, marked read_only_fields = ('key',) -- which stops writes and guarantees reads, exactly the half that does not help. NetBox shows the key so an operator can retrieve a token they created; the endpoint is restricted to the token's owner or a user holding grant_token. Accepted as designed."
+    },
+    {
+      "fingerprint": "e78d346346603dc8",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/tokens.py",
+      "line": 19,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading. TokenSerializer declares token = CharField(default=Token.generate), so the full token value is both accepted and returned. This is how NetBox lets a caller supply their own token or read back a generated one, and it is the single most sensitive value the API handles. Accepted as designed, with the same ownership restriction as the key field on line 18."
+    },
+    {
+      "fingerprint": "f905f00592dcacf5",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/tokens.py",
+      "line": 82,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading. TokenProvisionSerializer exists to exchange a username and password for a token, so returning the token is the entire purpose of the endpoint -- there is no version of this view that does not do it. Accepted as designed. Related to the DJA-003 entry on the same view, which reports that it is reachable anonymously; both are true and both are intentional."
+    },
+    {
+      "fingerprint": "68473210b515642c",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/tokens.py",
+      "line": 96,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, same endpoint as line 82. The provisioning response carries key alongside token so a caller can identify the credential it was just issued. Accepted as designed."
+    },
+    {
+      "fingerprint": "7f693b9790d115a5",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/users.py",
+      "line": 35,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, low value. UserSerializer.is_active tells a caller which accounts can still log in, which is account-status disclosure rather than a credential leak -- hence MEDIUM. The endpoint requires users.view_user. Accepted: an administrative user API that could not report whether an account was active would be unable to do its job."
+    },
+    {
+      "fingerprint": "1a112797fea25284",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/users.py",
+      "line": 36,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading. Group membership on the user model is authority-granting information: it tells an attacker which account is worth phishing. Restricted to users.view_user, and managing group membership is what this endpoint is for. Accepted as designed."
+    },
+    {
+      "fingerprint": "a1d4483d14114e3e",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/users.py",
+      "line": 43,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, same argument as the groups field above. The effective permission list is the most direct answer to 'which account should I target', but a user-administration API cannot withhold it from the administrators using it. Accepted as designed."
     }
   ]
 }

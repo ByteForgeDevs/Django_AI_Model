@@ -11,7 +11,7 @@ built to trigger it and staying silent on the nearest correct spelling.
 from __future__ import annotations
 
 from djaudit.context import ProjectContext
-from djaudit.models import Finding
+from djaudit.models import Finding, Severity
 from djaudit.registry import all_rules
 
 DRF_SERIALIZERS = """
@@ -341,3 +341,215 @@ class TestExcludeFieldList:
             """,
         )
         assert found == []
+
+
+SECRET_MODELS = """
+from django.db import models
+from django.conf import settings
+
+class Webhook(models.Model):
+    name = models.CharField(max_length=50)
+    secret = models.CharField(max_length=100)
+    token = models.CharField(max_length=100)
+
+class Cable(models.Model):
+    label = models.CharField(max_length=50)
+    is_active = models.BooleanField(default=True)
+    groups = models.CharField(max_length=50)
+"""
+
+
+class TestSensitiveField:
+    """DJA-010 -- credential material in a response."""
+
+    def test_reports_a_secret_field(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJA-010",
+            """
+            from rest_framework import serializers
+            from shop.models import Webhook
+
+            class WebhookSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Webhook
+                    fields = ['id', 'name', 'secret']
+            """,
+            **{"shop/models.py": SECRET_MODELS},
+        )
+        assert len(found) == 1
+        assert "'secret'" in found[0].message
+
+    def test_silent_on_write_only(self, make_project) -> None:
+        """The correct pattern, and one keyword from the defect."""
+        found = run(
+            make_project,
+            "DJA-010",
+            """
+            from rest_framework import serializers
+            from shop.models import Webhook
+
+            class WebhookSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Webhook
+                    fields = ['id', 'name', 'secret']
+                    extra_kwargs = {'secret': {'write_only': True}}
+            """,
+            **{"shop/models.py": SECRET_MODELS},
+        )
+        assert found == []
+
+    def test_read_only_does_not_excuse_a_secret(self, make_project) -> None:
+        """read_only blocks writes and guarantees reads -- the wrong half."""
+        found = run(
+            make_project,
+            "DJA-010",
+            """
+            from rest_framework import serializers
+            from shop.models import Webhook
+
+            class WebhookSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Webhook
+                    fields = ['id', 'name', 'secret']
+                    read_only_fields = ['secret']
+            """,
+            **{"shop/models.py": SECRET_MODELS},
+        )
+        assert len(found) == 1
+        assert "read_only" in " ".join(e.content for e in found[0].evidence)
+
+    def test_silent_on_a_field_not_listed(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJA-010",
+            """
+            from rest_framework import serializers
+            from shop.models import Webhook
+
+            class WebhookSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Webhook
+                    fields = ['id', 'name']
+            """,
+            **{"shop/models.py": SECRET_MODELS},
+        )
+        assert found == []
+
+    def test_privilege_names_are_ignored_off_the_user_model(self, make_project) -> None:
+        """NetBox has `is_active` on a cable path and `groups` on a contact.
+
+        Neither decides anything about a session. A name is not evidence.
+        """
+        found = run(
+            make_project,
+            "DJA-010",
+            """
+            from rest_framework import serializers
+            from shop.models import Cable
+
+            class CableSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Cable
+                    fields = ['id', 'label', 'is_active', 'groups']
+            """,
+            **{"shop/models.py": SECRET_MODELS},
+        )
+        assert found == []
+
+    def test_privilege_names_are_reported_on_the_user_model(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJA-010",
+            """
+            from rest_framework import serializers
+            from django.contrib.auth.models import User
+
+            class UserSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = User
+                    fields = ['id', 'username', 'is_staff', 'is_superuser']
+            """,
+            **{
+                "shop/models.py": SECRET_MODELS,
+                "shop/settings.py": SETTINGS + "AUTH_USER_MODEL = 'auth.User'\n",
+            },
+        )
+        names = {f.message.split("returns ")[1].split(",")[0] for f in found}
+        assert names == {"'is_staff'", "'is_superuser'"}
+
+    def test_a_secret_outranks_a_privilege_flag(self, make_project) -> None:
+        """Losing a credential is not the same as learning who has one."""
+        found = run(
+            make_project,
+            "DJA-010",
+            """
+            from rest_framework import serializers
+            from shop.models import Webhook
+
+            class WebhookSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Webhook
+                    fields = ['id', 'secret']
+            """,
+            **{"shop/models.py": SECRET_MODELS},
+        )
+        assert found[0].severity is Severity.HIGH
+
+    def test_a_repeated_name_reports_once(self, make_project) -> None:
+        """NetBox's TokenProvisionSerializer lists `key` twice."""
+        found = run(
+            make_project,
+            "DJA-010",
+            """
+            from rest_framework import serializers
+            from shop.models import Webhook
+
+            class WebhookSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Webhook
+                    fields = ['id', 'secret', 'secret']
+            """,
+            **{"shop/models.py": SECRET_MODELS},
+        )
+        assert len(found) == 1
+
+    def test_points_at_the_declaration_when_there_is_one(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJA-010",
+            """
+            from rest_framework import serializers
+            from shop.models import Webhook
+
+            class WebhookSerializer(serializers.ModelSerializer):
+                secret = serializers.CharField()
+
+                class Meta:
+                    model = Webhook
+                    fields = ['id', 'secret']
+            """,
+            **{"shop/models.py": SECRET_MODELS},
+        )
+        assert found[0].location.line == 5
+
+    def test_an_inherited_declaration_does_not_borrow_its_line(self, make_project) -> None:
+        """A base class's line number belongs to a different file."""
+        found = run(
+            make_project,
+            "DJA-010",
+            """
+            from rest_framework import serializers
+            from shop.models import Webhook
+
+            class BaseSerializer(serializers.ModelSerializer):
+                secret = serializers.CharField()
+
+            class WebhookSerializer(BaseSerializer):
+                class Meta:
+                    model = Webhook
+                    fields = ['id', 'secret']
+            """,
+            **{"shop/models.py": SECRET_MODELS},
+        )
+        assert found[0].location.line == 7

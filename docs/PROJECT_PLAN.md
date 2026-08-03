@@ -2197,6 +2197,47 @@ building it here pays for itself twice.
   spellings of one mistake, and two findings sharing one fix is one finding too
   many.
 - **2.4.3** — `DJA-010` serializer exposing sensitive fields (`password`, `is_staff`, `is_superuser`, `token`, `secret`).
+
+  **Done.** `DJA-010` in `src/djaudit/rules/serialization.py`, plus
+  `SerializerNode.field_line` and the `write_only` support added in the 2.2.2
+  fix that this rule cannot work without.
+
+  The decisive fact is that **`read_only` is the wrong half**. It blocks writes
+  and guarantees reads, so a secret marked read-only is *more* reliably served,
+  not less. Only `write_only=True` — accepted on input, never rendered — makes a
+  field safe, and it is one keyword away in a field list that otherwise looks
+  identical. NetBox's `UserSerializer.password` spells it correctly via
+  `extra_kwargs`, and reporting that would have taught readers to ignore the
+  rule; NetBox's `TokenSerializer.key` is `read_only_fields = ('key',)` and is
+  reported, correctly.
+
+  **A field name is not evidence.** The first draft matched
+  `is_active`/`groups` anywhere and flagged NetBox's cable paths, config
+  contexts, contacts and notification groups — none of which decide anything
+  about a session. Privilege names are therefore consulted **only when the
+  serializer's model is the project's user model**, the same discipline that
+  cut the mass-assignment candidates from 270 to 8. Because the model graph
+  holds only project-defined models, a project on Django's built-in
+  `auth.User` resolves `Meta.model = User` to nothing at all, so the check
+  falls back to the class name — otherwise the most common Django project of
+  all would be invisible to this rule.
+
+  Severity splits by what is lost: credential material is `HIGH`, an
+  authority-granting field on the user model is `MEDIUM`. Learning who is staff
+  tells an attacker which account to spend effort on; it does not hand them one.
+
+  `hash` was removed from the name list after NetBox's `DataFile.hash` turned
+  out to be a checksum of public content. `key` was kept despite being the most
+  generic entry, with the ambiguity recorded in the rule's limitations rather
+  than resolved by dropping the one name that reliably means "API token".
+
+  **15 findings across the benchmarks — 8 NetBox, 7 pretix, 0 healthchecks —
+  every one verified against source and triaged as `accepted_risk`.** They are
+  genuinely credential-bearing: NetBox's webhook HMAC key, its API tokens, and
+  pretix's ticket `secret`, which is the 32-character string the barcode
+  encodes and the door scanner checks. All are intended, all are behind
+  permissions, and all are worth telling a reviewer about. Triage now stands at
+  37 reviewed findings. Ten tests.
 - **2.4.4** — `DJA-011` writable field that should be read-only (`id`, `user`, `owner`, `created_by`) — mass assignment.
 - **2.4.5** — `DJA-012` nested serializer reaching a sensitive field through a relation.
 

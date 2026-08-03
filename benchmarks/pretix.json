@@ -55,6 +55,76 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "ALLOWED_HOSTS = ['*'] at settings.py:255 is unconditional. pretix needs to answer on organizer- and event-specific custom domains, so it cannot enumerate hosts ahead of time, and it resolves them itself in pretix.multidomain.middlewares.MultiDomainMiddleware. But that middleware does not reject an unrecognised host: on KnownDomain.DoesNotExist it sets mode='system' (middlewares.py:101-104) and serves the main site, so Django's host validation is disabled and nothing replaces it. deployment/docker/nginx.conf:89 forwards `Host $http_host` verbatim, so the header arrives unfiltered. That leaves the documented consequence intact -- absolute URLs, including password-reset links, are built from an attacker-supplied Host, and cache keys derived from it can be poisoned. Genuinely mitigable by pinning SITE_URL's host plus the KnownDomain set, so this is a real finding rather than an accepted trade-off."
+    },
+    {
+      "fingerprint": "a7625177c741ec2e",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 585,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, and unavoidable for pretix. OrderPosition.secret is a 32-character random string (models/orders.py:254) that is the ticket: it is what the barcode encodes and what the scanning app checks at the door, so it is a bearer credential in the strict sense. OrderPositionSerializer returns it because every consumer of this API -- ticket rendering, resending an email, a check-in device -- needs the value to do anything useful. The protection is on the endpoint rather than the field: these serializers sit behind organizer-scoped permissions. Accepted as designed. The rule is still right to name it, because 'the API returns the thing that opens the gate' is exactly what a reviewer of a new integration needs told."
+    },
+    {
+      "fingerprint": "2dfd92d4ff8212d0",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 860,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, and unavoidable for pretix. OrderPosition.secret is a 32-character random string (models/orders.py:254) that is the ticket: it is what the barcode encodes and what the scanning app checks at the door, so it is a bearer credential in the strict sense. OrderSerializer returns it because every consumer of this API -- ticket rendering, resending an email, a check-in device -- needs the value to do anything useful. The protection is on the endpoint rather than the field: these serializers sit behind organizer-scoped permissions. Accepted as designed. The rule is still right to name it, because 'the API returns the thing that opens the gate' is exactly what a reviewer of a new integration needs told."
+    },
+    {
+      "fingerprint": "b6488eaf0717ee08",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1040,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, and unavoidable for pretix. OrderPosition.secret is a 32-character random string (models/orders.py:254) that is the ticket: it is what the barcode encodes and what the scanning app checks at the door, so it is a bearer credential in the strict sense. OrderPositionCreateSerializer returns it because every consumer of this API -- ticket rendering, resending an email, a check-in device -- needs the value to do anything useful. The protection is on the endpoint rather than the field: these serializers sit behind organizer-scoped permissions. Accepted as designed. The rule is still right to name it, because 'the API returns the thing that opens the gate' is exactly what a reviewer of a new integration needs told."
+    },
+    {
+      "fingerprint": "83d4b23305d0a645",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1987,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, and unavoidable for pretix. OrderPosition.secret is a 32-character random string (models/orders.py:254) that is the ticket: it is what the barcode encodes and what the scanning app checks at the door, so it is a bearer credential in the strict sense. RevokedTicketSecretSerializer returns it because every consumer of this API -- ticket rendering, resending an email, a check-in device -- needs the value to do anything useful. The protection is on the endpoint rather than the field: these serializers sit behind organizer-scoped permissions. Accepted as designed. The rule is still right to name it, because 'the API returns the thing that opens the gate' is exactly what a reviewer of a new integration needs told."
+    },
+    {
+      "fingerprint": "f9660cd2b9ba193c",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1994,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, and unavoidable for pretix. OrderPosition.secret is a 32-character random string (models/orders.py:254) that is the ticket: it is what the barcode encodes and what the scanning app checks at the door, so it is a bearer credential in the strict sense. BlockedTicketSecretSerializer returns it because every consumer of this API -- ticket rendering, resending an email, a check-in device -- needs the value to do anything useful. The protection is on the endpoint rather than the field: these serializers sit behind organizer-scoped permissions. Accepted as designed. The rule is still right to name it, because 'the API returns the thing that opens the gate' is exactly what a reviewer of a new integration needs told."
+    },
+    {
+      "fingerprint": "e89d4156522d1db0",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/serializers/orderchange.py",
+      "line": 249,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, and unavoidable for pretix. OrderPosition.secret is a 32-character random string (models/orders.py:254) that is the ticket: it is what the barcode encodes and what the scanning app checks at the door, so it is a bearer credential in the strict sense. OrderPositionChangeSerializer returns it because every consumer of this API -- ticket rendering, resending an email, a check-in device -- needs the value to do anything useful. The protection is on the endpoint rather than the field: these serializers sit behind organizer-scoped permissions. Accepted as designed. The rule is still right to name it, because 'the API returns the thing that opens the gate' is exactly what a reviewer of a new integration needs told."
+    },
+    {
+      "fingerprint": "6734be6968d04fb4",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/serializers/organizer.py",
+      "line": 248,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading. GiftCard.secret is the redemption code (models/giftcards.py:93) and is returned by __str__ as the card's public identity, so it is a bearer credential that pretix intends to be readable -- an organizer cannot hand out a gift card without it. Behind organizer permissions. Accepted as designed."
     }
   ]
 }

@@ -213,3 +213,158 @@ class ExcludeFieldList(SerializerRule):
             ),
             evidence=tuple(evidence),
         )
+
+
+SECRET_FIELDS: frozenset[str] = frozenset(
+    {
+        "password",
+        "passwd",
+        "password_hash",
+        "secret",
+        "secret_key",
+        "client_secret",
+        "token",
+        "access_token",
+        "refresh_token",
+        "auth_token",
+        "api_key",
+        "apikey",
+        "private_key",
+        "signing_key",
+        "key",
+        "salt",
+        "otp_secret",
+        "totp_secret",
+        "session_key",
+    }
+)
+"""Field names that name credential material rather than describe it.
+
+Deliberately excludes `hash`, which on NetBox's DataFile is a checksum of
+public content, and every `*_id` spelling, which names a reference rather than
+a secret. `key` is kept despite being the most generic entry here, because the
+one thing it reliably names in a Django project is an API token; the ambiguity
+is recorded in the rule's limitations rather than resolved by dropping it.
+"""
+
+PRIVILEGE_FIELDS: frozenset[str] = frozenset(
+    {
+        "is_staff",
+        "is_superuser",
+        "is_admin",
+        "is_active",
+        "permissions",
+        "user_permissions",
+        "groups",
+    }
+)
+"""Field names that grant authority -- *on the user model only*.
+
+Every one of these is an ordinary domain word somewhere else. NetBox has
+`is_active` on a cable path and on a config context, and `groups` on a contact
+and on a notification group; none of them decides anything about a session. A
+name is not evidence, so this set is only consulted once the serializer's model
+is known to be the project's user model, which is the same discipline that took
+the mass-assignment candidates from 270 to 8.
+"""
+
+
+@register
+class SensitiveField(SerializerRule):
+    meta = RuleMeta(
+        id="DJA-010",
+        title="Serializer returns a sensitive field",
+        family=Family.DJA,
+        severity=Severity.HIGH,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "A field named in Meta.fields is returned in every response the "
+            "serializer renders, so credential material listed there is handed to "
+            "everyone the endpoint answers. DRF has a spelling for the other "
+            "intention -- write_only=True accepts a value on input and never renders "
+            "it -- and the two differ by one keyword in a field list that otherwise "
+            "looks identical. Marking such a field read_only does not help: it "
+            "prevents writes and guarantees reads, which is the wrong half."
+        ),
+        remediation=(
+            "If the value is only ever supplied by the client, set write_only=True on "
+            "the field or via extra_kwargs. If it is generated server-side and must "
+            "be shown once, return it from the create response only and drop it from "
+            "the serializer used for list and retrieve, so it is not re-served on "
+            "every subsequent read of the same record."
+        ),
+        references=(
+            "https://www.django-rest-framework.org/api-guide/fields/#write_only",
+            "https://cwe.mitre.org/data/definitions/522.html",
+            "https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/",
+        ),
+        limitations=(
+            "The judgement is made on the field name, so a column called key or "
+            "secret that holds something harmless is reported and a credential "
+            "stored under a domain-specific name is missed entirely.",
+            "Endpoints that deliberately issue a credential once, such as a token "
+            "provisioning view, are indistinguishable from ones that re-serve a "
+            "stored secret on every read, and both are reported.",
+            "Whether any routed view uses this serializer is not checked, so one "
+            "reached only by a management command reads the same as a public one.",
+        ),
+    )
+
+    @staticmethod
+    def serializes_the_user(ctx: ProjectContext, node: SerializerNode) -> bool:
+        """Whether this serializer's model is the one that holds authority.
+
+        The graph only contains models defined in the project, so a project on
+        Django's built-in ``auth.User`` -- which is most of them -- resolves
+        ``Meta.model = User`` to nothing at all. Falling back to the class name
+        keeps the common case working; a project model genuinely called ``User``
+        that exposes ``is_superuser`` is worth a look regardless.
+        """
+        user_model = ctx.model_graph.user_model
+        if node.model is not None:
+            return node.model == user_model
+        return node.model_ref is not None and (
+            node.model_ref.rsplit(".", 1)[-1] == user_model.rsplit(".", 1)[-1]
+        )
+
+    def inspect(self, ctx: ProjectContext, node: SerializerNode) -> Iterator[Finding]:
+        is_user = self.serializes_the_user(ctx, node)
+        seen: set[str] = set()
+        for name in node.fields:
+            if name in seen:
+                continue
+            if node.is_write_only(name):
+                # Accepted on input, never rendered. The correct pattern, and
+                # the one NetBox uses for `password` -- reporting it would
+                # teach readers to ignore this rule.
+                continue
+            if name in SECRET_FIELDS:
+                kind = "credential material"
+                severity = Severity.HIGH
+            elif is_user and name in PRIVILEGE_FIELDS:
+                # Disclosure, not theft: knowing who is staff tells an attacker
+                # which account to spend effort on, but does not hand them one.
+                kind = "an authority-granting field on the user model"
+                severity = Severity.MEDIUM
+            else:
+                continue
+            seen.add(name)
+            note = " (read_only, so returned but not accepted)" if node.is_read_only(name) else ""
+            yield self.finding(
+                location=self.at(ctx, node, node.field_line(name)),
+                severity=severity,
+                message=(
+                    f"{node.name} returns {name!r}, {kind}, to every caller the endpoint answers."
+                ),
+                evidence=(
+                    Evidence(
+                        kind=EvidenceKind.AST,
+                        content=(
+                            f"{node.name}.Meta.fields includes {name!r}{note}"
+                            f"; write_only is not set"
+                        ),
+                        source=ctx.rel(node.path),
+                    ),
+                ),
+            )
