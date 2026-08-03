@@ -126,6 +126,13 @@ jobs:
           - name: netbox
             repo: netbox-community/netbox
             sha: 4877d1167f4e20c0507bc902ee4c708e20f92e36
+          # DRF-heavy and multi-tenant, which neither of the other two are:
+          # healthchecks has no DRF at all and NetBox scopes nothing to a
+          # tenant, so without this the Phase 2 authorization rules would have
+          # had a single project measuring their precision.
+          - name: pretix
+            repo: pretix/pretix
+            sha: 7627e4b54825318c87f2093bfa078b4d039fb85a
     steps:
       - uses: actions/checkout@v4
 

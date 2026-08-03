@@ -72,6 +72,7 @@ class ProjectContext:
     _trees: dict[Path, ast.Module | None] = field(default_factory=dict, repr=False)
     _lines: dict[Path, list[str]] = field(default_factory=dict, repr=False)
     _model_graph: ModelGraph | None = field(default=None, repr=False)
+    _modules: dict[str, Path] | None = field(default=None, repr=False)
     parse_errors: dict[Path, str] = field(default_factory=dict, repr=False)
 
     @property
@@ -90,6 +91,35 @@ class ProjectContext:
 
             self._model_graph = build_model_graph(self)
         return self._model_graph
+
+    def module_path(self, dotted: str) -> Path | None:
+        """The file a dotted module name refers to, or ``None`` if it is not ours.
+
+        The inverse of :func:`djaudit.discovery.dotted_path`, built once and
+        shared. ``None`` is the ordinary answer for anything installed from a
+        dependency: this is a static tool and does not read site-packages, so
+        "not in this project" and "does not exist" are the same answer here.
+        """
+        if self._modules is None:
+            # Imported here rather than at module scope because discovery
+            # constructs this class, so the cycle is real.
+            from djaudit.discovery import dotted_path  # noqa: PLC0415
+
+            self._modules = {dotted_path(self.root, path): path for path in self.python_files}
+        exact = self._modules.get(dotted)
+        if exact is not None:
+            return exact
+        # A src/ layout names modules from a directory that is not the
+        # repository root, so pretix's "pretix.multidomain.middlewares" is
+        # indexed here as "src.pretix.multidomain.middlewares" and an exact
+        # lookup misses every module in the project. Falling back to a suffix
+        # match fixes that for any such layout without needing to guess where
+        # the import root is -- and only when exactly one module can be meant,
+        # because two apps ending in ".models" must never resolve to whichever
+        # was walked first.
+        suffix = f".{dotted}"
+        matches = [path for name, path in self._modules.items() if name.endswith(suffix)]
+        return matches[0] if len(matches) == 1 else None
 
     def rel(self, path: Path) -> str:
         """POSIX path relative to the project root, so findings stay portable."""

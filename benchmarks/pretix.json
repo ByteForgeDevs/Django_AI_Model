@@ -1,0 +1,50 @@
+{
+  "triage_version": 1,
+  "fingerprint_version": "djaudit/v1",
+  "target": "pretix",
+  "repo": "https://github.com/pretix/pretix",
+  "sha": "7627e4b54825318c87f2093bfa078b4d039fb85a",
+  "max_false_positive_rate": 0.1,
+  "findings": [
+    {
+      "fingerprint": "4b54da691ba4ae06",
+      "rule_id": "DJS-006",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/settings.py",
+      "line": 1,
+      "note": "SECURE_SSL_REDIRECT is never assigned anywhere in src/pretix, so Django itself does not redirect plain HTTP. That is deliberate rather than an oversight: pretix expects TLS to be terminated in front of it, and the reference deployment in deployment/docker/nginx.conf listens on port 80 only and reverse-proxies to gunicorn over a unix socket, which means the Django process legitimately never sees a TLS connection to redirect from. The statement the rule makes is true and the redirect really is absent from this repository; where it happens is the operator's, not the developer's, decision. Recorded as accepted rather than a false positive for the same reason as the NetBox entries: whether the target chooses to handle something elsewhere says nothing about whether we were right to point at it.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "6a0747bd68e402a5",
+      "rule_id": "DJS-007",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/settings.py",
+      "line": 1,
+      "note": "SECURE_HSTS_SECONDS is never assigned, so Django sends no Strict-Transport-Security header. Same layering as DJS-006: pretix does not terminate TLS, and an HSTS header emitted by an application that is only ever reached over plaintext from its own reverse proxy would be both useless and, if the proxy ever forwarded it unchanged for a subdomain, actively harmful. The shipped nginx config does not set the header either, so a site following the reference deployment sends no HSTS at all -- which is a genuine gap, but one that belongs to the TLS terminator the operator supplies rather than to this codebase. Accepted rather than true_positive because there is no line in this repository whose change would fix it.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "f51cad9a17a0f0d0",
+      "rule_id": "DJS-012",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/settings.py",
+      "line": 242,
+      "note": "SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https') at settings.py:242 sits inside `if config.getboolean('pretix', 'trust_x_forwarded_proto', fallback=False):` at line 241, so it is off unless an operator opts in through a config file that is not part of this repository, and the option is named for exactly the trust it establishes. The rule's point stands regardless of the guard -- once enabled, any client that can reach gunicorn directly can assert HTTPS by sending the header, so the proxy must overwrite rather than append it -- which is why this is reported at low/tentative and stays out of a default run. Accepted: the risk is real, opt-in, and named.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "cee9e042f437a195",
+      "rule_id": "DJS-013",
+      "verdict": "true_positive",
+      "file": "src/pretix/settings.py",
+      "line": 255,
+      "note": "ALLOWED_HOSTS = ['*'] at settings.py:255 is unconditional. pretix needs to answer on organizer- and event-specific custom domains, so it cannot enumerate hosts ahead of time, and it resolves them itself in pretix.multidomain.middlewares.MultiDomainMiddleware. But that middleware does not reject an unrecognised host: on KnownDomain.DoesNotExist it sets mode='system' (middlewares.py:101-104) and serves the main site, so Django's host validation is disabled and nothing replaces it. deployment/docker/nginx.conf:89 forwards `Host $http_host` verbatim, so the header arrives unfiltered. That leaves the documented consequence intact -- absolute URLs, including password-reset links, are built from an attacker-supplied Host, and cache keys derived from it can be poisoned. Genuinely mitigable by pinning SITE_URL's host plus the KnownDomain set, so this is a real finding rather than an accepted trade-off.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    }
+  ]
+}

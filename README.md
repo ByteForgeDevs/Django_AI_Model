@@ -16,10 +16,11 @@ Measured, in CI, on every commit:
 | Precision, on the same fixtures | **100%** — 0 false positives |
 | Precision, on Healthchecks (653 files) | **100%** — 10 reported, all confirmed on review |
 | Precision, on NetBox (1213 files) | **100%** — 6 reported, all confirmed on review |
-| Crashes on either target | **0** rule errors |
+| Precision, on pretix (1225 files) | **100%** — 4 reported, all confirmed on review |
+| Crashes on any target | **0** rule errors |
 | Runtime | under a second on NetBox's 1213 files |
 
-Precision is measured against two mature, well-audited open-source Django
+Precision is measured against three mature, well-audited open-source Django
 projects pinned to a commit SHA and cloned in CI, never vendored. They cannot
 measure recall — we have no way to know what we missed in code we did not write
 — so recall comes from fixtures with a manifest of expected findings. Every
@@ -28,7 +29,7 @@ justification, a reviewer and a date; `scripts/check_triage.py` fails the build
 if an entry is unreviewed, because scoring your own precision benchmark is
 otherwise how a project ends up with 100% and no credibility.
 
-Ten of the sixteen are `accepted_risk`: the setting really is off, and the
+Fifteen of the twenty are `accepted_risk`: the setting really is off, and the
 project has a reason — a redirect handled at the proxy, a value supplied by the
 deployment. That verdict counts as a true positive here, because the rule
 correctly reported what it can see. What it cannot see is written down for

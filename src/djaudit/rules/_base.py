@@ -551,6 +551,18 @@ class InsecureDefaultRule(SettingsRule):
         """
         return None
 
+    def delegated(self, group: SettingGroup) -> str:
+        """A caveat for when something other than Django applies this setting.
+
+        These rules read a value and describe what Django would do with it,
+        which is only the whole story while Django is the code doing it. A
+        project that swaps out the middleware owning a setting has taken that
+        decision into its own source, where a settings-level read cannot
+        follow. Saying nothing would be wrong and saying it with certainty
+        would be worse, so the finding stays and stops claiming to be a fact.
+        """
+        return ""
+
     def applies(self, ctx: ProjectContext, group: SettingGroup) -> bool:
         """Whether the setting is worth having an opinion about here at all.
 
@@ -623,6 +635,13 @@ class InsecureDefaultRule(SettingsRule):
                 f"every settings module that imports this one "
                 f"{self.corrected_as}, which should override it",
             )
+
+        delegation = self.delegated(group)
+        if delegation:
+            # Not a downgrade for being unimportant: the claim itself is weaker,
+            # because the code that acts on this setting is no longer Django's.
+            ceiling = Confidence.TENTATIVE
+            caveats = (*caveats, delegation)
 
         where = group.module.dotted or ctx.rel(group.module.path)
         yield self.report(

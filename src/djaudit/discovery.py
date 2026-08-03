@@ -61,7 +61,7 @@ SETTINGS_MARKERS = frozenset(
 )
 
 _ROLE_KEYWORDS: tuple[tuple[SettingsRole, frozenset[str]], ...] = (
-    (SettingsRole.TEST, frozenset({"test", "tests", "testing", "ci", "pytest"})),
+    (SettingsRole.TEST, frozenset({"test", "tests", "testing", "testutils", "ci", "pytest"})),
     (SettingsRole.DEVELOPMENT, frozenset({"development", "dev", "local", "localhost", "debug"})),
     (
         SettingsRole.PRODUCTION,
@@ -116,24 +116,65 @@ def dotted_path(root: Path, path: Path) -> str:
     return ".".join(parts)
 
 
-def classify_settings_role(path: Path) -> SettingsRole:
-    """Infer what a settings module is for from its filename.
+def _tokens(name: str) -> set[str]:
+    return set(re.split(r"[_\-.]", name.lower()))
+
+
+def classify_settings_role(path: Path, root: Path | None = None) -> SettingsRole:
+    """Infer what a settings module is for from where it lives.
 
     Deliberately keyword-based rather than clever. The cost of guessing wrong is
     asymmetric: mislabelling production as development hides real findings, so
     anything unrecognised falls through to ``UNKNOWN``, which still counts as
     production-reaching.
+
+    The filename decides when it says anything, because it is the more specific
+    signal -- ``tests/production.py`` is still about production. Only when the
+    name is silent do the directories get a say, and then only to identify test
+    and development trees. pretix keeps its test settings in
+    ``pretix/testutils/settings.py``, whose stem reads as an ordinary primary
+    settings module; without looking at the directory, its deliberate
+    ``DEBUG = True`` and MD5 password hashers are reported as critical
+    findings, which is precisely the noise that gets a tool uninstalled.
+
+    Directories are only considered *below* ``root``. A checkout that happens
+    to sit in ``/home/me/test/`` must not have every settings module in it
+    silently downgraded.
     """
     stem = path.stem.lower()
     if stem == "__init__":
         stem = path.parent.name.lower()
-    tokens = set(re.split(r"[_\-.]", stem))
+    tokens = _tokens(stem)
     for role, keywords in _ROLE_KEYWORDS:
         if tokens & keywords:
             return role
+
+    inferred = _role_from_directories(path, root)
+    if inferred is not None:
+        return inferred
     if stem == "settings":
         return SettingsRole.PRIMARY
     return SettingsRole.UNKNOWN
+
+
+def _role_from_directories(path: Path, root: Path | None) -> SettingsRole | None:
+    """Test or development trees, read from the directories below ``root``.
+
+    Restricted to those two roles on purpose. They are the ones that suppress a
+    finding, so they are the only ones worth inferring from weaker evidence --
+    and inferring anything else from a directory name would change nothing.
+    """
+    if root is None:
+        return None
+    try:
+        relative = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return None
+    directories = {token for part in relative.parts[:-1] for token in _tokens(part)}
+    for role, keywords in _ROLE_KEYWORDS:
+        if role in (SettingsRole.TEST, SettingsRole.DEVELOPMENT) and directories & keywords:
+            return role
+    return None
 
 
 def find_manage_py(files: tuple[Path, ...]) -> Path | None:
@@ -246,7 +287,7 @@ def discover_settings_modules(
                 SettingsModule(
                     path=path,
                     dotted=dotted_path(ctx.root, path),
-                    role=classify_settings_role(path),
+                    role=classify_settings_role(path, ctx.root),
                     is_entrypoint=(entry_path is not None and path == entry_path),
                 )
                 for path in confirmed
