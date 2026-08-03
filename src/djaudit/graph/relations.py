@@ -108,6 +108,84 @@ def read_through(fld: FieldNode) -> str | None:
     return name.rpartition(".")[2] if name else None
 
 
+def _string_kwarg(fld: FieldNode, name: str) -> str | None:
+    value = literal(fld.kwargs[name]) if name in fld.kwargs else None
+    return value if isinstance(value, str) else None
+
+
+def _bool_kwarg(fld: FieldNode, name: str) -> bool | None:
+    value = literal(fld.kwargs[name]) if name in fld.kwargs else None
+    return value if isinstance(value, bool) else None
+
+
+def interpolate(template: str, model: ModelNode, *, model_name: bool = True) -> str:
+    """Expand Django's ``related_name`` placeholders against the owning model.
+
+    ``django/db/models/fields/related.py`` substitutes ``%(class)s``,
+    ``%(app_label)s`` and -- for ``related_name`` only -- ``%(model_name)s``,
+    using the class that ends up owning the field. An abstract base declaring
+    ``related_name="%(class)s_orders"`` is the reason the mechanism exists: one
+    declaration, a distinct accessor on every heir.
+    """
+    values = {"class": model.name.lower(), "app_label": model.app_label.lower()}
+    if model_name:
+        values["model_name"] = model.name.lower()
+    try:
+        return template % values
+    except (KeyError, ValueError, TypeError):
+        # A related_name containing a stray % is a crash in Django too. We are
+        # not the place to discover that, so the template is kept verbatim.
+        return template
+
+
+def accessor_for(edge: RelationEdge, owner: ModelNode) -> None:
+    """Fill in the reverse accessor and query name, following Django exactly.
+
+    ``ForeignObjectRel.get_accessor_name`` is ``related_name`` if set, else the
+    target's lowercased model name plus ``_set`` when one row can have many.
+    ``related_query_name()`` falls back differently -- through
+    ``related_query_name``, then ``related_name``, then the bare model name --
+    and the two being confused is how a rule builds a ``filter()`` path Django
+    would reject.
+    """
+    if owner.is_abstract:
+        # An abstract model has no table, so Django creates no reverse relation
+        # for it and leaves any placeholder unexpanded -- deliberately, because
+        # the same declaration has to yield a different name on every heir.
+        # Naming one here would invent an accessor nothing can use.
+        return
+
+    # default_related_name lives on the model that *declares* the field, not
+    # the one it points at: it names the relation "from a related object back
+    # to this one", so Book.Meta.default_related_name = "books" gives
+    # Author.books.
+    declared = edge.related_name or owner.default_related_name
+    if declared is not None:
+        declared = interpolate(declared, owner)
+
+    edge.hidden = bool(declared and declared.endswith("+"))
+
+    if edge.symmetrical is None:
+        # ManyToManyField(symmetrical=...) defaults to True for a relation to
+        # self, and a symmetrical self-relation has no reverse accessor at all.
+        edge.symmetrical = edge.kind == "ManyToManyField" and edge.is_self
+
+    if edge.hidden or (edge.symmetrical and edge.is_self and edge.kind == "ManyToManyField"):
+        edge.accessor = None
+    elif declared:
+        edge.accessor = declared
+    else:
+        edge.accessor = owner.name.lower() + ("_set" if edge.is_multi_reverse else "")
+
+    query = edge.related_query_name
+    if query is not None:
+        edge.query_name = interpolate(query, owner, model_name=False)
+    elif declared and not edge.hidden:
+        edge.query_name = declared
+    else:
+        edge.query_name = owner.name.lower()
+
+
 def build_edges(model: ModelNode, bindings: dict[str, str]) -> list[RelationEdge]:
     """Every relation declared on this model, unresolved.
 
@@ -128,6 +206,9 @@ def build_edges(model: ModelNode, bindings: dict[str, str]) -> list[RelationEdge
                 via_user_setting=is_user_setting,
                 on_delete=read_on_delete(fld),
                 through=read_through(fld),
+                related_name=_string_kwarg(fld, "related_name"),
+                related_query_name=_string_kwarg(fld, "related_query_name"),
+                symmetrical=_bool_kwarg(fld, "symmetrical"),
                 lineno=fld.lineno,
                 end_lineno=fld.end_lineno,
             )
@@ -135,7 +216,11 @@ def build_edges(model: ModelNode, bindings: dict[str, str]) -> list[RelationEdge
     return edges
 
 
-def resolve_edges(graph_models: dict[str, ModelNode], user_model: str) -> None:
+def resolve_edges(
+    graph_models: dict[str, ModelNode],
+    user_model: str,
+    incoming: dict[str, list[RelationEdge]] | None = None,
+) -> None:
     """Point every edge at a model, now that all of them are known.
 
     ``self`` is the declaring model. ``settings.AUTH_USER_MODEL`` is whatever
@@ -184,3 +269,9 @@ def resolve_edges(graph_models: dict[str, ModelNode], user_model: str) -> None:
                 # unresolved case on purpose -- a project with its own User in
                 # some other app resolves to that model, and this never fires.
                 edge.points_at_user = edge.target_ref in {user_model, user_name}
+
+    for model in by_label.values():
+        for edge in model.relations:
+            accessor_for(edge, model)
+            if incoming is not None and edge.target is not None and edge.accessor:
+                incoming.setdefault(edge.target, []).append(edge)

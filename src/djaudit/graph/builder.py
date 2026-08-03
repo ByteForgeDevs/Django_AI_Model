@@ -229,6 +229,9 @@ class _ModuleScanner:
             swappable = _class_attr_literal(meta, "swappable")
             if isinstance(swappable, str) and swappable:
                 model.swappable = swappable
+            default_related = _class_attr_literal(meta, "default_related_name")
+            if isinstance(default_related, str) and default_related:
+                model.default_related_name = default_related
         return model
 
 
@@ -302,5 +305,5 @@ def build_model_graph(ctx: ProjectContext) -> ModelGraph:
 
     # Deferred until every model is known: a bare "Order" may name a model in
     # a module read after the one referring to it.
-    resolve_edges(graph.models, graph.user_model)
+    resolve_edges(graph.models, graph.user_model, graph.incoming)
     return graph

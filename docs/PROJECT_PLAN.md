@@ -1563,6 +1563,42 @@ building it here pays for itself twice.
   13 edges, 5 reaching the user. `on_delete` is read from both the keyword and
   the positional form, including `models.SET(...)`.
 - **2.1.4** — Reverse relation naming: `related_name`, `related_query_name`, and Django's default `_set` accessor.
+
+  *Done.* Every rule that follows a relation backwards to test ownership has to
+  name the accessor Django actually created, and five things decide it. Each is
+  now read from `django/db/models/fields/related.py` rather than assumed.
+
+  `related_name` wins; failing that `Meta.default_related_name`, which belongs
+  to the model **declaring** the foreign key and not the one it points at — it
+  names the relation back to the declarer. Failing both, the accessor is the
+  declaring model's lowercased name, plus `_set` only when the reverse side is
+  multiple: `author.book_set` for a foreign key, but `project.owner.profile`
+  for a one-to-one, which is exactly how Healthchecks reaches its `Profile`.
+
+  A `related_name` ending in `+` means Django creates no reverse relation at
+  all; NetBox does this seventeen times, and following one of those would be a
+  rule inventing an `AttributeError`. Same for a symmetrical self-referential
+  many-to-many, where `symmetrical` defaults to `True` for a relation to `self`
+  and the relation is its own reverse. Both leave `accessor` as `None`, and
+  neither enters the reverse index.
+
+  The query name is tracked separately because it is not the accessor. Its
+  fallback chain is `related_query_name`, then `related_name`, then the bare
+  model name — no `_set`. `author.book_set` and `Author.objects.filter(book=…)`
+  are the same relation under two names, and a `filter()` built from the wrong
+  one is a crash.
+
+  Placeholders (`%(class)s`, `%(model_name)s`, `%(app_label)s`) are expanded
+  against the owning model, with `%(model_name)s` deliberately absent from
+  `related_query_name` because Django does not substitute it there. An abstract
+  base keeps its placeholder unexpanded and gets no accessor, which is what
+  Django does: the whole point is one declaration yielding a different name on
+  every heir, and those heirs are resolved in 2.1.6.
+
+  `ModelGraph.incoming` inverts the whole thing into a target-to-edges index,
+  so asking what points *at* a model is a lookup rather than a scan of every
+  model in the project. Measured: NetBox 17 hidden relations and 43 explicitly
+  named across 67 edges; Healthchecks 2 named across 13.
 - **2.1.5** — `Meta` handling: `ordering`, `indexes`, `constraints`, `unique_together`, `abstract`, `db_table`.
 - **2.1.6** — Inheritance resolution: abstract bases, multi-table inheritance, mixins.
 - **2.1.7** — Custom managers and `QuerySet` subclasses, so `Model.objects` resolves to the right class.

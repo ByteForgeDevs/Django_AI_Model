@@ -69,10 +69,47 @@ class RelationEdge:
     on_delete: str | None = None
     through: str | None = None
 
+    related_name: str | None = None
+    """``related_name`` exactly as written, placeholders and all."""
+
+    related_query_name: str | None = None
+    symmetrical: bool | None = None
+    """``ManyToManyField(symmetrical=...)``. ``None`` means Django decides, and
+    Django decides ``True`` for a relation to ``self``."""
+
+    accessor: str | None = None
+    """The attribute this relation adds to the *target* model.
+
+    ``None`` when Django adds nothing: a ``related_name`` ending in ``+``, or a
+    symmetrical self-referential many-to-many. Following the reverse side of a
+    relation that does not exist is how a query-path rule invents an ORM error.
+    """
+
+    query_name: str | None = None
+    """The name that spans this relation in a ``filter()`` from the target.
+
+    Not the same as :attr:`accessor`: ``related_query_name`` overrides it
+    independently, and Django's fallback is the bare model name with no
+    ``_set``.
+    """
+
+    hidden: bool = False
+    """``related_name`` ends in ``+``, so there is no reverse relation."""
+
     @property
     def is_multi(self) -> bool:
-        """Whether one row on this side can have many on the other."""
+        """Whether following this relation forwards can yield many rows."""
         return self.kind in ("ManyToManyField", "GenericRelation")
+
+    @property
+    def is_multi_reverse(self) -> bool:
+        """Whether following it *backwards* can yield many rows.
+
+        True for everything except a one-to-one, and it is what decides the
+        ``_set`` suffix: many books per author gives ``author.book_set``, one
+        profile per account gives ``account.profile``.
+        """
+        return self.kind != "OneToOneField"
 
     @property
     def resolved(self) -> bool:
@@ -174,6 +211,10 @@ class ModelNode:
     """``Meta.proxy``. Shares its parent's table; a different Python class over
     the same rows."""
 
+    default_related_name: str | None = None
+    """``Meta.default_related_name``, which supplies ``related_name`` for every
+    relation pointing *at* models of this class that does not set its own."""
+
     swappable: str | None = None
     """The setting name from ``Meta.swappable``, normally ``AUTH_USER_MODEL``.
     This is how Django's own ``User`` declares that a project may replace it,
@@ -232,6 +273,14 @@ class ModelGraph:
     ownership means a path to this model. Reading it from the settings rather
     than assuming ``auth.User`` is what makes the rules work on the many
     projects that swap it.
+    """
+
+    incoming: dict[str, list[RelationEdge]] = field(default_factory=dict, repr=False)
+    """Edges pointing *at* each model label.
+
+    The reverse index. Walking from a model to the things that reference it is
+    exactly how an ownership path is found, and rebuilding it per question
+    would make every graph query quadratic.
     """
 
     unresolved_bases: dict[str, tuple[str, ...]] = field(default_factory=dict, repr=False)
