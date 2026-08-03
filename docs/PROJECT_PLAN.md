@@ -1125,6 +1125,43 @@ than after twenty-six of them disagree, is cheaper.
   `silk` and `django_extensions` in `INSTALLED_APPS` — one `high`, one `low`,
   from the same list.
 - **1.8.2** — `DJS-025` debug tooling in the production dependency manifest.
+
+  **Done.** Deliberately the complement of `DJS-024` rather than a second
+  opinion on it: if the app is unconditionally installed, that rule has already
+  said so at the severity a running profiler deserves, and this one stays quiet.
+  What is left is the case `DJS-024` cannot state, and it is the one worth
+  having — a package that is on the machine but not switched on, where the
+  guard is a *value* rather than the absence of the code. NetBox is the exact
+  shape: it ships `django-debug-toolbar` in `base_requirements.txt` and removes
+  the app unless `DEBUG`, which is correct, and leaves a deployment where an
+  operator debugging an incident turns the SQL panel on by accident. That is
+  `low`. A package nothing installs at all is `info` — image weight and a
+  better toolkit for anyone who gets a foothold.
+
+  Most of the work is in `manifest.py`, and all of the risk is in one decision:
+  which manifests count as production. Too permissive and the rule is silent on
+  real deployments; too strict and it reports every project that has correctly
+  separated its tooling. So classification reads names only, never contents —
+  a filename whose words include a development token, or a TOML table that
+  says so. Healthchecks is the control that proves it: its `mypy`, `pytest` and
+  `mysqlclient` all sit in `requirements-dev.txt`, and it stays silent.
+  NetBox's `base_requirements.txt` must *not* be read as development despite
+  the word "base", which is why matching is on whole words.
+
+  The reader covers pip requirements files including `-r`/`-e`/`--index-url`
+  lines, extras, environment markers, direct references and backslash
+  continuations; PEP 621 dependencies and optional-dependencies; PEP 735
+  dependency groups; Poetry's tables; and `Pipfile`. Names are compared per
+  PEP 503, and a project listing a package in both a `.in` source and its
+  compiled `.txt` is reported once, against the source, because editing the
+  output is how a dependency comes back on the next `pip-compile`.
+
+  Building the fixture found a real defect in `DJS-024`: a production module
+  that rebuilds the list — `INSTALLED_APPS = [*INSTALLED_APPS, "debug_toolbar"]`
+  — is a second decision site for every app the base module named, and the rule
+  reported those apps again at the rebuild's weaker confidence. It now reports
+  where an app is *named*, not where the setting is decided, so one line to
+  delete is one finding. Fixed and pinned.
 - **1.8.3** — `DJS-026` `ADMIN` mounted at the default path with no additional protection — informational.
 - **1.8.4** — `DJS-027` logging configuration that emits request bodies or `Authorization` headers.
 

@@ -11,10 +11,21 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterator
 from dataclasses import dataclass
+from enum import StrEnum
 
 from djaudit.context import ProjectContext
-from djaudit.models import Confidence, Evidence, EvidenceKind, Family, Finding, Severity, Tier
-from djaudit.registry import RuleMeta, register
+from djaudit.manifest import deployed, discover
+from djaudit.models import (
+    Confidence,
+    Evidence,
+    EvidenceKind,
+    Family,
+    Finding,
+    Location,
+    Severity,
+    Tier,
+)
+from djaudit.registry import Rule, RuleMeta, register
 from djaudit.rules._base import (
     SettingGroup,
     SettingsRule,
@@ -22,7 +33,7 @@ from djaudit.rules._base import (
     entries,
     entries_of,
 )
-from djaudit.settings import ResolvedSetting, SettingsView
+from djaudit.settings import ResolvedSetting, SettingsView, resolve_all
 
 
 @dataclass(frozen=True)
@@ -115,11 +126,24 @@ def always_installed(resolved: ResolvedSetting, key: str) -> bool:
 
 
 def entry_node(resolved: ResolvedSetting, key: str) -> ast.expr | None:
-    """The string literal in the source that named the app."""
+    """The string literal naming the app, anywhere in the setting's history."""
     for definition in resolved.definitions:
-        for child in ast.walk(definition.node):
-            if isinstance(child, ast.Constant) and app_key(child.value) == key:
-                return child
+        found = _named_in(definition.node, key)
+        if found is not None:
+            return found
+    return None
+
+
+def own_entry(resolved: ResolvedSetting, key: str) -> ast.expr | None:
+    """The string literal naming the app in the assignment that decides it."""
+    definition = resolved.definition
+    return None if definition is None else _named_in(definition.node, key)
+
+
+def _named_in(node: ast.stmt, key: str) -> ast.expr | None:
+    for child in ast.walk(node):
+        if isinstance(child, ast.Constant) and app_key(child.value) == key:
+            return child
     return None
 
 
@@ -147,11 +171,23 @@ class DebugToolingInstalled(SettingsRule):
         for key, app in DEBUG_APPS.items():
             if not always_installed(resolved, key):
                 continue
+            node = own_entry(resolved, key)
+            # A production module that rebuilds the list -- INSTALLED_APPS =
+            # [*INSTALLED_APPS, "debug_toolbar"] -- decides the setting again
+            # for every app the base module named, and reporting per decision
+            # site would report those apps a second time at whatever confidence
+            # the rebuild happened to carry. The reader has one line to delete,
+            # so the site that spells the app out reports it and the sites that
+            # inherit it stay quiet. An app named in no assignment at all --
+            # built up in a list the setting merely refers to -- has no such
+            # site, so it is reported here, against the setting as a whole.
+            if node is None and entry_node(resolved, key) is not None:
+                continue
             severity, note = self.grade(view, key, app)
             yield self.report(
                 ctx,
                 group.narrow(f'INSTALLED_APPS["{key}"]', resolved.value),
-                at=entry_node(resolved, key),
+                at=node,
                 severity=severity,
                 message=(
                     f"{app.name} is installed in {where}{group.describe_reach()}"
@@ -226,3 +262,152 @@ class DebugToolingInstalled(SettingsRule):
             "https://github.com/jazzband/django-silk#authentication--authorisation",
         ),
     )
+
+
+class Presence(StrEnum):
+    """How firmly a settings module installs an app."""
+
+    ALWAYS = "always"
+    SOMETIMES = "sometimes"
+    NEVER = "never"
+    UNKNOWN = "unknown"
+
+
+def presence(ctx: ProjectContext, views: dict[str, SettingsView], key: str) -> Presence:
+    """Whether production settings install ``key``, on some paths, or at all.
+
+    The three answers need three different sentences, and the middle one is the
+    interesting one: an app added and then removed depending on a flag is not
+    running today, but nothing about the *deployment* stops it -- only a value
+    does.
+    """
+    verdicts: set[Presence] = set()
+    for module in ctx.settings_modules:
+        if not module.role.reaches_production:
+            continue
+        view = views.get(module.dotted)
+        if view is None:
+            continue
+        resolved = view.get("INSTALLED_APPS")
+        if not resolved.is_assigned or not any(
+            branch is not None for branch in entries_of(resolved.value)
+        ):
+            verdicts.add(Presence.UNKNOWN)
+        elif always_installed(resolved, key):
+            verdicts.add(Presence.ALWAYS)
+        elif entry_node(resolved, key) is not None:
+            verdicts.add(Presence.SOMETIMES)
+        else:
+            verdicts.add(Presence.NEVER)
+    for verdict in (Presence.ALWAYS, Presence.SOMETIMES, Presence.UNKNOWN):
+        if verdict in verdicts:
+            return verdict
+    return Presence.NEVER if verdicts else Presence.UNKNOWN
+
+
+@register
+class DebugToolingDeployed(Rule):
+    """A development package is in the production dependency set.
+
+    The companion to DJS-024 and deliberately its complement: this reports only
+    what that rule does not, so a package that is both deployed and installed
+    is one finding rather than two.
+    """
+
+    def check(self, ctx: ProjectContext) -> Iterator[Finding]:
+        manifests = discover(ctx.root)
+        if not manifests:
+            return
+        views = resolve_all(ctx)
+
+        for key, app in DEBUG_APPS.items():
+            found = deployed(manifests, app.name)
+            if found is None:
+                continue
+            manifest, requirement = found
+            state = presence(ctx, views, key)
+            if state is Presence.ALWAYS:
+                # DJS-024 has already reported this, with the severity the
+                # running app deserves. Saying it again in a quieter voice
+                # would only teach the reader to skim.
+                continue
+            severity, confidence, note = _GRADES[state]
+            yield self.finding(
+                location=Location(
+                    file=ctx.rel(manifest.path),
+                    line=requirement.line,
+                    snippet=requirement.raw,
+                ),
+                severity=severity,
+                confidence=confidence,
+                message=(
+                    f"{app.name} is in the production dependency set ({manifest.label}), {note}"
+                ),
+                evidence=(
+                    Evidence(
+                        kind=EvidenceKind.CONFIG,
+                        content=f"{ctx.rel(manifest.path)}:{requirement.line}: {requirement.raw}",
+                        source="djaudit manifest reader",
+                    ),
+                ),
+                properties={"distribution": app.name, "installed": state.value},
+            )
+
+    meta = RuleMeta(
+        id="DJS-025",
+        title="development tooling is in the production dependency set",
+        family=Family.DJS,
+        severity=Severity.LOW,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "Keeping a debug package out of INSTALLED_APPS is the right fix and it is "
+            "not the whole fix, because what remains is a deployment where the only "
+            "thing standing between a profiler and production traffic is a value. The "
+            "shape this is really about is the conditional install: an app appended "
+            "under 'if DEBUG' and removed otherwise is correct today and one "
+            "environment variable away from being incorrect, and the flip is usually "
+            "done deliberately, by an operator debugging an incident, at the worst "
+            "possible moment. A package that is merely present is a smaller matter -- "
+            "image weight, and a better foothold for anyone who gets one -- which is "
+            "why it is reported at info rather than low. Both are worth knowing and "
+            "neither is worth an alarm, so this rule is quiet by design."
+        ),
+        remediation=(
+            "Move the package to the development requirements file or dependency "
+            "group, and install production from a manifest that does not include it. "
+            "A package that is not on the machine cannot be switched on by a settings "
+            "change, which is the difference between a guard and a gap. Where a "
+            "single image genuinely has to serve both -- a self-hosted product whose "
+            "operators need to enable debugging -- keep the conditional install and "
+            "make sure the flag controlling it cannot be set from the environment "
+            "alone."
+        ),
+        references=(
+            "https://packaging.python.org/en/latest/discussions/install-requires-vs-requirements/",
+            "https://docs.djangoproject.com/en/stable/howto/deployment/checklist/",
+        ),
+    )
+
+
+_GRADES: dict[Presence, tuple[Severity, Confidence, str]] = {
+    Presence.SOMETIMES: (
+        Severity.LOW,
+        Confidence.FIRM,
+        "and INSTALLED_APPS adds it on some paths and not others -- so it is not "
+        "running today, but what stops it is a settings value rather than the "
+        "absence of the package, and that value can change without a deploy",
+    ),
+    Presence.NEVER: (
+        Severity.INFO,
+        Confidence.FIRM,
+        "and nothing in the settings installs it, so it is inert -- it is weight in "
+        "the image and a better toolkit for anyone who gets a foothold",
+    ),
+    Presence.UNKNOWN: (
+        Severity.INFO,
+        Confidence.TENTATIVE,
+        "and INSTALLED_APPS could not be read, so whether anything installs it is "
+        "unknown from the source alone",
+    ),
+}

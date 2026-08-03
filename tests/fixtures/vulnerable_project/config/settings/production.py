@@ -43,3 +43,10 @@ SECURE_PROXY_SSL_HEADER = ("X-Forwarded-Proto", "https")
 # nothing, nothing warns, and whoever added it now believes a view that raises
 # halfway through rolls back.
 ATOMIC_REQUESTS = True
+
+# PLANTED DEFECT: the toolbar is one environment variable away from running in
+# production, and the package is already on the machine (DJS-025). This is the
+# shape the rule exists for -- correct today, and flipped by an operator
+# debugging an incident at the worst possible moment.
+if os.environ.get("ENABLE_DEBUG_TOOLBAR"):
+    INSTALLED_APPS = [*INSTALLED_APPS, "debug_toolbar"]

@@ -1,3 +1,10 @@
 Django==6.0.7
 djangorestframework==3.17.1
 psycopg[binary]==3.3.4
+# PLANTED DEFECT (DJS-025): shipped to production, installed only when an
+# environment variable says so -- the guard is a value, not the absence of the
+# package.
+django-debug-toolbar==7.0.0
+# PLANTED DEFECT (DJS-025): shipped and never installed at all, which is the
+# quieter half of the same rule.
+django-browser-reload==1.20.0

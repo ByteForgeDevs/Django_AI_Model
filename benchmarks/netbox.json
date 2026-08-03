@@ -55,6 +55,14 @@
       "note": "Correct, well-formed, and exactly what the rule is designed to say quietly rather than loudly. netbox/netbox/settings.py:601 is the textbook ('HTTP_X_FORWARDED_PROTO', 'https'), which is the right configuration for the nginx or Apache deployment NetBox documents, and the line immediately below it sets USE_X_FORWARDED_HOST = True for the same reason. There is no misspelling and no alternative NetBox could sensibly choose. What the finding records is the invariant this creates -- that every route to the application must pass through a proxy which overwrites the header -- and that invariant is a deployment property we cannot see from the repository, which is why the rule caps itself at low/tentative and stays out of a default run. Accepted rather than a false positive because the statement is true and worth one review; it is the kind of finding a reader is meant to confirm once and then suppress.",
       "reviewed": "2026-08-02",
       "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "fbf3831f58a6089b",
+      "rule_id": "DJS-025",
+      "verdict": "accepted_risk",
+      "file": "base_requirements.txt",
+      "line": 15,
+      "note": "django-debug-toolbar in base_requirements.txt:15, pinned through to requirements.txt:4. NetBox handles this about as well as it can be handled with a single distribution: settings.py:472 lists debug_toolbar in INSTALLED_APPS and settings.py:511 removes it again under `if not DEBUG and 'collectstatic' not in sys.argv`, so the app is not installed on a normal production run. That is precisely why DJS-024 stays silent here and why this rule speaks instead: the package is still on the machine, and what keeps the toolbar off is the value of DEBUG rather than the absence of the code. NetBox is a self-hosted product whose operators are told to enable DEBUG when troubleshooting -- shipping the toolbar so that it works when they do is a deliberate product decision, not an oversight, and splitting the image in two to avoid it would cost their users more than it saves. Accepted rather than false positive because the statement is true and the exposure is real: an operator who leaves DEBUG on after an incident gets a SQL panel, and NetBox's own threat model would rather they knew that. The rule is low severity for exactly this reason -- it is a fact about the deployment, not an accusation."
     }
   ]
 }
