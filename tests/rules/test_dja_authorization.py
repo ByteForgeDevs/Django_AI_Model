@@ -158,3 +158,54 @@ class TestDefaultPermissions:
         found = run(make_project, "DJA-001", VIEWSET, settings=OPEN_DEFAULT)
         assert found[0].location.file.endswith("settings.py")
         assert found[0].location.line > 1
+
+
+class TestViewWithoutPermissions:
+    """DJA-002 -- the view that never said anything."""
+
+    NAKED = """
+from rest_framework import viewsets
+from shop.models import Note
+
+class NoteViewSet(viewsets.ModelViewSet):
+    queryset = Note.objects.all()
+"""
+
+    def test_reports_a_view_inheriting_an_open_default(self, make_project) -> None:
+        found = run(make_project, "DJA-002", self.NAKED, settings=OPEN_DEFAULT)
+        assert len(found) == 1
+        assert "declares no permission_classes" in found[0].message
+
+    def test_reports_a_view_inheriting_drfs_own_default(self, make_project) -> None:
+        found = run(make_project, "DJA-002", self.NAKED, settings=NO_DRF_SETTING)
+        assert len(found) == 1
+        assert "DRF's own default" in found[0].message
+
+    def test_silent_under_a_strict_default(self, make_project) -> None:
+        assert not run(make_project, "DJA-002", self.NAKED, settings=STRICT)
+
+    def test_silent_when_the_view_declares_its_own(self, make_project) -> None:
+        assert not run(make_project, "DJA-002", VIEWSET, settings=OPEN_DEFAULT)
+
+    def test_silent_when_an_ancestor_declares_it(self, make_project) -> None:
+        source = """
+from rest_framework import viewsets
+from rest_framework.permissions import IsAuthenticated
+from shop.models import Note
+
+class Guarded(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+
+class NoteViewSet(Guarded):
+    queryset = Note.objects.all()
+"""
+        assert not run(make_project, "DJA-002", source, settings=OPEN_DEFAULT)
+
+    def test_silent_on_an_unrouted_view(self, make_project) -> None:
+        assert not run(
+            make_project, "DJA-002", self.NAKED, settings=OPEN_DEFAULT, urls="urlpatterns = []\n"
+        )
+
+    def test_writable_endpoints_are_graded_higher(self, make_project) -> None:
+        found = run(make_project, "DJA-002", self.NAKED, settings=OPEN_DEFAULT)
+        assert found[0].severity is Severity.HIGH

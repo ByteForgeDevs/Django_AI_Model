@@ -2035,6 +2035,16 @@ building it here pays for itself twice.
   permissive default nothing inherits is a latent hazard rather than a live
   one. Silent on both benchmarks, correctly — both set the default explicitly.
 - **2.3.2** — `DJA-002` view with no explicit permission classes under a permissive default.
+  **Done.** The view that never said anything, which is the common shape of an
+  accidentally public endpoint: nobody wrote a permissive rule, they wrote
+  nothing. Fires only when the guard's source is the setting or DRF's own
+  default — a view whose ancestry declares permissions is not relying on
+  anything, even if it never mentions them itself, and 2.2.4 already resolved
+  that. Graded `HIGH` on a writable route and `MEDIUM` otherwise.
+
+  The message names where the default came from, because "this view has no
+  permissions" is a claim a reader will not believe about their own code and
+  the useful reply is the chain that produced it. Silent on both benchmarks.
 - **2.3.3** — `DJA-003` `AllowAny` on a view exposing write methods.
 - **2.3.4** — `DJA-004` **IDOR** — `get_queryset` on a user-owned model not scoped to `request.user`. The flagship rule of this phase.
 - **2.3.5** — `DJA-005` object-level permissions declared but `check_object_permissions` never reached on a custom `get_object`.

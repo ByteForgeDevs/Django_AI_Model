@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from djaudit.api.permissions import (
     DEFAULT_PERMISSION_SETTING,
     DRF_SETTING,
+    Source,
 )
 from djaudit.models import (
     Confidence,
@@ -156,6 +157,59 @@ class PermissiveDefaultPermissions(ApiRule):
     )
 
 
+@register
+class EndpointWithoutPermissions(ApiRule):
+    """A routed endpoint left to a permissive project default."""
+
+    def inspect(self, ctx: ProjectContext, endpoint: Endpoint) -> Iterator[Finding]:
+        guard = endpoint.guard
+        if guard.source not in (Source.SETTING, Source.DRF_DEFAULT):
+            return
+        if not guard.is_open:
+            return
+        view = endpoint.view
+        origin = (
+            f"the project default in {self.settings_module}"
+            if guard.source is Source.SETTING
+            else "DRF's own default, since the project sets none"
+        )
+        yield self.finding(
+            location=self.at(ctx, view),
+            message=(
+                f"{view.name} declares no permission_classes anywhere in its ancestry "
+                f"and falls back to {origin}, which admits anonymous callers on "
+                f"{_methods(endpoint)}"
+            ),
+            evidence=(self.guard_evidence(guard),),
+            severity=Severity.HIGH if endpoint.writes else Severity.MEDIUM,
+        )
+
+    meta = RuleMeta(
+        id="DJA-002",
+        title="Routed view relies on a permissive permission default",
+        family=Family.DJA,
+        severity=Severity.HIGH,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "The view never says who may call it, and the default it inherits says "
+            "anyone. This is the common shape of an accidentally public endpoint: "
+            "nobody wrote a permissive rule, they wrote nothing."
+        ),
+        remediation=(
+            "Declare permission_classes on the view, or raise the project default and "
+            "mark deliberately public endpoints with AllowAny so the intent is written down."
+        ),
+        references=(DRF_DOCS, OWASP_ACCESS),
+        limitations=(
+            "An endpoint may be public by design; this rule reports that nothing in "
+            "the application restricts it, not that something should.",
+            "Authentication enforced by middleware or by a gateway in front of the "
+            "application is not visible to a static read of the view.",
+        ),
+    )
+
+
 def _all_open(classes: object) -> bool:
     if not isinstance(classes, list | tuple):
         return False
@@ -163,3 +217,7 @@ def _all_open(classes: object) -> bool:
         isinstance(item, str) and item.endswith(("permissions.AllowAny", ".AllowAny"))
         for item in classes
     )
+
+
+def _methods(endpoint: Endpoint) -> str:
+    return ", ".join(sorted(endpoint.methods)) or "every routed method"
