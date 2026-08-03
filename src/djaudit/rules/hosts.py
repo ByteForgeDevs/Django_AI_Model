@@ -393,3 +393,73 @@ class CorsAllowsAllOrigins(InsecureDefaultRule):
             "https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS",
         ),
     )
+
+
+@register
+class CorsWildcardWithCredentials(InsecureDefaultRule):
+    """Every origin is allowed *and* credentials are sent with the response."""
+
+    setting = "CORS_ALLOW_ALL_ORIGINS"
+    aliases = ("CORS_ORIGIN_ALLOW_ALL",)
+    ceiling = Confidence.CERTAIN
+    corrected_as = "turns it off"
+
+    consequence = (
+        "django-cors-headers stops sending the wildcard and echoes the caller's "
+        "own origin back with Access-Control-Allow-Credentials: true instead, "
+        "which lets any page a signed-in user visits read this site's "
+        "authenticated responses as them -- their data, and any CSRF token those "
+        "responses carry"
+    )
+
+    def insecure(self, value: Value) -> bool:
+        return could_be_true(value)
+
+    def applies(self, ctx: ProjectContext, group: SettingGroup) -> bool:
+        view = self.views.get(group.module.dotted)
+        if view is None:
+            return False
+        # The exact inverse of DJS-015's precondition, so between the two of
+        # them an open CORS policy is reported once and never twice.
+        if not could_be_true(view.get("CORS_ALLOW_CREDENTIALS").value):
+            return False
+        return installs_middleware(view, CORS_MIDDLEWARE) is not False
+
+    meta = RuleMeta(
+        id="DJS-016",
+        title="CORS allows every origin and sends credentials",
+        family=Family.DJS,
+        severity=Severity.CRITICAL,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "Browsers refuse to send cookies to a response that answers "
+            "Access-Control-Allow-Origin: *, and that refusal is the only thing making a "
+            "CORS wildcard survivable. django-cors-headers knows it, so when "
+            "CORS_ALLOW_CREDENTIALS is on it stops sending the wildcard: "
+            "add_response_headers reads 'if CORS_ALLOW_ALL_ORIGINS and not "
+            "CORS_ALLOW_CREDENTIALS' and otherwise reflects the request's Origin header "
+            "verbatim. With the allow-all flag on, no origin is ever checked against a "
+            "list first, so every origin is reflected and every one of them is told "
+            "credentials are welcome. The same-origin policy is then off for this site "
+            "in every browser: any page a logged-in user visits can read their data and "
+            "lift the CSRF token out of the response, which makes writes reachable too. "
+            "This is the pairing OWASP describes as the classic CORS misconfiguration, "
+            "and it is usually reached by adding credentials to a wildcard that was "
+            "harmless the day before."
+        ),
+        remediation=(
+            "Keep the credentials and drop the wildcard: list the front-end origins in "
+            "CORS_ALLOWED_ORIGINS, or CORS_ALLOWED_ORIGIN_REGEXES if they are generated, "
+            "each as a full scheme://host. Never build that list by reflecting "
+            "request.headers['Origin'], which is the same hole written by hand. If the "
+            "data is genuinely public, the other direction works instead -- turn "
+            "CORS_ALLOW_CREDENTIALS off and let the wildcard stand, which restores the "
+            "browser's own refusal to send cookies."
+        ),
+        references=(
+            _CORS_DOCS,
+            "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Credentials",
+            "https://owasp.org/www-community/attacks/CORS_OriginHeaderScrutiny",
+        ),
+    )

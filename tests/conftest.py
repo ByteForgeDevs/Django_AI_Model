@@ -18,6 +18,11 @@ def overridden_project() -> Path:
     return FIXTURES / "overridden_project"
 
 
+@pytest.fixture
+def api_project() -> Path:
+    return FIXTURES / "api_project"
+
+
 def make_finding(
     rule_id: str = "DJS-001",
     file: str = "app/views.py",

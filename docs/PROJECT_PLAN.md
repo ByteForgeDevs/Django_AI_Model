@@ -832,6 +832,32 @@ than after twenty-six of them disagree, is cheaper.
   by the recall gate itself; `overridden_project` names its front-end in
   `CORS_ALLOWED_ORIGINS` instead.
 - **1.6.4** — `DJS-016` CORS wildcard combined with `CORS_ALLOW_CREDENTIALS`.
+
+  **Done.** One line of `CorsMiddleware.add_response_headers` is the whole
+  rule: `if CORS_ALLOW_ALL_ORIGINS and not CORS_ALLOW_CREDENTIALS` sends `*`,
+  and *otherwise* reflects the request's own `Origin` back. A wildcard is only
+  survivable because browsers refuse to send cookies to one; switching
+  credentials on makes the package stop sending the wildcard, and that refusal
+  goes with it. With allow-all on, no origin is checked against a list first,
+  so every origin is reflected and every one of them is told credentials are
+  welcome. `critical`/`certain`: both values are read directly and the
+  behaviour has no other input.
+
+  The precondition is the exact inverse of `DJS-015`'s, so between them an open
+  CORS policy is reported once and never twice — which the tests assert
+  directly, over every combination, rather than trusting the reading.
+
+  Neither existing fixture could host it: adding credentials to
+  `vulnerable_project` would have silenced the `DJS-015` case it was carrying.
+  So this substep adds **`tests/fixtures/api_project`**, a browser-facing API
+  in a *single* settings module. That shape is worth having on its own — it is
+  what most Django projects look like, and every rule so far had only ever been
+  run against an inheritance chain, so a rule that quietly assumes a base
+  module exists now has somewhere to fail. Everything in it is deliberately
+  correct except the planted pairing, which makes it a control for the whole
+  family as much as a recall case, and `DJS-015` is listed in `must_not_report`
+  so the deferral is enforced by the eval gate rather than only by unit tests.
+  It also pins `DJS-012`'s informational branch, which nothing else exercised.
 - **1.6.5** — `DJS-017` `X_FRAME_OPTIONS` permissive or `XFrameOptionsMiddleware` absent.
 - **1.6.6** — `DJS-018` `SECURE_CONTENT_TYPE_NOSNIFF` disabled.
 
