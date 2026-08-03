@@ -1503,6 +1503,34 @@ building it here pays for itself twice.
   each is ordinary, and picking one would put every downstream finding on the
   wrong model.
 - **2.1.2** — Field extraction with parameters (`null`, `blank`, `unique`, `db_index`, `max_length`, `default`, `choices`).
+
+  **Done.** `graph/fields.py` reads every field declared in a class body into a
+  `FieldNode`, attached to its model in declaration order — which matters,
+  because a serializer rule reporting "the first sensitive field exposed" would
+  otherwise land on a different line each run.
+
+  The substance of the substep is the third state. A keyword can be absent,
+  present and readable, or present and computed, and a boolean holds only two
+  of those. `default=timezone.now` is not "no default"; `choices=Status.choices`
+  is not "no choices"; `null=USE_NULL` is not `null=False`. Each field
+  therefore records Django's own default *and* an `unreadable` tuple naming the
+  keywords we could not evaluate, with a `knows()` guard for any rule about to
+  make a claim that turns on one. On the two benchmark targets that is 31
+  unreadable `choices` and 14 unreadable `default`s in NetBox alone — every one
+  of them a place a careless rule would have invented a fact.
+
+  What counts as a field is the other half. Django's 39 exported `Field`
+  subclasses are listed, plus the contenttypes and postgres ones — and
+  `GenericForeignKey`/`GenericRelation` have to be listed by name, because
+  neither ends in `Field` and generic relations are where a surprising amount
+  of data hides. Beyond that a name ending in `Field` is accepted as a custom
+  field: the convention is near-universal, and the alternative is dropping
+  NetBox's six (`ColorField`, `PathField`, `WWNField`…). `models.Manager()` and
+  the constraint classes are explicitly excluded — they live in a model body
+  and are not columns.
+
+  Raw `args` and `kwargs` are kept on the node so relation resolution does not
+  re-walk the tree. 244 fields extracted from NetBox, 128 from Healthchecks.
 - **2.1.3** — Relationship edges: `ForeignKey`, `OneToOneField`, `ManyToManyField`, including string references, `self`, and `settings.AUTH_USER_MODEL`.
 - **2.1.4** — Reverse relation naming: `related_name`, `related_query_name`, and Django's default `_set` accessor.
 - **2.1.5** — `Meta` handling: `ordering`, `indexes`, `constraints`, `unique_together`, `abstract`, `db_table`.

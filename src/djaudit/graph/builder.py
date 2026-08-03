@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from djaudit.astutils import UNKNOWN, dotted_name, import_bindings, literal, resolve_dotted
+from djaudit.graph.fields import extract_fields
 from djaudit.graph.nodes import ModelGraph, ModelNode
 
 if TYPE_CHECKING:
@@ -215,6 +216,7 @@ class _ModuleScanner:
             end_lineno=node.end_lineno or node.lineno,
             bases=bases,
             node=node,
+            fields=extract_fields(node, self.bindings),
         )
         meta = meta_class(node)
         if meta is not None:

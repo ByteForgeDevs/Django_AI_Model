@@ -11,6 +11,7 @@ import ast
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 DJANGO_MODEL_BASES = frozenset(
     {
@@ -27,6 +28,70 @@ legal and occasionally used. It is also the name of plenty of things that are
 not Django models, so the builder only accepts it when the module imports it
 from Django — the string alone is not evidence.
 """
+
+
+@dataclass(slots=True)
+class FieldNode:
+    """One field declared on a model.
+
+    The three-way distinction between *absent*, *present but unreadable* and
+    *present and false* is what :attr:`unreadable` exists for. A boolean cannot
+    hold it, and collapsing it is how a tool ends up reporting that a field has
+    no default when what it really has is ``default=timezone.now``.
+    """
+
+    name: str
+    kind: str
+    """The field class, e.g. ``CharField`` — the tail of the resolved name."""
+
+    dotted: str
+    """The field class resolved through the module's imports, as far as we can."""
+
+    lineno: int
+    end_lineno: int
+    is_django: bool = True
+    """False for a field this project or a third-party package defines. Such a
+    field still behaves like one, but we cannot know what its own arguments
+    mean, so a rule may want to say less about it."""
+
+    is_relation: bool = False
+
+    null: bool = False
+    blank: bool = False
+    unique: bool = False
+    db_index: bool = False
+    primary_key: bool = False
+    editable: bool = True
+    auto_now: bool = False
+    auto_now_add: bool = False
+
+    max_length: int | None = None
+    has_default: bool = False
+    default: Any = None
+    has_choices: bool = False
+    choices: Any = None
+
+    unreadable: tuple[str, ...] = ()
+    """Keywords that were given but could not be evaluated statically.
+
+    A rule that cares about one of these should either lower its confidence or
+    stay quiet. The value stored alongside is Django's own default, so the
+    field remains usable for every question that does not turn on that keyword.
+    """
+
+    args: tuple[ast.expr, ...] = field(default_factory=tuple, repr=False, compare=False)
+    kwargs: dict[str, ast.expr] = field(default_factory=dict, repr=False, compare=False)
+    """Raw arguments, kept so relation resolution does not re-walk the tree."""
+
+    node: ast.Call | None = field(default=None, repr=False, compare=False)
+
+    def knows(self, keyword: str) -> bool:
+        """Whether this field's value for ``keyword`` is something we read.
+
+        The honest guard for any rule about to make a claim that turns on one
+        argument.
+        """
+        return keyword not in self.unreadable
 
 
 @dataclass(slots=True)
@@ -71,6 +136,14 @@ class ModelNode:
 
     node: ast.ClassDef | None = field(default=None, repr=False, compare=False)
     """The class body, kept so later passes can re-read it without re-parsing."""
+
+    fields: dict[str, FieldNode] = field(default_factory=dict)
+    """Fields declared on this class, in declaration order.
+
+    Inherited fields are not included: they belong to the class that declared
+    them, and flattening an inheritance chain needs the whole project, which is
+    substep 2.1.6.
+    """
 
     @property
     def label(self) -> str:
