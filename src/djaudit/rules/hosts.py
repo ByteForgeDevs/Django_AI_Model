@@ -9,6 +9,7 @@ family does not: the value is a *list*, so the question is not "is this on" but
 from __future__ import annotations
 
 from collections.abc import Callable
+from urllib.parse import urlsplit
 
 from djaudit.context import ProjectContext
 from djaudit.models import Confidence, Family, Severity, Tier
@@ -138,5 +139,168 @@ class AllowedHostsUnrestricted(InsecureDefaultRule):
         references=(
             _HOSTS_DOCS,
             "https://docs.djangoproject.com/en/stable/topics/security/#host-header-validation",
+        ),
+    )
+
+
+_CSRF_DOCS = "https://docs.djangoproject.com/en/stable/ref/settings/#csrf-trusted-origins"
+
+
+def csrf_pattern(entry: str) -> str:
+    """The host pattern Django actually derives from one trusted origin.
+
+    ``CsrfViewMiddleware`` does not compare the configured string to anything.
+    It takes ``urlsplit(origin).netloc`` and strips leading asterisks, and that
+    result is what is matched -- so this function, not the entry, is what the
+    setting means.
+    """
+    return urlsplit(entry).netloc.lstrip("*")
+
+
+def csrf_reduction(entry: str) -> str:
+    """What ``entry`` ends up being compared against, for a message."""
+    pattern = csrf_pattern(entry)
+    return repr(pattern) if pattern else "nothing"
+
+
+def csrf_verdict(entry: object) -> str:
+    """Classify one entry as ``"fine"``, ``"broad"``, ``"tld"`` or ``"inert"``.
+
+    ``is_same_domain`` treats a pattern as a subdomain wildcard only when it
+    begins with a dot, and as an exact hostname otherwise. Everything follows
+    from that one line of Django.
+    """
+    if not isinstance(entry, str):
+        return "fine"
+    pattern = csrf_pattern(entry)
+    if "://" not in entry:
+        # Origin and Referer headers both arrive as scheme://host, and both of
+        # Django's comparisons go through netloc, which an entry with no scheme
+        # does not have. It matches nothing at either end.
+        return "inert"
+    if "*" not in entry:
+        return "fine"
+    if not pattern.startswith("."):
+        # The asterisk only widens anything when a dot follows it. Anywhere
+        # else it is left in the hostname, or stripped to nothing, and either
+        # way the entry stops meaning what it was written to mean.
+        return "inert"
+    labels = [label for label in pattern.strip(".").split(".") if label]
+    return "broad" if len(labels) > 1 else "tld"
+
+
+def csrf_entries(value: Value, verdict: str) -> tuple[str, ...]:
+    """Every entry of ``value``, on any branch, carrying ``verdict``."""
+    seen: dict[str, None] = {}
+    for entries in entries_of(value):
+        for entry in entries or ():
+            if isinstance(entry, str) and csrf_verdict(entry) == verdict:
+                seen[entry] = None
+    return tuple(seen)
+
+
+@register
+class CsrfTrustedOriginsTooBroad(InsecureDefaultRule):
+    """``CSRF_TRUSTED_ORIGINS`` trusts too much, or silently trusts nothing."""
+
+    setting = "CSRF_TRUSTED_ORIGINS"
+    ceiling = Confidence.FIRM
+    corrected_as = "narrows it"
+
+    def insecure(self, value: Value) -> bool:
+        return any_entry(value, lambda entry: csrf_verdict(entry) != "fine")
+
+    def _worst(self, resolved: ResolvedSetting) -> str:
+        for verdict in ("tld", "inert", "broad"):
+            if csrf_entries(resolved.value, verdict):
+                return verdict
+        return "fine"
+
+    def severity_for(self, resolved: ResolvedSetting) -> Severity | None:
+        # Trusting every host under a TLD is not a judgement call about anyone's
+        # infrastructure, so it outranks both of the others.
+        return {
+            "tld": Severity.HIGH,
+            "inert": Severity.MEDIUM,
+            "broad": Severity.MEDIUM,
+        }.get(self._worst(resolved))
+
+    def ceiling_for(self, resolved: ResolvedSetting) -> Confidence | None:
+        # Whether an entry does anything is a fact about the string. Whether
+        # trusting your own subdomains is safe depends on who can put content
+        # on them, which is the one thing the source cannot tell us -- so that
+        # branch stays out of a default run and waits to be asked for.
+        return Confidence.TENTATIVE if self._worst(resolved) == "broad" else None
+
+    def describe_state(self, resolved: ResolvedSetting) -> str:
+        worst = self._worst(resolved)
+        entries = csrf_entries(resolved.value, worst)
+        quoted = ", ".join(repr(entry) for entry in entries)
+        if worst == "tld":
+            return f"trusts every host under a top-level domain via {quoted}"
+        if worst == "broad":
+            return f"trusts every subdomain via {quoted}"
+        # Naming the pattern Django ends up with is the whole point of this
+        # branch: the entry looks right, and the derived value is the evidence
+        # that it is not.
+        if len(entries) == 1:
+            return f"lists {quoted}, which Django reduces to {csrf_reduction(entries[0])}"
+        pairs = ", ".join(f"{entry!r} to {csrf_reduction(entry)}" for entry in entries)
+        return f"lists entries Django reduces to something that matches no origin: {pairs}"
+
+    def consequence_for(self, resolved: ResolvedSetting) -> str:
+        worst = self._worst(resolved)
+        if worst == "tld":
+            return (
+                "any site on the internet whose name ends that way can post a "
+                "state-changing request to this one and have the CSRF check wave it "
+                "through, which is the protection removed rather than relaxed"
+            )
+        if worst == "inert":
+            return (
+                "the cross-origin requests it was added to allow are still rejected -- "
+                "the setting looks configured, the CSRF failures look unrelated to it, "
+                "and the usual next step is to widen the list further"
+            )
+        return (
+            "anything that can serve a page from any subdomain -- a tenant, a "
+            "docs host, a stale CNAME someone else has claimed -- can make "
+            "authenticated state-changing requests on behalf of a logged-in user"
+        )
+
+    meta = RuleMeta(
+        id="DJS-014",
+        title="CSRF_TRUSTED_ORIGINS is too broad or has no effect",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "CSRF_TRUSTED_ORIGINS is the list of origins allowed to make state-changing "
+            "requests from somewhere other than this site, so every entry is a hostname "
+            "whose compromise becomes this site's compromise. Django derives the pattern "
+            "it matches by taking urlsplit(origin).netloc and stripping leading "
+            "asterisks, then treating the result as a subdomain wildcard only if it "
+            "begins with a dot. Two failures follow. A wildcard over a domain whose "
+            "subdomains are not all yours trusts whoever holds them. And an entry with "
+            "no scheme -- the spelling this setting required before Django 4.0 -- has no "
+            "netloc at all, so it matches nothing, in both the Origin and the Referer "
+            "check. Django reports that second one as 4_0.E001, but system checks do not "
+            "run under gunicorn or uvicorn, so a deployment that never invokes manage.py "
+            "will not hear about it."
+        ),
+        remediation=(
+            "Write each origin as a full scheme://host, and prefer naming hosts to "
+            "wildcarding them. A wildcard needs the dot -- 'https://*.example.com' works, "
+            "'https://*' and 'https://*example.com' do not do what they look like. Keep "
+            "https:// entries rather than http://: a trusted plaintext origin can be "
+            "forged by anyone on the network path. If a wildcard is genuinely needed, it "
+            "is only as trustworthy as your control over every name under it, so it does "
+            "not belong on a domain where customers or a hosting provider can create "
+            "subdomains."
+        ),
+        references=(
+            _CSRF_DOCS,
+            "https://docs.djangoproject.com/en/stable/ref/csrf/",
         ),
     )

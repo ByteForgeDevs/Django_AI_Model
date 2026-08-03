@@ -1,5 +1,5 @@
 {
-  "description": "Split settings with DEBUG left on. Production is a real critical finding; base is a real high finding because nothing overrides it; development is a control case that must never be reported. SECRET_KEY is hardcoded in base.py and inherited by production, so it is reported once against the module with most to lose rather than once per environment. base.py carries a strong but committed key, so DJS-002 reports it and DJS-003 must not: the two rules divide the fixtures between them so each keeps a recall case. DATABASES carries a hardcoded PASSWORD next to a HOST read from the environment: the environment value collapses the whole dict to unresolvable, so this is the case that proves DJS-004 reads entries individually rather than waiting for the setting to resolve. STRIPE_SECRET_KEY is matched by name rather than by being known, so the two settings below it are controls that must stay silent: PASSWORD_RESET_TIMEOUT reads like a credential and holds policy, and NOTIFICATION_TOKEN holds an import path. No transport or cookie flag is set anywhere, so DJS-006, DJS-009 and DJS-010 report against production -- once each, not once per module, and pointed at the module with most to lose rather than at the base it inherits from. production.py also carries an HSTS ramp that was started and never finished: one hour instead of a year (DJS-007) with includeSubDomains still off (DJS-008). The pair is deliberate, because excluding subdomains is the correct value while HSTS is off, so this is the only state in which DJS-008 has anything to say. SECURE_PROXY_SSL_HEADER is spelled as an HTTP header rather than a WSGI environment key (DJS-012), which is the branch of that rule worth having: the setting silently does nothing and nothing anywhere says so. ALLOWED_HOSTS is opened to \"*\" (DJS-013), which is the wildcard branch of that rule; neither benchmark target can exercise it, because both drive the list from configuration we cannot read.",
+  "description": "Split settings with DEBUG left on. Production is a real critical finding; base is a real high finding because nothing overrides it; development is a control case that must never be reported. SECRET_KEY is hardcoded in base.py and inherited by production, so it is reported once against the module with most to lose rather than once per environment. base.py carries a strong but committed key, so DJS-002 reports it and DJS-003 must not: the two rules divide the fixtures between them so each keeps a recall case. DATABASES carries a hardcoded PASSWORD next to a HOST read from the environment: the environment value collapses the whole dict to unresolvable, so this is the case that proves DJS-004 reads entries individually rather than waiting for the setting to resolve. STRIPE_SECRET_KEY is matched by name rather than by being known, so the two settings below it are controls that must stay silent: PASSWORD_RESET_TIMEOUT reads like a credential and holds policy, and NOTIFICATION_TOKEN holds an import path. No transport or cookie flag is set anywhere, so DJS-006, DJS-009 and DJS-010 report against production -- once each, not once per module, and pointed at the module with most to lose rather than at the base it inherits from. production.py also carries an HSTS ramp that was started and never finished: one hour instead of a year (DJS-007) with includeSubDomains still off (DJS-008). The pair is deliberate, because excluding subdomains is the correct value while HSTS is off, so this is the only state in which DJS-008 has anything to say. SECURE_PROXY_SSL_HEADER is spelled as an HTTP header rather than a WSGI environment key (DJS-012), which is the branch of that rule worth having: the setting silently does nothing and nothing anywhere says so. ALLOWED_HOSTS is opened to \"*\" (DJS-013), which is the wildcard branch of that rule; neither benchmark target can exercise it, because both drive the list from configuration we cannot read. CSRF_TRUSTED_ORIGINS carries the mistake people bring from Django 3: an entry with no scheme sitting beside a correct one, which Django reduces to nothing and silently never matches, so DJS-014 reports the list once and points at the entry that does nothing rather than at the one that works.",
   "expected": [
     {
       "rule_id": "DJS-001",
@@ -60,21 +60,21 @@
     {
       "rule_id": "DJS-007",
       "file": "config/settings/production.py",
-      "line": 27,
+      "line": 30,
       "severity": "low",
       "confidence": "firm"
     },
     {
       "rule_id": "DJS-008",
       "file": "config/settings/production.py",
-      "line": 28,
+      "line": 31,
       "severity": "low",
       "confidence": "firm"
     },
     {
       "rule_id": "DJS-012",
       "file": "config/settings/production.py",
-      "line": 30,
+      "line": 33,
       "severity": "medium",
       "confidence": "firm"
     },
@@ -83,6 +83,13 @@
       "file": "config/settings/production.py",
       "line": 25,
       "severity": "high",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJS-014",
+      "file": "config/settings/production.py",
+      "line": 28,
+      "severity": "medium",
       "confidence": "firm"
     }
   ],

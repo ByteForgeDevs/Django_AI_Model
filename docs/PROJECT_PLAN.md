@@ -765,6 +765,39 @@ than after twenty-six of them disagree, is cheaper.
   `could_be_true` moved from `rules/settings.py` to `_base.py` beside
   `could_be_off`, and `InsecureDefaultRule` gained `severity_for()`.
 - **1.6.2** — `DJS-014` `CSRF_TRUSTED_ORIGINS` wildcard or scheme-less entry.
+
+  **Done.** This rule is a reading of four lines of `CsrfViewMiddleware`, so it
+  was written from those lines rather than from the documentation. Django takes
+  `urlsplit(origin).netloc`, strips leading asterisks, and gives the result to
+  `is_same_domain`, which treats a pattern as a subdomain wildcard only when it
+  begins with a dot. `csrf_pattern()` reproduces that derivation and everything
+  else follows from it, including a parametrised test that pins the derivation
+  itself so the rest of the rule cannot drift away from the framework.
+
+  Three verdicts come out. A wildcard whose base has one label — `https://*.com`
+  — trusts every host under a top-level domain, which is nobody's intention and
+  no one's infrastructure, so it is `high`/`firm`. A wildcard over your own
+  domain is `medium` but capped at `tentative`: whether every subdomain is
+  yours is precisely the question the source cannot answer, and a tenant host
+  or a stale CNAME turns it into a real one. And an entry the middleware
+  reduces to nothing — anything with no scheme, which is the spelling this
+  setting required before Django 4.0, or an asterisk with no dot after it — is
+  `medium`/`firm`, because that is a fact about the string rather than a guess
+  about a network.
+
+  That last branch is the same failure as `DJS-012`'s misspelled proxy header
+  and is worth as much: Django does flag it, as `4_0.E001`, but system checks do
+  not run under gunicorn, so a deployment that never invokes `manage.py` never
+  hears it. The message names what the entry reduces to, because the entry
+  looks correct and the derived value is the evidence that it is not.
+
+  Both targets set the list to `[]`, so `vulnerable_project` carries the
+  scheme-less entry beside a working one, and `overridden_project` carries the
+  same list written correctly.
+
+  `InsecureDefaultRule` gained `ceiling_for()` alongside `severity_for()`: one
+  value of a setting can be a fact and another a judgement, and grading the two
+  apart means grading their certainty apart too.
 - **1.6.3** — `DJS-015` `CORS_ALLOW_ALL_ORIGINS` enabled.
 - **1.6.4** — `DJS-016` CORS wildcard combined with `CORS_ALLOW_CREDENTIALS`.
 - **1.6.5** — `DJS-017` `X_FRAME_OPTIONS` permissive or `XFrameOptionsMiddleware` absent.

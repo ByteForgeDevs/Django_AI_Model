@@ -462,6 +462,17 @@ class InsecureDefaultRule(SettingsRule):
         """
         return None
 
+    def ceiling_for(self, resolved: ResolvedSetting) -> Confidence | None:
+        """Override how confidently this particular value can be complained about.
+
+        Severity and confidence move independently here. One value can be a
+        plain fact about a string we read, and another value of the same
+        setting can hinge on infrastructure we cannot see -- so a rule that
+        grades the two failures apart usually has to grade the certainty apart
+        as well.
+        """
+        return None
+
     def applies(self, ctx: ProjectContext, group: SettingGroup) -> bool:
         """Whether the setting is worth having an opinion about here at all.
 
@@ -483,7 +494,7 @@ class InsecureDefaultRule(SettingsRule):
             return
 
         severity: Severity | None = self.severity_for(resolved)
-        ceiling: Confidence | None = None
+        ceiling: Confidence | None = self.ceiling_for(resolved)
         caveats: tuple[str, ...] = ()
         corrected = self.overridden(group.module, lambda rs: not self.insecure(rs.value))
         if resolved.is_default and self.overridden(
