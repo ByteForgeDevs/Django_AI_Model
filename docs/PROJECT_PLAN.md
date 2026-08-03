@@ -1967,6 +1967,46 @@ building it here pays for itself twice.
   — a circular import.
 - **2.2.5** — Queryset resolution: the `queryset` attribute and `get_queryset` return expressions, including filters applied.
 
+  **Done.** `api/querysets.py` answers which rows an endpoint reaches and
+  whether the request narrows them — the groundwork for the IDOR rules, and
+  the reason it needs a pass rather than a pattern is that neither benchmark
+  writes anything resembling "scoped to the requesting user". NetBox narrows
+  with `self.queryset.restrict(request.user, action)` inside a base viewset's
+  `initial()`; pretix narrows with
+  `filter(order__event__organizer=self.request.organizer)`, where `organizer`
+  is attached to the request by middleware and the word `user` never appears.
+
+  So the test is "does anything narrowing this queryset derive from the
+  request", asked of the whole ancestry. Weaker than knowing the scoping is
+  *correct*, and deliberately so: this reports whether the request was
+  consulted and declines to guess whether it was consulted properly.
+
+  Nearly all the work is indirection, and each layer was found by measuring
+  rather than by reasoning. Reading only the return expression called 31 of
+  pretix's 57 querysets unscoped, because `qs = ...` then `return qs` four
+  statements later is how everyone writes this — following locals fixed 22 of
+  them. Following `self` attributes fixed 8 more: `ItemVariationViewSet`
+  resolves `self.item` in a `@cached_property` off `self.kwargs['item']` and
+  returns `self.item.variations.all()`, with nothing in the return expression
+  to show it. `_root_path` then had to descend through calls, without which
+  the provider branch never fired at all.
+
+  Three shapes that look unscoped and are not. A return guarded by a
+  request-reading condition — pretix's `OrganizerViewSet` returns every row,
+  but only inside `if self.request.user.has_active_staff_session(...)`.
+  `.none()`, which is the strongest narrowing there is and which pretix writes
+  on views that exist only to accept a POST. And a request-scoped `get_object`,
+  kept in its own field rather than folded in, because NetBox's `DashboardView`
+  is protected completely on a detail route and would be protected not at all
+  on a list route.
+
+  NetBox: 139 attribute querysets, 138 scoped through the `initial()` rebind,
+  138 models resolved, and 2 unfiltered — `DashboardView`, which is
+  `object_scoped` and detail-only, and `DummyViewSet` in the test plugin, which
+  genuinely reads every row. pretix: 57 `get_queryset` overrides, all 57
+  scoped, and **0 unfiltered**. Every count from 2.1 through 2.2.4 unchanged.
+  27 tests.
+
 ### Step 2.3 — Authorization rules
 
 - **2.3.1** — `DJA-001` `DEFAULT_PERMISSION_CLASSES` set to `AllowAny`, or absent (DRF's own default is `AllowAny`).

@@ -17,6 +17,7 @@ import ast
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from djaudit.api.querysets import QuerysetNode, read_queryset
 from djaudit.api.routes import RouteGraph, build_route_graph
 from djaudit.api.serializers import (
     SERIALIZER_BASES,
@@ -52,6 +53,9 @@ class ApiSurface:
     routes: RouteGraph = field(default_factory=RouteGraph)
     """Which HTTP methods actually reach each view, once routers are applied."""
 
+    querysets: dict[str, QuerysetNode] = field(default_factory=dict)
+    """What rows each view can reach, and whether the request narrows them."""
+
     by_model: dict[str, list[SerializerNode]] = field(default_factory=dict)
     """Serializers keyed by the model label they serialise. A model reachable
     through several serializers is exposed by the loosest of them, so a rule
@@ -81,6 +85,18 @@ class ApiSurface:
         """Views through which data can change, which is where authorization
         rules start rather than the full set."""
         return [v for v in self.views.values() if v.writes]
+
+    @property
+    def unfiltered_views(self) -> list[ViewNode]:
+        """Routed views that read every row of a model without consulting the
+        request. The precondition for an IDOR finding, never the finding: the
+        endpoint may be public by design, or a permission class may be doing
+        the work instead."""
+        return [
+            view
+            for label, view in self.views.items()
+            if label in self.querysets and self.querysets[label].unfiltered
+        ]
 
     @property
     def unrouted_views(self) -> list[ViewNode]:
@@ -163,6 +179,14 @@ def build_api_surface(
         surface.views[view.label] = view
 
     surface.routes = build_route_graph(ctx, surface, index)
+
+    # Only routed views: an unrouted one is a base class the project wrote for
+    # its own viewsets, and resolving a queryset for it costs an ancestry walk
+    # to describe rows nobody can request.
+    routed = surface.routes.routed()
+    for label, view in surface.views.items():
+        if label in routed:
+            surface.querysets[label] = read_queryset(view, index, by_class)
 
     return surface
 
