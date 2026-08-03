@@ -188,7 +188,7 @@ what it needs to be for the next six phases.
 
 No rule is complete until every line is true:
 
-- [ ] Unique ID matching `^(DJS|DJI|DJA|DJP|DJM|DJX)-\d{3}$`, prefix agrees with declared family
+- [ ] Unique ID matching `^(DJS|DJI|DJA|DJD|DJP|DJM|DJX)-\d{3}$`, prefix agrees with declared family
 - [ ] `RuleMeta` carries title, severity, confidence, tier, and at least one authoritative reference (Django docs, OWASP, or CWE)
 - [ ] Message states what is wrong *at this location*; rationale states why it matters; remediation is concrete enough to paste
 - [ ] Emits at least one `Evidence` item — never an assertion without support
@@ -247,8 +247,8 @@ must not invalidate a committed baseline.
 | `DJM` | Migration safety | 4 |
 | `DJX` | Cross-database portability and divergence | 5 |
 
-`DJS`, `DJA`, `DJP`, `DJI`, `DJM`, and `DJX` are already enforced by
-`RULE_ID_PATTERN`. `DJD` is added in substep 2.6.1.
+All seven prefixes are enforced by `RULE_ID_PATTERN`. `DJD` was added in
+substep 2.6.1.
 
 ---
 
@@ -2403,6 +2403,12 @@ These are data-model design defects, not settings, so they need a family of
 their own. Substep 2.6.1 extends `RULE_ID_PATTERN` to admit `DJD`.
 
 - **2.6.1** — Register the `DJD` family (data model design) in `Family` and the ID pattern.
+
+  **Done.** `Family.DJD` and one alternation in `RULE_ID_PATTERN`. Its own
+  family because the fix is a migration rather than a settings line, and
+  because these are correctness defects that cost nothing until they produce a
+  wrong answer — which is a different argument from `DJP`'s, where the code is
+  right and slow.
 - **2.6.2** — `DJD-001` `ForeignKey` with `on_delete=CASCADE` to the user model on financial or audit records — informational, high value in review.
 - **2.6.3** — `DJD-002` `CharField` with `null=True`, which creates two representations of empty.
 - **2.6.4** — `DJD-003` `Meta.ordering` absent on a model that is paginated, producing unstable pagination.
