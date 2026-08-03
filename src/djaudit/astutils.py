@@ -204,10 +204,15 @@ def import_bindings(tree: ast.Module) -> dict[str, str]:
                     bindings[alias.name.partition(".")[0]] = alias.name.partition(".")[0]
         else:
             prefix = "." * node.level + (node.module or "")
+            # ``from .api import views`` binds ``.api.views``; ``from . import
+            # views`` binds ``.views``. Joining with a dot unconditionally
+            # would spell the second one ``..views``, which reads as one level
+            # further up than was written and resolves into a sibling package.
+            separator = "." if node.module else ""
             for alias in node.names:
                 if alias.name == "*":
                     continue
-                bindings[alias.asname or alias.name] = f"{prefix}.{alias.name}"
+                bindings[alias.asname or alias.name] = f"{prefix}{separator}{alias.name}"
     return bindings
 
 

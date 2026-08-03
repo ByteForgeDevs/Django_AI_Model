@@ -14,6 +14,9 @@ contributes nothing at all despite sitting in the same base list.
 
 from __future__ import annotations
 
+import ast
+
+from djaudit.astutils import import_bindings
 from djaudit.graph.builder import build_model_graph
 from djaudit.graph.inheritance import absolute, package_dotted
 from djaudit.graph.nodes import ModelGraph, ModelNode
@@ -68,6 +71,29 @@ class TestRelativeImports:
         assert absolute("netbox.models.PrimaryModel", "dcim.models") == (
             "netbox.models.PrimaryModel"
         )
+
+    def test_importing_a_module_from_its_package_keeps_one_level(self) -> None:
+        """``from . import views`` binds one dot, not two.
+
+        Encoding the level as leading dots and then joining with another dot
+        spells this ``..views``, which reads as a level higher than was written
+        and lands in a sibling package. NetBox opens all 138 of its API
+        urlconfs with exactly this line, so getting it wrong loses every
+        registration in the project.
+        """
+        tree = ast.parse("from . import views")
+        assert import_bindings(tree) == {"views": ".views"}
+        assert absolute(".views.SiteViewSet", "wireless.api.urls") == (
+            "wireless.api.views.SiteViewSet"
+        )
+
+    def test_a_named_submodule_still_joins_with_a_dot(self) -> None:
+        tree = ast.parse("from .api import views")
+        assert import_bindings(tree) == {"views": ".api.views"}
+
+    def test_climbing_from_a_bare_relative_import(self) -> None:
+        tree = ast.parse("from .. import views")
+        assert import_bindings(tree) == {"views": "..views"}
 
 
 class TestCrossModuleRecognition:

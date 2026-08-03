@@ -211,6 +211,21 @@ class ClassIndex:
                 return through
         return None
 
+    def resolve_name(self, module: str, name: str) -> str:
+        """The dotted path a name refers to, as written inside ``module``.
+
+        The general form of :meth:`base_target`, which asks the same question
+        about a base class. A urlconf writes ``views.SiteViewSet`` or a bare
+        ``SiteViewSet``, and only that module's imports say which class either
+        one means.
+        """
+        resolved = resolve_dotted(self.bindings_for(module), name)
+        if "." not in resolved or resolved.startswith("."):
+            resolved = self._absolute(resolved, module)
+        if resolved == name and name.partition(".")[0] in self._load(module):
+            return f"{module}.{name}"
+        return resolved
+
     def base_target(self, record: ClassRecord, base: str) -> str:
         """The dotted path a base class name refers to, from where it is written."""
         resolved = resolve_dotted(record.bindings, base)

@@ -1881,6 +1881,36 @@ building it here pays for itself twice.
   a mixin — 2 of NetBox's 12 — missed entirely, which lost real writable routes
   on dozens of viewsets. 21 tests.
 - **2.2.3** — Router and URL graph: `DefaultRouter.register`, `path`, `re_path`, `include`, resolving view to route to HTTP methods.
+
+  **Done.** `api/routes.py` joins 2.2.2's views to the requests that reach
+  them. The router table is transcribed from `rest_framework/routers.py`, but
+  the load-bearing part is `get_method_map`: DRF binds a mapping entry only
+  when the viewset implements the action, which is why a `ReadOnlyModelViewSet`
+  405s POST without anyone writing a restriction. Applied wholesale instead,
+  the table would report DELETE on every registered viewset in the project.
+
+  Two shapes that both benchmarks depend on. NetBox routes everything through
+  a `NetBoxRouter` that mutates `self.routes[0].mapping` in `__init__` to put
+  bulk `PUT`, `PATCH` and `DELETE` on every collection URL, so those edits are
+  read; ignoring them called 139 writable endpoints read-only-plus-POST. And
+  every pretix plugin registers on an `event_router` imported from
+  `pretix.api.urls`, so router instances are collected project-wide rather than
+  per file — without that, nine plugin viewsets looked unroutable and were
+  therefore exempt from every authorization rule.
+
+  Measuring found a defect in shared machinery. `from . import views` was bound
+  as `..views`, one level higher than written, so 138 of NetBox's 139
+  registrations resolved into a sibling package and vanished. Model, serializer
+  and view counts are byte-identical before and after the fix, so it took
+  nothing away.
+
+  NetBox: 139 registrations, matching its 139 `register` calls exactly, 0
+  unresolved, **1204 endpoints**, 907 of them writable, and 6 unrouted views
+  that are all genuinely base classes. pretix: 64 registrations, again an exact
+  match, **369 endpoints**, and 1 unrouted view — `ScheduledExportersViewSet`,
+  which is only ever subclassed. Spot-checked against source:
+  `OrganizerViewSet(UpdateModelMixin, ReadOnlyModelViewSet)` reports list GET,
+  detail GET/PUT/PATCH and nothing else, which is what pretix serves. 26 tests.
 - **2.2.4** — Permission and authentication resolution: class attributes, `get_permissions` overrides, `@permission_classes`, falling back to `REST_FRAMEWORK` defaults via the settings resolver.
 - **2.2.5** — Queryset resolution: the `queryset` attribute and `get_queryset` return expressions, including filters applied.
 

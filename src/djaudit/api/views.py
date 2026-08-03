@@ -197,6 +197,17 @@ class ViewNode:
     overrides: frozenset[str] = frozenset()
     """Which of :data:`OVERRIDABLE` this view or a project ancestor defines."""
 
+    defined: frozenset[str] = frozenset()
+    """Every method name this view or a project ancestor defines.
+
+    DRF's router binds a mapping entry only when ``hasattr(viewset, action)``
+    holds, and the actions a router can name are not limited to the standard
+    six. NetBox adds ``bulk_update``, ``bulk_partial_update`` and
+    ``bulk_destroy`` in a mixin and points its list route at them, so the
+    honest test for "is this action implemented" is the same one DRF makes --
+    does the name exist -- rather than membership of a fixed list.
+    """
+
     bases: tuple[str, ...] = ()
 
     @property
@@ -397,6 +408,7 @@ def build_view(record: ClassRecord, index: ClassIndex) -> ViewNode:
             }
 
     overrides: set[str] = set()
+    defined: set[str] = set()
     serializer_ref: str | None = None
     queryset_ref: str | None = None
     queryset_model_ref: str | None = None
@@ -407,7 +419,9 @@ def build_view(record: ClassRecord, index: ClassIndex) -> ViewNode:
     # Nearest declaration wins, which is why the chain is walked in order and
     # the first answer is kept rather than the last.
     for link in chain:
-        overrides |= _defined_methods(link.node) & OVERRIDABLE
+        own = _defined_methods(link.node)
+        defined |= own
+        overrides |= own & OVERRIDABLE
         if serializer_ref is None:
             declared = _assigned(link.node.body, "serializer_class")
             serializer_ref = dotted_name(declared) if declared is not None else None
@@ -446,6 +460,7 @@ def build_view(record: ClassRecord, index: ClassIndex) -> ViewNode:
         authentication_refs=authentication,
         permissions_unset=permissions_unset,
         overrides=frozenset(overrides),
+        defined=frozenset(defined),
         bases=record.bases,
     )
 

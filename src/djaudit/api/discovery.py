@@ -17,6 +17,7 @@ import ast
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from djaudit.api.routes import RouteGraph, build_route_graph
 from djaudit.api.serializers import (
     SERIALIZER_BASES,
     SerializerNode,
@@ -29,7 +30,7 @@ from djaudit.api.views import (
     build_view,
 )
 from djaudit.astutils import resolve_dotted
-from djaudit.graph.inheritance import ClassIndex
+from djaudit.graph.inheritance import ClassIndex, package_dotted
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -47,6 +48,9 @@ class ApiSurface:
 
     views: dict[str, ViewNode] = field(default_factory=dict)
     """Every view, class-based or decorated function, keyed by dotted label."""
+
+    routes: RouteGraph = field(default_factory=RouteGraph)
+    """Which HTTP methods actually reach each view, once routers are applied."""
 
     by_model: dict[str, list[SerializerNode]] = field(default_factory=dict)
     """Serializers keyed by the model label they serialise. A model reachable
@@ -77,6 +81,17 @@ class ApiSurface:
         """Views through which data can change, which is where authorization
         rules start rather than the full set."""
         return [v for v in self.views.values() if v.writes]
+
+    @property
+    def unrouted_views(self) -> list[ViewNode]:
+        """Views nothing routes.
+
+        Usually a base class the project defines for its own viewsets to
+        inherit, which is worth separating out: an unreachable view cannot be
+        an authorization defect, and reporting one is how a tool trains people
+        to stop reading its output."""
+        routed = self.routes.routed()
+        return [v for v in self.views.values() if v.label not in routed]
 
     def __len__(self) -> int:
         return len(self.serializers)
@@ -147,6 +162,8 @@ def build_api_surface(
     for view in discover_function_views(ctx, index):
         surface.views[view.label] = view
 
+    surface.routes = build_route_graph(ctx, surface, index)
+
     return surface
 
 
@@ -157,13 +174,16 @@ def discover_function_views(ctx: ProjectContext, index: ClassIndex) -> Iterator[
     not routable without the enclosing call having run, which is not something
     a static read can claim happened.
     """
-    from djaudit.discovery import dotted_path  # noqa: PLC0415 - discovery builds ProjectContext
-
     for path in ctx.python_files:
         tree = ctx.parse(path)
         if tree is None or not _mentions_api_view(tree):
             continue
-        module = dotted_path(ctx.root, path)
+        # ``package_dotted``, not ``dotted_path``: the class index keys modules
+        # the way Python imports them, by walking up while ``__init__.py``
+        # exists. NetBox's code sits in ``<root>/netbox/`` and pretix's in
+        # ``<root>/src/``, so anchoring on the root produces a module name that
+        # is in no index and silently binds nothing.
+        module = package_dotted(path)
         bindings = index.bindings_for(module)
         for stmt in tree.body:
             if not isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
