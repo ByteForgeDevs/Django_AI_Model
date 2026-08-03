@@ -1093,6 +1093,37 @@ than after twenty-six of them disagree, is cheaper.
 ### Step 1.8 — Introspection exposure rules
 
 - **1.8.1** — `DJS-024` debug tooling in production `INSTALLED_APPS` (`debug_toolbar`, `django_extensions`, `silk`).
+
+  **Done.** Measuring NetBox before writing the rule changed its whole shape.
+  NetBox lists `debug_toolbar` in `INSTALLED_APPS` and then calls
+  `INSTALLED_APPS.remove('debug_toolbar')` unless `DEBUG` — which is exactly
+  right, and the obvious implementation would have reported it. So the rule
+  fires only on an app present on *every* branch it could read; a project that
+  removes it on some path has already thought about this.
+
+  The packages are graded separately rather than lumped together as "debug
+  tooling", because reading them shows they are not remotely equivalent.
+  `django-silk` is the dangerous one and gets talked about the least: no
+  `DEBUG` gate of any kind, `SILKY_INTERCEPT_PERCENT` of 100, request headers
+  and bodies and SQL parameters all stored, and `SILKY_AUTHENTICATION` and
+  `SILKY_AUTHORISATION` both defaulting to `False` — so `high`.
+  `django-debug-toolbar` is comparatively safe, because its default
+  `show_toolbar` returns `False` whenever `DEBUG` is off, so `medium` — but
+  overriding `SHOW_TOOLBAR_CALLBACK` removes the only thing keeping it off, and
+  that escalates to `high`. `django-extensions` exposes nothing by itself and
+  only puts `runserver_plus` — the Werkzeug debugger — within reach, so `low`.
+  Silk with both of its access controls switched on is downgraded to `low` in
+  turn: the objection has been answered.
+
+  Matching is on the first dotted component, so `debug_toolbar` and
+  `debug_toolbar.apps.DebugToolbarConfig` are the same package; a rule a
+  project's choice of spelling could switch off is not a rule. Ceiling `FIRM`
+  with a standing caveat, since what a package exposes also depends on the
+  urlconf, which this phase does not read.
+
+  Both targets stay silent. Recall comes from the fixture, which now carries
+  `silk` and `django_extensions` in `INSTALLED_APPS` — one `high`, one `low`,
+  from the same list.
 - **1.8.2** — `DJS-025` debug tooling in the production dependency manifest.
 - **1.8.3** — `DJS-026` `ADMIN` mounted at the default path with no additional protection — informational.
 - **1.8.4** — `DJS-027` logging configuration that emits request bodies or `Authorization` headers.

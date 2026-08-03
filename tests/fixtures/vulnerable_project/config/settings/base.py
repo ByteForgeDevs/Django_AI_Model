@@ -24,6 +24,12 @@ INSTALLED_APPS = [
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
+    # PLANTED DEFECT: silk added to profile a slow page and never taken out
+    # again (DJS-024). It has no DEBUG gate, records every request including
+    # bodies, and its UI is unauthenticated by default.
+    "silk",
+    # PLANTED DEFECT: django_extensions, the quieter half of the same rule.
+    "django_extensions",
     "app",
 ]
 
