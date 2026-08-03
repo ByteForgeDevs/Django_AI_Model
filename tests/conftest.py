@@ -38,6 +38,11 @@ def near_miss_project() -> Path:
     return FIXTURES / "near_miss_project"
 
 
+@pytest.fixture
+def drf_project() -> Path:
+    return FIXTURES / "drf_project"
+
+
 def make_finding(
     rule_id: str = "DJS-001",
     file: str = "app/views.py",

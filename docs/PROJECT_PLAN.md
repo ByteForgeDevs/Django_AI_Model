@@ -2497,9 +2497,48 @@ their own. Substep 2.6.1 extends `RULE_ID_PATTERN` to admit `DJD`.
   stderr, which is the same argument the blocking-diagnostic exit already makes,
   and a test asserts this rule can be constructed at all.
 
+  **Step 2.6 complete.** Three rules, eight benchmark findings, all triaged,
+  three benchmarks still at 100% precision. Two of the three rules report
+  nothing on any benchmark, and in both cases the probe behind the zero is the
+  result: mature Django projects already use `SET_NULL`/`PROTECT` on audit
+  records and already order their paginated lists, they just do it somewhere
+  other than where a naive rule looks.
+
 ### Step 2.7 — Benchmark and document
 
 - **2.7.1** — DRF fixture project: viewsets, serializers, routers, planted IDOR and mass-assignment defects.
+
+  **Done.** `tests/fixtures/drf_project` — a support-ticket API with eighteen
+  planted defects, scored at **100% precision and 100% recall**. Every other
+  fixture measures the settings family; this is the only place `DJA-004`,
+  `DJA-005`, `DJA-010` and `DJA-012` have a known answer, and the benchmarks
+  cannot supply one because a mature project by definition does not contain
+  the defect.
+
+  One settings line does most of the work: `DEFAULT_PERMISSION_CLASSES` is
+  `AllowAny`, which is `DJA-001` on its own and the precondition for the two
+  `DJA-002` reports and the `DJA-006` one. That is the actual shape of the
+  vulnerability — not four independently careless views, but four views that
+  said nothing and one line that answered for them.
+
+  Three rules had to be *given* something to find, which was itself worth
+  learning. `DJA-010` and `DJA-012` both read explicit field lists and neither
+  fires on `fields = "__all__"`, because that case is `DJA-008` and reporting
+  it twice would teach readers to skim; the fixture therefore needs a serializer
+  written field by field with `api_key` surviving the reading. `DJA-005` only
+  fires where an object-level permission exists to skip, so the fixture needs a
+  real `IsOwner` with `has_object_permission` — on a view whose permissions are
+  all class-level, not calling the hook costs nothing.
+
+  The controls carry as much weight as the defects. `MyTicketViewSet` differs
+  from `TicketViewSet` by one `filter(owner=self.request.user)` and
+  `CommentViewSet` scopes across a relation with `filter(ticket__owner=...)`;
+  a `DJA-004` that cannot tell those apart would report every scoped API ever
+  written. Pagination is configured with both a class and a `PAGE_SIZE` and
+  every model declares `Meta.ordering`, which makes this the control for
+  `DJA-013` and `DJD-003`. Ten tests pin the reasoning the manifest cannot
+  express, including one asserting `rule_errors` is empty — a crashed rule and
+  a rule with nothing to say look identical otherwise.
 - **2.7.2** — Near-miss fixtures: correctly scoped querysets, correct read-only fields.
 - **2.7.3** — Validate the model graph against NetBox, which has hundreds of models — a strong correctness test.
 - **2.7.4** — Triage pass on both benchmarks.
