@@ -37,9 +37,11 @@ from djaudit.models import (
     Tier,
 )
 from djaudit.registry import Rule, RuleMeta, register
+from djaudit.rules.authorization import OWNERSHIP_FIELDS
 
 if TYPE_CHECKING:
     from djaudit.api.serializers import SerializerNode
+    from djaudit.graph.nodes import ModelNode
 
 
 class SerializerRule(Rule):
@@ -368,3 +370,112 @@ class SensitiveField(SerializerRule):
                     ),
                 ),
             )
+
+
+@register
+class WritableOwnership(SerializerRule):
+    meta = RuleMeta(
+        id="DJA-011",
+        title="Serializer accepts the field that decides who owns the row",
+        family=Family.DJA,
+        severity=Severity.HIGH,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "A field in Meta.fields is writable unless something marks it otherwise, "
+            "so a foreign key to the user model listed there lets the caller choose "
+            "whose record this becomes. That is not a data-entry mistake, it is an "
+            "authorization one: the endpoint's permission check asks whether this "
+            "caller may create a record, and then the request body answers the "
+            "different question of who the record belongs to. Ownership is normally "
+            "the thing every other permission check is built on, so getting it from "
+            "the request inverts the rest of the model."
+        ),
+        remediation=(
+            "Add the field to Meta.read_only_fields and set it in the view, with "
+            "serializer.save(user=self.request.user) in perform_create. If the value "
+            "genuinely must come from the request -- an administrator creating a "
+            "record on someone's behalf -- keep it writable and check the caller's "
+            "authority in validate(), the way NetBox's TokenSerializer does."
+        ),
+        references=(
+            "https://www.django-rest-framework.org/api-guide/generic-views/#methods",
+            "https://cwe.mitre.org/data/definitions/915.html",
+            "https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/",
+        ),
+        limitations=(
+            "A hand-written authority check in validate() or create() is not "
+            "detected, so a serializer that deliberately allows the assignment and "
+            "guards it in Python is reported the same as one that does not.",
+            "Only foreign keys resolving to the project's user model count, so "
+            "ownership expressed through an intermediate profile or membership "
+            "model is not recognised and is missed entirely.",
+            "Whether any routed view uses this serializer for writes is not "
+            "checked, so a read-only endpoint's serializer reads the same as one "
+            "behind a create or update route.",
+        ),
+    )
+
+    def inspect(self, ctx: ProjectContext, node: SerializerNode) -> Iterator[Finding]:
+        if node.model is None:
+            return
+        model = ctx.model_graph.get(node.model)
+        if model is None:
+            return
+        owning = {
+            edge.field_name: edge
+            for edge in model.relations
+            if edge.points_at_user and edge.field_name in OWNERSHIP_FIELDS
+        }
+        for name in dict.fromkeys(node.fields):
+            edge = owning.get(name)
+            if edge is None:
+                continue
+            if node.is_read_only(name) or self.unwritable(node, model, name):
+                continue
+            yield self.finding(
+                location=self.at(ctx, node, node.field_line(name)),
+                message=(
+                    f"{node.name} accepts {name!r} from the request, so a caller "
+                    f"can create or move a {model.name} owned by someone else."
+                ),
+                evidence=(
+                    Evidence(
+                        kind=EvidenceKind.AST,
+                        content=(
+                            f"{node.name}.Meta.fields includes {name!r}, and neither "
+                            f"read_only_fields nor extra_kwargs marks it read-only"
+                        ),
+                        source=ctx.rel(node.path),
+                    ),
+                    Evidence(
+                        kind=EvidenceKind.AST,
+                        content=(
+                            f"{model.label}.{name} is a {edge.kind} to {ctx.model_graph.user_model}"
+                        ),
+                        source="djaudit model graph",
+                    ),
+                ),
+            )
+
+    @staticmethod
+    def unwritable(node: SerializerNode, model: ModelNode, name: str) -> bool:
+        """Whether DRF will refuse the write regardless of the field list.
+
+        Three ways, and missing any of them is what made the first draft of this
+        rule report 270 fields on NetBox. `build_standard_field_kwargs` sets
+        `read_only` for an AutoField or any field with `editable=False` before
+        it looks at anything else, so a primary key can never be assigned and
+        neither can an `auto_now` timestamp. And `HiddenField` sets
+        `write_only` on itself and takes no input at all -- it is the correct
+        way to default a field to the request's user, so reporting it would
+        report the fix.
+        """
+        declared = node.declared.get(name)
+        kind = declared.kind if declared is not None else None
+        if kind is not None and kind.rsplit(".", 1)[-1] == "HiddenField":
+            return True
+        field = model.fields.get(name)
+        if field is None:
+            return False
+        return field.primary_key or not field.editable or field.auto_now or field.auto_now_add

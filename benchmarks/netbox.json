@@ -155,6 +155,86 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "True reading, same argument as the groups field above. The effective permission list is the most direct answer to 'which account should I target', but a user-administration API cannot withhold it from the administrators using it. Accepted as designed."
+    },
+    {
+      "fingerprint": "2b5d4e88c6d04541",
+      "rule_id": "DJA-011",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/tokens.py",
+      "line": 23,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, and NetBox knows it. TokenSerializer.user is writable on create -- get_fields() only makes it read-only when self.instance is not None -- so the request body chooses whose token this becomes, which is account takeover if nothing stops it. Something does: validate() calls user_may_grant_token(request.user, token_user) and raises PermissionDenied otherwise, with a comment explaining why has_perm(obj=None) was not good enough. This is exactly the mitigation the rule's first limitation says it cannot see. Accepted as designed, and the most instructive entry in this file: the defect and the fix look identical in the field list."
+    },
+    {
+      "fingerprint": "f6c766f9d96b4990",
+      "rule_id": "DJA-011",
+      "verdict": "accepted_risk",
+      "file": "netbox/extras/api/serializers_/journaling.py",
+      "line": 22,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading. created_by is PrimaryKeyRelatedField(queryset=User.objects.all(), default=CurrentUserDefault()), so it defaults to the caller but still accepts any user id, and get_fields() locks it only on update. A caller with extras.add_journalentry can therefore attribute a journal entry to a colleague. The CurrentUserDefault and the update-time lock are both deliberate, so this is a considered design allowing administrative attribution rather than an oversight. Accepted. Worth noting that CurrentUserDefault is not a protection -- HiddenField(default=CurrentUserDefault()) would be, and the rule is silent on that spelling."
+    },
+    {
+      "fingerprint": "cdb1961fef652b6d",
+      "rule_id": "DJA-011",
+      "verdict": "accepted_risk",
+      "file": "netbox/dcim/api/serializers_/racks.py",
+      "line": 169,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, intended workflow. RackReservation.user records who holds the reservation, and reserving rack units on behalf of a colleague is a normal data-centre operation -- an API that forced the reservation onto the caller would be less useful, not safer. Gated behind dcim.add_rackreservation. Accepted as designed."
+    },
+    {
+      "fingerprint": "db88223d73c4fea6",
+      "rule_id": "DJA-011",
+      "verdict": "true_positive",
+      "file": "netbox/extras/api/serializers_/bookmarks.py",
+      "line": 18,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, and no guard found. BookmarkViewSet sets queryset = Bookmark.objects.all() with no get_queryset override, and BookmarkSerializer declares user = UserSerializer(nested=True) with no read_only, no validate() and no perform_create. A caller holding extras.add_bookmark can POST a bookmark owned by another user. The impact is low -- unwanted rows in someone else's bookmark list -- but nothing in the code suggests the assignment was considered, which is what separates this from the Token and JournalEntry entries above."
+    },
+    {
+      "fingerprint": "08022c5dca4246c9",
+      "rule_id": "DJA-011",
+      "verdict": "true_positive",
+      "file": "netbox/extras/api/serializers_/notifications.py",
+      "line": 21,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, and the highest-impact of the unguarded set. NotificationSerializer accepts user with no read_only and no validate(), and NotificationViewSet does not scope its queryset, so a caller with extras.add_notification can inject a notification into another user's feed. A notification is UI text NetBox itself renders and the recipient has every reason to trust, which makes this a plausible phishing primitive rather than merely noise."
+    },
+    {
+      "fingerprint": "01c295adb25219e6",
+      "rule_id": "DJA-011",
+      "verdict": "true_positive",
+      "file": "netbox/extras/api/serializers_/notifications.py",
+      "line": 60,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, same shape as NotificationSerializer above. Subscription.user decides who receives change notifications for an object, and the field is writable with no check, so a caller with extras.add_subscription can subscribe another user to arbitrary objects and fill their feed. No validate(), no perform_create, no queryset scoping on SubscriptionViewSet."
+    },
+    {
+      "fingerprint": "5333e70f6afbfdf7",
+      "rule_id": "DJA-011",
+      "verdict": "true_positive",
+      "file": "netbox/extras/api/serializers_/savedfilters.py",
+      "line": 12,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading. SavedFilter.user is writable with no check, so a caller with extras.add_savedfilter can create a filter attributed to another user. SavedFilterViewSet uses SharedObjectQuerySetMixin, which governs who may *read* shared objects and says nothing about who may be named as owner on write."
+    },
+    {
+      "fingerprint": "7c8361875e739ad4",
+      "rule_id": "DJA-011",
+      "verdict": "true_positive",
+      "file": "netbox/extras/api/serializers_/tableconfigs.py",
+      "line": 11,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, same shape as SavedFilterSerializer. TableConfig.user is writable with no check, so a caller with extras.add_tableconfig can create a table configuration owned by someone else and change what that user sees in their table columns."
     }
   ]
 }

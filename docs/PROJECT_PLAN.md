@@ -2239,6 +2239,43 @@ building it here pays for itself twice.
   permissions, and all are worth telling a reviewer about. Triage now stands at
   37 reviewed findings. Ten tests.
 - **2.4.4** — `DJA-011` writable field that should be read-only (`id`, `user`, `owner`, `created_by`) — mass assignment.
+
+  **Done.** `DJA-011` in `src/djaudit/rules/serialization.py`, reusing
+  `OWNERSHIP_FIELDS` from `rules/authorization.py`.
+
+  The plan's list starts with `id`, and **`id` can never fire** — DRF's
+  `build_standard_field_kwargs` sets `read_only` for an `AutoField` or any
+  field with `editable=False` before it inspects anything else, so a primary
+  key listed in `Meta.fields` is not writable no matter how it is spelled. The
+  same clause covers `auto_now` and `auto_now_add`. A first draft that ignored
+  this reported **270 fields on NetBox**; the rule now checks the model field
+  and there is a test asserting `id` stays silent.
+
+  The other half of that 270 was the name. NetBox's `owner` is a foreign key to
+  `users.Owner`, a separate administrative model that has nothing to do with
+  authentication. A name is only taken as ownership when the model graph shows
+  a relation **resolving to the project's user model** — the same rule
+  `DJA-004` uses. 270 became 8.
+
+  `HiddenField` is excluded: it sets `write_only` on itself and takes no client
+  input, so `HiddenField(default=CurrentUserDefault())` is the recommended fix
+  and reporting it would report the fix. `CurrentUserDefault` **on its own is
+  not** a protection — NetBox's `JournalEntrySerializer` pairs it with
+  `queryset=User.objects.all()`, so the field still accepts any user id — and
+  the rule is deliberately not fooled by it.
+
+  **8 findings, all NetBox, all verified against source, triaged with mixed
+  verdicts** rather than uniformly waved through. Three are `accepted_risk`
+  with visible evidence of intent: `TokenSerializer.user` is guarded by a
+  hand-written `user_may_grant_token` check in `validate()` — precisely the
+  mitigation the rule's first limitation says it cannot see — while
+  `JournalEntrySerializer` and `RackReservationSerializer` show deliberate
+  design. **Five are `true_positive`**: `Bookmark`, `Notification`,
+  `Subscription`, `SavedFilter` and `TableConfig` accept `user` with no
+  `validate`, no `perform_create` and no queryset scoping anywhere in the
+  chain. The notification one is the sharpest — a caller can inject UI text
+  into another user's feed that NetBox itself renders and the recipient has
+  every reason to trust. Triage now stands at 45 reviewed findings. Nine tests.
 - **2.4.5** — `DJA-012` nested serializer reaching a sensitive field through a relation.
 
 ### Step 2.5 — Availability rules

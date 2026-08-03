@@ -553,3 +553,195 @@ class TestSensitiveField:
             **{"shop/models.py": SECRET_MODELS},
         )
         assert found[0].location.line == 7
+
+
+OWNED_MODELS = """
+from django.db import models
+from django.conf import settings
+
+class Note(models.Model):
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    body = models.TextField()
+    created = models.DateTimeField(auto_now_add=True)
+    slug = models.SlugField(editable=False)
+
+class Tag(models.Model):
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    label = models.CharField(max_length=50)
+
+class Region(models.Model):
+    owner = models.ForeignKey('shop.Team', on_delete=models.CASCADE)
+    name = models.CharField(max_length=50)
+
+class Team(models.Model):
+    name = models.CharField(max_length=50)
+"""
+
+
+def owned(make_project, rule_id: str, api_source: str) -> list[Finding]:
+    return run(make_project, rule_id, api_source, **{"shop/models.py": OWNED_MODELS})
+
+
+class TestWritableOwnership:
+    """DJA-011 -- the request body choosing whose record this is."""
+
+    def test_reports_a_writable_owner(self, make_project) -> None:
+        found = owned(
+            make_project,
+            "DJA-011",
+            """
+            from rest_framework import serializers
+            from shop.models import Note
+
+            class NoteSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Note
+                    fields = ['id', 'body', 'owner']
+            """,
+        )
+        assert len(found) == 1
+        assert "'owner'" in found[0].message
+
+    def test_silent_when_read_only(self, make_project) -> None:
+        found = owned(
+            make_project,
+            "DJA-011",
+            """
+            from rest_framework import serializers
+            from shop.models import Note
+
+            class NoteSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Note
+                    fields = ['id', 'body', 'owner']
+                    read_only_fields = ['owner']
+            """,
+        )
+        assert found == []
+
+    def test_silent_on_a_hidden_field(self, make_project) -> None:
+        """HiddenField(default=CurrentUserDefault()) is the fix, not the defect."""
+        found = owned(
+            make_project,
+            "DJA-011",
+            """
+            from rest_framework import serializers
+            from shop.models import Note
+
+            class NoteSerializer(serializers.ModelSerializer):
+                owner = serializers.HiddenField(default=serializers.CurrentUserDefault())
+
+                class Meta:
+                    model = Note
+                    fields = ['id', 'body', 'owner']
+            """,
+        )
+        assert found == []
+
+    def test_silent_on_a_name_that_does_not_reach_the_user(self, make_project) -> None:
+        """NetBox's `owner` is a foreign key to a separate admin model.
+
+        Matching the name alone gave 270 findings on NetBox; requiring the
+        relation to resolve to the user model gave 8.
+        """
+        found = owned(
+            make_project,
+            "DJA-011",
+            """
+            from rest_framework import serializers
+            from shop.models import Region
+
+            class RegionSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Region
+                    fields = ['id', 'name', 'owner']
+            """,
+        )
+        assert found == []
+
+    def test_silent_on_a_user_link_that_is_not_ownership(self, make_project) -> None:
+        """`approved_by` records who acted, not whose row it is."""
+        found = owned(
+            make_project,
+            "DJA-011",
+            """
+            from rest_framework import serializers
+            from shop.models import Tag
+
+            class TagSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Tag
+                    fields = ['id', 'label', 'approved_by']
+            """,
+        )
+        assert found == []
+
+    def test_the_primary_key_is_never_writable(self, make_project) -> None:
+        """DRF marks an AutoField read-only before it reads anything else."""
+        found = owned(
+            make_project,
+            "DJA-011",
+            """
+            from rest_framework import serializers
+            from shop.models import Note
+
+            class NoteSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Note
+                    fields = ['id', 'body']
+            """,
+        )
+        assert found == []
+
+    def test_silent_when_the_field_is_not_listed(self, make_project) -> None:
+        found = owned(
+            make_project,
+            "DJA-011",
+            """
+            from rest_framework import serializers
+            from shop.models import Note
+
+            class NoteSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Note
+                    fields = ['id', 'body']
+            """,
+        )
+        assert found == []
+
+    def test_an_inherited_read_only_declaration_counts(self, make_project) -> None:
+        """pretix declares `owner` read-only on a base and subclasses it twice."""
+        found = owned(
+            make_project,
+            "DJA-011",
+            """
+            from rest_framework import serializers
+            from shop.models import Note
+
+            class BaseSerializer(serializers.ModelSerializer):
+                owner = serializers.SlugRelatedField(slug_field='email', read_only=True)
+
+            class NoteSerializer(BaseSerializer):
+                class Meta:
+                    model = Note
+                    fields = ['id', 'body', 'owner']
+            """,
+        )
+        assert found == []
+
+    def test_names_the_relation_it_followed(self, make_project) -> None:
+        found = owned(
+            make_project,
+            "DJA-011",
+            """
+            from rest_framework import serializers
+            from shop.models import Note
+
+            class NoteSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Note
+                    fields = ['id', 'body', 'owner']
+            """,
+        )
+        blob = " ".join(e.content for e in found[0].evidence)
+        assert "shop.Note.owner" in blob
