@@ -13,8 +13,9 @@ import ast
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from djaudit.astutils import UNKNOWN, dotted_name, import_bindings, literal, resolve_dotted
+from djaudit.astutils import dotted_name, import_bindings, resolve_dotted
 from djaudit.graph.fields import extract_fields
+from djaudit.graph.meta import class_attr_literal, meta_class, read_meta
 from djaudit.graph.nodes import ModelGraph, ModelNode
 from djaudit.graph.relations import DEFAULT_USER_MODEL, build_edges, resolve_edges
 from djaudit.settings import resolve_all
@@ -31,12 +32,6 @@ APPCONFIG_BASES = frozenset(
         "django.apps.config.AppConfig",
     }
 )
-
-_META_FLAGS = {
-    "abstract": "is_abstract",
-    "proxy": "is_proxy",
-    "managed": "managed",
-}
 
 
 def app_dir_for(path: Path) -> Path:
@@ -88,10 +83,10 @@ def _appconfig_label(apps_py: Path, ctx: ProjectContext) -> str | None:
             for base in bases
         ):
             continue
-        label = _class_attr_literal(node, "label")
+        label = class_attr_literal(node, "label")
         if isinstance(label, str) and label:
             return label
-        name = _class_attr_literal(node, "name")
+        name = class_attr_literal(node, "name")
         if isinstance(name, str) and name:
             return name.rpartition(".")[2]
     return None
@@ -105,35 +100,6 @@ def _base_names(node: ast.ClassDef) -> list[str]:
         if rendered is not None:
             names.append(rendered)
     return names
-
-
-def _class_attr_literal(node: ast.ClassDef, attr: str) -> object:
-    """A literal class attribute, or ``None`` if absent or not a literal.
-
-    ``None`` conflates "not there" with "there but computed", which is right
-    for every caller here: both mean we cannot claim a value, and the flags
-    this reads all default to False in Django anyway.
-    """
-    for stmt in node.body:
-        targets: list[ast.expr] = []
-        value: ast.expr | None = None
-        if isinstance(stmt, ast.Assign):
-            targets, value = list(stmt.targets), stmt.value
-        elif isinstance(stmt, ast.AnnAssign):
-            targets, value = [stmt.target], stmt.value
-        for target in targets:
-            if isinstance(target, ast.Name) and target.id == attr and value is not None:
-                resolved = literal(value)
-                return None if resolved is UNKNOWN else resolved
-    return None
-
-
-def meta_class(node: ast.ClassDef) -> ast.ClassDef | None:
-    """The inner ``class Meta`` of a model, if it has one."""
-    for stmt in node.body:
-        if isinstance(stmt, ast.ClassDef) and stmt.name == "Meta":
-            return stmt
-    return None
 
 
 class _ModuleScanner:
@@ -220,18 +186,7 @@ class _ModuleScanner:
             node=node,
             fields=extract_fields(node, self.bindings),
         )
-        meta = meta_class(node)
-        if meta is not None:
-            for attr, field_name in _META_FLAGS.items():
-                value = _class_attr_literal(meta, attr)
-                if isinstance(value, bool):
-                    setattr(model, field_name, value)
-            swappable = _class_attr_literal(meta, "swappable")
-            if isinstance(swappable, str) and swappable:
-                model.swappable = swappable
-            default_related = _class_attr_literal(meta, "default_related_name")
-            if isinstance(default_related, str) and default_related:
-                model.default_related_name = default_related
+        read_meta(model, meta_class(node))
         return model
 
 

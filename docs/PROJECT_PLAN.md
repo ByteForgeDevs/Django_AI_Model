@@ -1600,6 +1600,47 @@ building it here pays for itself twice.
   model in the project. Measured: NetBox 17 hidden relations and 43 explicitly
   named across 67 edges; Healthchecks 2 named across 13.
 - **2.1.5** — `Meta` handling: `ordering`, `indexes`, `constraints`, `unique_together`, `abstract`, `db_table`.
+
+  *Done.* `Meta` is where a model states everything that is not a field, and
+  the rules coming in 2.2 onward query it directly — is this filtered column
+  indexed, does this table sort every page by default, what is the table
+  actually called. So the failure mode is not an absent feature but a confident
+  wrong answer, and each option is read against Django's semantics rather than
+  what its name suggests. Parsing moved out of `builder.py` into
+  `graph/meta.py` on the way.
+
+  `db_table` is **derived, not absent**, when unset: Django builds
+  `app_label_modelname`, which is the string a rule matching raw SQL needs.
+  Abstract models keep it empty because they have no table. `Meta.app_label`
+  now re-keys the model, which is a correctness fix rather than an addition —
+  the label is what `"billing.Order"` in a foreign key resolves against, so
+  reading it late meant every relation into a relabelled model failed.
+
+  `unique_together` is normalised the way `options.normalize_together` does.
+  `("a", "b")` is *one* constraint over two columns; reading it as two would
+  claim each column is unique on its own, which is the opposite of what the
+  model guarantees.
+
+  Indexes and constraints are classified rather than counted. An index with a
+  `condition` is partial and only serves queries carrying the same predicate;
+  an expression index serves `Lower("email")` and not `email`; a
+  `CheckConstraint` creates no index at all while a `UniqueConstraint` does.
+  `ModelNode.indexed_fields` folds field-level `db_index`/`unique`/`primary_key`
+  together with the qualifying `Meta` entries, counting only the **leading**
+  column of a composite — a btree on `(a, b)` does nothing for a filter on `b`
+  alone, and crediting it would silence a real table scan.
+
+  Sequences are read element-wise off the AST instead of by evaluating the
+  container, because NetBox writes `ordering = ('device', CollateAsChar('_name'))`
+  and a whole-container read yields nothing at all. The first column — the one
+  that decides whether the sort can use an index — is a plain string sitting
+  right there. What could not be read is recorded separately, so "no ordering"
+  and "ordering we could only partly read" stay distinguishable.
+
+  Measured: NetBox 20 models with default ordering (1 partially read), 18
+  indexes, 12 constraints; Healthchecks 4 indexes of which 2 are partial, and
+  its `alert_after` index is exactly the conditional case. Neither project sets
+  an explicit `db_table`, so all 75 tables came from the derivation.
 - **2.1.6** — Inheritance resolution: abstract bases, multi-table inheritance, mixins.
 - **2.1.7** — Custom managers and `QuerySet` subclasses, so `Model.objects` resolves to the right class.
 - **2.1.8** — Graph queries: `is_user_owned(model)` (path to the user model within N hops), `relation_path`, `reachable_fields`. This is what the authorization rules consume.

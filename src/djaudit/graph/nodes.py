@@ -180,6 +180,64 @@ class FieldNode:
         return keyword not in self.unreadable
 
 
+@dataclass(slots=True, frozen=True)
+class IndexNode:
+    """One entry of ``Meta.indexes``.
+
+    An index is the difference between a filter that scans a table and one that
+    does not, so a performance rule asking "is this column indexed?" reads
+    these. It has to distinguish the kinds, though: a ``condition`` makes the
+    index partial and it only serves queries carrying the same predicate, and
+    an expression index serves ``Lower("email")`` rather than ``email``.
+    """
+
+    fields: tuple[str, ...] = ()
+    """Column names, in order. Empty for an expression index."""
+
+    name: str | None = None
+    conditional: bool = False
+    """Has a ``condition``, so it only covers rows matching that predicate."""
+
+    expressions: bool = False
+    """Built from expressions rather than plain columns."""
+
+    lineno: int = 0
+
+    @property
+    def covers_exactly(self) -> tuple[str, ...]:
+        """The fields a plain equality filter can rely on this index for.
+
+        A partial or expression index covers nothing unconditionally, and
+        treating one as though it did is how a rule reports a table scan
+        resolved.
+        """
+        if self.conditional or self.expressions:
+            return ()
+        return tuple(f.lstrip("-") for f in self.fields)
+
+
+@dataclass(slots=True, frozen=True)
+class ConstraintNode:
+    """One entry of ``Meta.constraints``.
+
+    ``UniqueConstraint`` also creates an index, which is why a uniqueness
+    declaration answers a performance question. ``CheckConstraint`` does not,
+    and conflating them credits a model with an index it has not got.
+    """
+
+    kind: str
+    """The class as written, e.g. ``UniqueConstraint`` or ``CheckConstraint``."""
+
+    fields: tuple[str, ...] = ()
+    name: str | None = None
+    conditional: bool = False
+    lineno: int = 0
+
+    @property
+    def is_unique(self) -> bool:
+        return self.kind == "UniqueConstraint"
+
+
 @dataclass(slots=True)
 class ModelNode:
     """One model class found in the source.
@@ -224,6 +282,47 @@ class ModelNode:
     """``Meta.managed``. ``False`` means Django does not own the table, which
     changes what a migration rule may say about it."""
 
+    db_table: str = ""
+    """The table name, explicit or derived.
+
+    Django derives ``app_label_modelname`` when ``Meta.db_table`` is unset, so
+    a rule matching a table name out of raw SQL has to know both forms.
+    Abstract models keep this empty: they have no table.
+    """
+
+    db_table_explicit: bool = False
+    """Whether :attr:`db_table` was written down rather than derived."""
+
+    ordering: tuple[str, ...] = ()
+    """``Meta.ordering`` as written, keeping the ``-`` prefix.
+
+    Default ordering applies to every query, which makes it a performance
+    concern rather than a formatting one: unindexed default ordering is a sort
+    on every page, and ordering that spans ``__`` adds a join.
+    """
+
+    ordering_unreadable: bool = False
+    """``Meta.ordering`` exists but holds something other than plain strings,
+    normally ``F()`` expressions. The distinction matters because "no ordering"
+    and "ordering we could not read" must not produce the same finding."""
+
+    unique_together: tuple[tuple[str, ...], ...] = ()
+    """``Meta.unique_together``, normalised to a tuple of tuples the way
+    ``django.db.models.options.normalize_together`` does -- a bare
+    ``("a", "b")`` is one constraint over two columns, not two constraints."""
+
+    indexes: tuple[IndexNode, ...] = ()
+    constraints: tuple[ConstraintNode, ...] = ()
+
+    base_manager_name: str | None = None
+    default_manager_name: str | None = None
+    """``Meta.default_manager_name``. Which manager ``_default_manager`` is, and
+    therefore which queryset related lookups start from."""
+
+    meta_bases: tuple[str, ...] = ()
+    """Base classes of the inner ``class Meta``, as written. A ``Meta`` that
+    inherits from another carries options we cannot see in this class body."""
+
     node: ast.ClassDef | None = field(default=None, repr=False, compare=False)
     """The class body, kept so later passes can re-read it without re-parsing."""
 
@@ -242,6 +341,30 @@ class ModelNode:
     def label(self) -> str:
         """``app_label.ModelName`` — the identifier Django uses everywhere."""
         return f"{self.app_label}.{self.name}"
+
+    @property
+    def indexed_fields(self) -> frozenset[str]:
+        """Every field an unconditional index or unique constraint covers first.
+
+        Only the leading column counts: a composite index on ``(a, b)`` serves
+        a filter on ``a`` but not one on ``b`` alone, and crediting the second
+        column would silence a real table scan.
+        """
+        names: set[str] = set()
+        for fld in self.fields.values():
+            if fld.db_index or fld.unique or fld.primary_key:
+                names.add(fld.name)
+        for index in self.indexes:
+            covered = index.covers_exactly
+            if covered:
+                names.add(covered[0])
+        for constraint in self.constraints:
+            if constraint.is_unique and not constraint.conditional and constraint.fields:
+                names.add(constraint.fields[0].lstrip("-"))
+        for group in self.unique_together:
+            if group:
+                names.add(group[0])
+        return frozenset(names)
 
     @property
     def is_concrete(self) -> bool:
