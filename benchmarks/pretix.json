@@ -145,6 +145,46 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "True reading, same shape on the create path. OrderCreateSerializer.positions nests OrderPositionCreateSerializer, whose field list includes secret, so a create response returns the newly generated ticket secrets. This is how a caller learns the secrets for tickets it just created, which is the point of the endpoint. Accepted as designed."
+    },
+    {
+      "fingerprint": "8f90890443c296e8",
+      "rule_id": "DJA-015",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/views/device.py",
+      "line": 145,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "InitializeView sets authentication_classes = () and permission_classes = (), and pretix sets no DEFAULT_THROTTLE_CLASSES, so the reading is right: an anonymous caller can POST to device/initialize as fast as it answers. It looks up Device.objects.get(initialization_token=...) and returns a device API token, so it is a credential exchange, which the rule did not claim -- nothing in the name, module or URL says so, and it was reported at MEDIUM/tentative on the strength of being an unauthenticated write alone. Accepted because the initialization token is generated with high entropy, which makes guessing impractical rather than merely slow; the endpoint is still an unauthenticated write with no rate limit."
+    },
+    {
+      "fingerprint": "6340e2eaaeb948a9",
+      "rule_id": "DJA-014",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/views/order.py",
+      "line": 1057,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "OrderPositionFilter.Meta.fields lists 'secret'. OrderPosition.secret is the value printed on the ticket as its barcode, and looking a ticket up by it is the entire point of the check-in API -- a scanner reads the barcode and asks pretix which position it is. So the reading is correct on both counts and the exposure is the feature: it is bearer credential material, and an endpoint that redeems a bearer credential has to accept it. The lookup generated is exact, which means a caller must already hold the value; nothing here reads the column back. Reported at MEDIUM/tentative for exactly that reason. Reported against EventOrderPositionViewSet."
+    },
+    {
+      "fingerprint": "73a422ab8fa97fe7",
+      "rule_id": "DJA-014",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/views/order.py",
+      "line": 1057,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "OrderPositionFilter.Meta.fields lists 'secret'. OrderPosition.secret is the value printed on the ticket as its barcode, and looking a ticket up by it is the entire point of the check-in API -- a scanner reads the barcode and asks pretix which position it is. So the reading is correct on both counts and the exposure is the feature: it is bearer credential material, and an endpoint that redeems a bearer credential has to accept it. The lookup generated is exact, which means a caller must already hold the value; nothing here reads the column back. Reported at MEDIUM/tentative for exactly that reason. Reported against OrganizerOrderPositionViewSet, which reuses the same nested filterset; the rule reports per view because a shared filterset is reachable through each of them."
+    },
+    {
+      "fingerprint": "77bcfb2f4494529d",
+      "rule_id": "DJA-014",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/api/views/organizer.py",
+      "line": 210,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "GiftCardFilter.Meta.fields lists 'secret'. GiftCard.secret carries verbose_name 'Gift card code' -- it is the code a customer types in, and looking a card up by it is how a redemption endpoint works. Genuinely bearer credential material, since holding the code is enough to spend the balance, but the lookup is exact and listing gift cards needs organizer API credentials, so a caller cannot read a code they do not already have."
     }
   ]
 }

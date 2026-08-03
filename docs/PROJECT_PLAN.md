@@ -2353,9 +2353,49 @@ building it here pays for itself twice.
   resolved 3 of 31, because it declares its filtersets inside
   `with scopes_disabled():` and `class_defs` walked `if` and `try` but not
   `with`; extending it took pretix to 29/31 and left every other benchmark
-  count unchanged. Benchmarks 0/0/0, with four firing branches confirmed
-  against a positive control. 13 tests.
+  count unchanged. Four firing branches confirmed against a positive control.
+  13 tests.
+
+  **Correction, made in 2.5.3.** The commit for this substep claimed
+  benchmarks 0/0/0. It was measured with `djaudit run`, which hides
+  `tentative` findings by default, and the benchmark harness does not — the
+  real counts were NetBox 2 and pretix 3, every one an explicit field list
+  naming a credential column rather than an `'__all__'`. Reading the five
+  changed the rule. `secret` on a pretix `OrderPosition` is the barcode
+  printed on the ticket, and `secret` on a `GiftCard` is the code the customer
+  types in: looking a row up *by* the credential is how a redemption endpoint
+  works, and the caller has to hold the value already. A substring or range
+  lookup needs no such thing — it reads the column back one answer at a time.
+  So an oracle lookup on a secret stays HIGH/firm and a bare `exact` drops to
+  MEDIUM/tentative, which is the difference between extracting a credential
+  and confirming one. All five triaged; only NetBox's `Webhook.secret`, which
+  nothing is ever looked up by, is a `true_positive`.
 - **2.5.3** — `DJA-015` no throttling on authentication or password-reset endpoints.
+
+  **Done.** DRF ships `DEFAULT_THROTTLE_CLASSES` empty, so an endpoint is
+  unthrottled unless the project said otherwise, and there are two quieter ways
+  to arrive at the same place: `ScopedRateThrottle.allow_request` returns
+  `True` the moment a view has no `throttle_scope`, and a throttle class whose
+  scope has no entry in `DEFAULT_THROTTLE_RATES` cannot produce a rate. Both
+  are the `PAGE_SIZE` shape from 2.5.1 — configuration that reads as solved and
+  does nothing.
+
+  The measurement rewrote the rule. Across 227 routed endpoints on NetBox and
+  pretix there are exactly **two** anonymous writes, and both hand out
+  credentials: NetBox's `TokenProvisionView` trades a username and password for
+  an API token, pretix's `InitializeView` trades an initialization token for a
+  device token. Neither project throttles anything. So the filter is not the
+  name — the filter is *anonymous POST*, which is a 1-in-113 event in mature
+  code — and requiring a credential word would have missed pretix, whose route
+  is `device/initialize`. The rule now reports every unthrottled anonymous
+  write, at HIGH/firm when the name, module, URL or base class says credentials
+  and MEDIUM/tentative when it does not, so it never claims more than it read.
+  NetBox's finding is a `true_positive`: DJA-003 already reports that the
+  endpoint is deliberately anonymous, and being unthrottled is a separate
+  decision the code records nowhere. 11 tests.
+
+  **Step 2.5 complete.** Three rules, six benchmark findings, all triaged,
+  three benchmarks still at 100% precision.
 
 ### Step 2.6 — Model correctness rules
 

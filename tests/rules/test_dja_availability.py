@@ -11,7 +11,7 @@ the set, so the case is pinned here as well as measured there.
 from __future__ import annotations
 
 from djaudit.context import ProjectContext
-from djaudit.models import Finding, Severity
+from djaudit.models import Confidence, Finding, Severity
 from djaudit.registry import all_rules
 from tests.api.test_permissions import (
     DRF_DECORATORS,
@@ -521,3 +521,176 @@ class TestArbitraryFilterLookups:
             },
         )
         assert found == []
+
+
+OPEN_LOGIN = """
+from rest_framework.views import APIView
+
+class LoginView(APIView):
+    permission_classes = []
+
+    def post(self, request):
+        return None
+"""
+
+LOGIN_URLS = """
+from django.urls import path
+from shop.api import LoginView
+
+urlpatterns = [path('login/', LoginView.as_view(), name='login')]
+"""
+
+
+def credentials(make_project, api_source: str = OPEN_LOGIN, **kwargs) -> list[Finding]:
+    return run(make_project, "DJA-015", api_source=api_source, urls=LOGIN_URLS, **kwargs)
+
+
+class TestUnthrottledCredentialEndpoint:
+    """DJA-015 -- the login form that answers as fast as it is asked."""
+
+    def test_reports_an_unthrottled_login(self, make_project) -> None:
+        found = credentials(make_project)
+        assert len(found) == 1
+        assert found[0].severity is Severity.HIGH
+        assert "DEFAULT_THROTTLE_CLASSES" in found[0].message
+
+    def test_silent_when_a_throttle_is_configured(self, make_project) -> None:
+        found = credentials(
+            make_project,
+            settings=settings_with(
+                DEFAULT_THROTTLE_CLASSES="['rest_framework.throttling.AnonRateThrottle']",
+                DEFAULT_THROTTLE_RATES="{'anon': '10/hour'}",
+            ),
+        )
+        assert found == []
+
+    def test_reports_a_view_that_switched_the_default_off(self, make_project) -> None:
+        found = credentials(
+            make_project,
+            api_source=OPEN_LOGIN.replace(
+                "    permission_classes = []",
+                "    permission_classes = []\n    throttle_classes = []",
+            ),
+            settings=settings_with(
+                DEFAULT_THROTTLE_CLASSES="['rest_framework.throttling.AnonRateThrottle']",
+                DEFAULT_THROTTLE_RATES="{'anon': '10/hour'}",
+            ),
+        )
+        assert len(found) == 1
+        assert "throttle_classes = []" in found[0].message
+
+    def test_reports_scoped_throttling_with_no_scope(self, make_project) -> None:
+        """`ScopedRateThrottle.allow_request` returns True with no throttle_scope.
+
+        The settings file names a throttle class and every view that forgot to
+        set a scope is unthrottled, which is the PAGE_SIZE shape again.
+        """
+        found = credentials(
+            make_project,
+            settings=settings_with(
+                DEFAULT_THROTTLE_CLASSES="['rest_framework.throttling.ScopedRateThrottle']",
+                DEFAULT_THROTTLE_RATES="{'login': '10/hour'}",
+            ),
+        )
+        assert len(found) == 1
+        assert "allow_request returns True" in found[0].message
+
+    def test_silent_when_the_scope_is_set(self, make_project) -> None:
+        found = credentials(
+            make_project,
+            api_source=OPEN_LOGIN.replace(
+                "    permission_classes = []",
+                "    permission_classes = []\n    throttle_scope = 'login'",
+            ),
+            settings=settings_with(
+                DEFAULT_THROTTLE_CLASSES="['rest_framework.throttling.ScopedRateThrottle']",
+                DEFAULT_THROTTLE_RATES="{'login': '10/hour'}",
+            ),
+        )
+        assert found == []
+
+    def test_reports_a_throttle_with_no_matching_rate(self, make_project) -> None:
+        found = credentials(
+            make_project,
+            settings=settings_with(
+                DEFAULT_THROTTLE_CLASSES="['rest_framework.throttling.AnonRateThrottle']",
+                DEFAULT_THROTTLE_RATES="{'burst': '10/hour'}",
+            ),
+        )
+        assert len(found) == 1
+        assert "DEFAULT_THROTTLE_RATES" in found[0].message
+
+    def test_silent_behind_a_login(self, make_project) -> None:
+        """An endpoint already requiring authentication is not where guessing happens."""
+        found = credentials(
+            make_project,
+            api_source=OPEN_LOGIN.replace(
+                "    permission_classes = []",
+                "    permission_classes = [IsAuthenticated]",
+            ).replace(
+                "from rest_framework.views import APIView",
+                "from rest_framework.views import APIView\n"
+                "from rest_framework.permissions import IsAuthenticated",
+            ),
+        )
+        assert found == []
+
+    def test_silent_on_an_anonymous_read(self, make_project) -> None:
+        """Checking a credential means sending one."""
+        found = credentials(
+            make_project,
+            api_source=OPEN_LOGIN.replace("def post", "def get"),
+        )
+        assert found == []
+
+    def test_an_anonymous_write_that_names_nothing_is_quieter(self, make_project) -> None:
+        """The filter is the anonymous POST; the name only decides how loudly.
+
+        Across 227 routed endpoints on NetBox and pretix there are exactly two
+        anonymous writes and both hand out credentials, so requiring the name
+        to say so would have missed one of them.
+        """
+        found = run(
+            make_project,
+            "DJA-015",
+            api_source=OPEN_LOGIN.replace("LoginView", "SubmitView"),
+            urls=LOGIN_URLS.replace("LoginView", "SubmitView").replace("login/", "submit/"),
+        )
+        assert len(found) == 1
+        assert found[0].severity is Severity.MEDIUM
+        assert found[0].confidence is Confidence.TENTATIVE
+
+    def test_matches_on_the_url_pattern(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJA-015",
+            api_source=OPEN_LOGIN.replace("LoginView", "SubmitView"),
+            urls=LOGIN_URLS.replace("LoginView", "SubmitView").replace(
+                "'login/'", "'password/reset/'"
+            ),
+        )
+        assert len(found) == 1
+        assert found[0].severity is Severity.HIGH
+
+    def test_matches_drfs_own_base_class(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJA-015",
+            api_source=(
+                "from rest_framework.authtoken.views import ObtainAuthToken\n\n"
+                "class SubmitView(ObtainAuthToken):\n"
+                "    permission_classes = []\n\n"
+                "    def post(self, request):\n"
+                "        return None\n"
+            ),
+            urls=LOGIN_URLS.replace("LoginView", "SubmitView").replace("login/", "go/"),
+            **{
+                "rest_framework/authtoken/__init__.py": "",
+                "rest_framework/authtoken/views.py": (
+                    "from rest_framework.views import APIView\n\n"
+                    "class ObtainAuthToken(APIView):\n    pass\n"
+                ),
+            },
+        )
+        assert len(found) == 1
+        assert found[0].severity is Severity.HIGH

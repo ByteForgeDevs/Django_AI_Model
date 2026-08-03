@@ -17,7 +17,7 @@ turn a single fix into a hundred findings.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -590,10 +590,15 @@ class ArbitraryFilterLookups(ApiRule):
                 continue
             lookups = surface.lookups.get(name, ())
             oracles = sorted(set(lookups) & ORACLE_LOOKUPS)
+            # `exact` on a credential column is how a redemption endpoint is
+            # built -- find the ticket by its barcode, the gift card by its
+            # code -- and the caller has to hold the value already. A
+            # substring or range lookup needs no such thing: it reads the
+            # column back one answer at a time. Same field, different bug.
             detail = (
-                f" with {', '.join(oracles)}, which reads it a character at a time"
+                f" with {', '.join(oracles)}, which reads it back a character at a time"
                 if oracles
-                else ""
+                else ", and any caller holding a value can confirm it"
             )
             yield self.finding(
                 message=(
@@ -608,6 +613,196 @@ class ArbitraryFilterLookups(ApiRule):
                         source=ctx.rel(surface.path or endpoint.view.path),
                     ),
                 ),
-                severity=Severity.HIGH,
-                confidence=Confidence.FIRM,
+                severity=Severity.HIGH if oracles else Severity.MEDIUM,
+                confidence=Confidence.FIRM if oracles else Confidence.TENTATIVE,
             )
+
+
+CREDENTIAL_WORDS = (
+    "login",
+    "signin",
+    "sign_in",
+    "logon",
+    "authenticate",
+    "authtoken",
+    "obtain_token",
+    "obtainauthtoken",
+    "get_token",
+    "token_obtain",
+    "password",
+    "passwd",
+    "forgot",
+    "reset",
+    "recover",
+    "register",
+    "signup",
+    "sign_up",
+    "otp",
+    "mfa",
+    "2fa",
+    "twofactor",
+    "two_factor",
+    "verify",
+    "confirm",
+    "token",
+    "provision",
+    "credential",
+    "session",
+    "auth",
+)
+"""Words that name credential handling rather than describe it.
+
+Never consulted on its own, and never used to decide whether to report --
+only how loudly. A view reaches this list already known to accept an
+anonymous POST, which is what makes ``token`` and ``session`` safe to include:
+behind a login they are ordinary domain words, and in front of one they name
+the thing being handed out.
+"""
+
+TOKEN_BASES = ("ObtainAuthToken", "TokenObtainPair", "TokenViewBase", "TokenRefresh")
+"""Base classes that make the question moot. DRF's own ``ObtainAuthToken`` and
+simplejwt's token views are login endpoints whatever a project renames them."""
+
+SCOPED_THROTTLE = "ScopedRateThrottle"
+
+
+def names_a_credential_endpoint(endpoint: Endpoint, patterns: Sequence[str]) -> str | None:
+    """The word that says this endpoint handles credentials, or ``None``."""
+    view = endpoint.view
+    for base in view.bases:
+        if any(marker in base for marker in TOKEN_BASES):
+            return base
+    haystacks = [view.name.lower(), view.module.lower()]
+    haystacks.extend(p.lower() for p in patterns)
+    for word in CREDENTIAL_WORDS:
+        for text in haystacks:
+            if word in text:
+                return word
+    return None
+
+
+def unthrottled_because(endpoint: Endpoint, defaults: Defaults) -> str | None:
+    """Why nothing limits how fast this endpoint can be called, or ``None``.
+
+    Three ways to arrive at no limit, and only the first is visible in review.
+    """
+    view = endpoint.view
+    if not view.throttles_unset and not view.throttle_refs:
+        return "sets throttle_classes = [], switching off the project default"
+    refs = view.throttle_refs if not view.throttles_unset else defaults.throttles
+    if not refs:
+        return (
+            "declares no throttle classes and REST_FRAMEWORK sets no "
+            "DEFAULT_THROTTLE_CLASSES, which DRF ships empty"
+        )
+    if all(SCOPED_THROTTLE in ref for ref in refs) and view.throttle_scope is None:
+        # `ScopedRateThrottle.allow_request` reads `view.throttle_scope` and
+        # returns True the moment it is missing. The settings file names a
+        # throttle; the endpoint has none.
+        return (
+            "is throttled only by ScopedRateThrottle and sets no throttle_scope, "
+            "so allow_request returns True on every call"
+        )
+    scopes = {"anon", "user"} | ({view.throttle_scope} if view.throttle_scope else set())
+    rated = set(defaults.throttle_rates)
+    if rated and not (scopes & rated):
+        return (
+            f"is throttled on {', '.join(sorted(scopes))} but DEFAULT_THROTTLE_RATES "
+            f"sets a rate for {', '.join(sorted(rated))} only"
+        )
+    return None
+
+
+@register
+class UnthrottledCredentialEndpoint(ApiRule):
+    """DJA-015 -- the login form that will answer as fast as it is asked."""
+
+    meta = RuleMeta(
+        id="DJA-015",
+        title="Credential endpoint accepts unlimited attempts",
+        family=Family.DJA,
+        severity=Severity.HIGH,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "An endpoint that checks a credential and is not rate limited is a "
+            "password oracle running at network speed. Credential stuffing does not "
+            "need a vulnerability -- it needs a list of leaked passwords and an "
+            "endpoint that will keep saying no until it says yes -- and the same "
+            "applies to password-reset and one-time-code endpoints, where an "
+            "unlimited guess rate turns a six-digit code into a few minutes of work. "
+            "DRF ships DEFAULT_THROTTLE_CLASSES empty, so an endpoint is unthrottled "
+            "unless the project said otherwise, and ScopedRateThrottle allows every "
+            "request against a view that never set throttle_scope."
+        ),
+        remediation=(
+            "Set DEFAULT_THROTTLE_CLASSES with a matching DEFAULT_THROTTLE_RATES "
+            "entry, and give credential endpoints a stricter limit than the rest of "
+            "the API -- `throttle_classes = [AnonRateThrottle]` with a rate measured "
+            "in attempts per hour rather than per minute. Rate limiting is not "
+            "account lockout; it should be keyed on the caller, not on the account "
+            "being named, or it becomes a way to lock other people out."
+        ),
+        references=(
+            "https://www.django-rest-framework.org/api-guide/throttling/",
+            "https://owasp.org/API-Security/editions/2023/en/0xa4-unrestricted-resource-consumption/",
+        ),
+        limitations=(
+            "Rate limiting applied by a reverse proxy, a WAF or middleware such as "
+            "django-ratelimit is invisible to a reader of DRF's own configuration, so "
+            "a project protected that way is reported here and is not wrong.",
+            "Credential endpoints are recognised by the words in their name, module "
+            "and URL pattern, so a login view named for its product rather than its "
+            "job will not be reported by this rule at all.",
+        ),
+    )
+
+    def inspect(self, ctx: ProjectContext, endpoint: Endpoint) -> Iterator[Finding]:
+        if not endpoint.writes:
+            # Checking a credential means sending one.
+            return
+        if not endpoint.guard.is_open:
+            # An endpoint already behind a login is not where credentials are
+            # guessed, and requiring certainty keeps a dynamic `get_permissions`
+            # from being read as public.
+            return
+        reason = unthrottled_because(endpoint, self.defaults)
+        if reason is None:
+            return
+        patterns = [e.pattern for e in ctx.api_surface.routes.for_view(endpoint.label)]
+        word = names_a_credential_endpoint(endpoint, patterns)
+        verbs = ", ".join(sorted(endpoint.methods & {"POST", "PUT", "PATCH", "DELETE"}))
+        routes = ", ".join(patterns) or "a urlconf entry"
+        tail = (
+            "so a caller can guess as fast as the server will answer"
+            if word is not None
+            else "so one caller decides how much work the server does"
+        )
+        yield self.finding(
+            message=(f"{endpoint.view.name} accepts anonymous {verbs} and {reason}, {tail}."),
+            severity=Severity.HIGH if word is not None else Severity.MEDIUM,
+            confidence=Confidence.FIRM if word is not None else Confidence.TENTATIVE,
+            location=self.at(ctx, endpoint.view),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.AST,
+                    content=(
+                        f"{endpoint.label} handles credentials, matched on {word!r}"
+                        if word is not None
+                        else f"{endpoint.label} is routed at {routes}"
+                    ),
+                    source=ctx.rel(endpoint.view.path),
+                ),
+                Evidence(
+                    kind=EvidenceKind.CONFIG,
+                    content=(
+                        f"DEFAULT_THROTTLE_CLASSES = "
+                        f"{list(self.defaults.throttles) or '[]'}, "
+                        f"DEFAULT_THROTTLE_RATES keys = "
+                        f"{list(self.defaults.throttle_rates) or '{}'}"
+                    ),
+                    source=self.settings_module or "rest_framework defaults",
+                ),
+                self.guard_evidence(endpoint.guard),
+            ),
+        )
