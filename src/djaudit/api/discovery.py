@@ -23,6 +23,7 @@ from djaudit.api.serializers import (
     SERIALIZER_BASES,
     SerializerNode,
     build_serializer,
+    looks_like_model_serializer,
 )
 from djaudit.api.views import (
     VIEW_BASES,
@@ -167,7 +168,9 @@ def build_api_surface(
     by_class = {(model.path, model.name): model.label for model in graph}
 
     for record in index.records():
-        if not index.inherits(record, SERIALIZER_BASES):
+        if not index.inherits(record, SERIALIZER_BASES) and not looks_like_model_serializer(
+            record, index
+        ):
             continue
         node = build_serializer(record, index)
         surface.serializers[node.label] = node

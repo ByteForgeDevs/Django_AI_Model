@@ -516,3 +516,223 @@ class TestAgainstRealDRF:
 
         for path in SERIALIZER_BASES:
             assert hasattr(drf, path.rpartition(".")[2]), path
+
+
+class TestUnresolvedBases:
+    """Serializers whose parent lives outside the repo.
+
+    pretix builds almost every serializer on `I18nAwareModelSerializer`, which
+    ships in a third-party package. An ancestry walk stops at the repo edge and
+    concludes the class is not a model serializer, which silently dropped 68 of
+    pretix's 127 serializers -- a recall hole that looks exactly like a clean
+    codebase in a report.
+    """
+
+    def test_an_offsite_base_still_reads_as_a_model_serializer(self, make_project) -> None:
+        found = surface(
+            make_project,
+            """
+            from i18nfield.rest_framework import I18nAwareModelSerializer
+            from shop.models import Check
+
+            class CheckSerializer(I18nAwareModelSerializer):
+                class Meta:
+                    model = Check
+                    fields = ["id", "secret"]
+            """,
+        )
+        node = found.get("shop.api.CheckSerializer")
+        assert node is not None
+        assert node.is_model_serializer
+        assert node.model == "shop.Check"
+
+    def test_a_form_with_the_same_shape_is_not_taken_for_a_serializer(self, make_project) -> None:
+        """`Meta.model` alone is not evidence -- forms and filtersets have it too."""
+        found = surface(
+            make_project,
+            """
+            from third_party.forms import FancyForm
+            from shop.models import Check
+
+            class CheckForm(FancyForm):
+                class Meta:
+                    model = Check
+                    fields = ["id", "secret"]
+            """,
+        )
+        assert found.get("shop.api.CheckForm") is None
+
+    def test_a_readable_chain_is_not_short_circuited(self, make_project) -> None:
+        """A base we *can* read decides the answer; the guess never overrides it."""
+        found = surface(
+            make_project,
+            """
+            from rest_framework import serializers
+
+            class PingSerializer(serializers.Serializer):
+                class Meta:
+                    model = None
+                    fields = ["id"]
+            """,
+        )
+        node = found.get("shop.api.PingSerializer")
+        assert node is not None
+        assert not node.is_model_serializer
+
+
+class TestWriteOnly:
+    """The one keyword between handling a password and publishing it."""
+
+    def test_extra_kwargs_write_only_is_read(self, make_project) -> None:
+        found = surface(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Check
+
+            class CheckSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Check
+                    fields = ["id", "secret"]
+                    extra_kwargs = {"secret": {"write_only": True}}
+            """,
+        )
+        node = found.get("shop.api.CheckSerializer")
+        assert node is not None
+        assert node.is_write_only("secret")
+        assert not node.is_read_only("secret")
+
+    def test_a_declared_write_only_field_is_read(self, make_project) -> None:
+        found = surface(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Check
+
+            class CheckSerializer(serializers.ModelSerializer):
+                secret = serializers.CharField(write_only=True)
+
+                class Meta:
+                    model = Check
+                    fields = ["id", "secret"]
+            """,
+        )
+        node = found.get("shop.api.CheckSerializer")
+        assert node is not None
+        assert node.is_write_only("secret")
+
+    def test_the_removed_write_only_fields_option_protects_nothing(self, make_project) -> None:
+        """DRF honours `read_only_fields` but has no `write_only_fields`.
+
+        A serializer spelling it that way is not protected -- DRF ignores the
+        option and ships the field. Treating it as write-only would silence
+        exactly the leak the developer thought they had prevented.
+        """
+        found = surface(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Check
+
+            class CheckSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Check
+                    fields = ["id", "secret"]
+                    write_only_fields = ["secret"]
+            """,
+        )
+        node = found.get("shop.api.CheckSerializer")
+        assert node is not None
+        assert not node.is_write_only("secret")
+
+    def test_a_plain_field_is_neither(self, make_project) -> None:
+        found = surface(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Check
+
+            class CheckSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Check
+                    fields = ["id", "secret"]
+            """,
+        )
+        node = found.get("shop.api.CheckSerializer")
+        assert node is not None
+        assert not node.is_write_only("secret")
+        assert not node.is_read_only("secret")
+
+    def test_read_only_and_write_only_are_not_confused(self, make_project) -> None:
+        found = surface(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Check
+
+            class CheckSerializer(serializers.ModelSerializer):
+                class Meta:
+                    model = Check
+                    fields = ["id", "secret", "project"]
+                    extra_kwargs = {
+                        "secret": {"write_only": True},
+                        "project": {"read_only": True},
+                    }
+            """,
+        )
+        node = found.get("shop.api.CheckSerializer")
+        assert node is not None
+        assert node.is_write_only("secret") and not node.is_read_only("secret")
+        assert node.is_read_only("project") and not node.is_write_only("project")
+
+
+class TestInheritedDeclaredFields:
+    """DRF merges declared fields down the MRO, and so must we.
+
+    pretix declares `owner = SlugRelatedField(read_only=True)` once on a base
+    and subclasses it twice with nothing but a `Meta`. Reading only the class
+    body loses the `read_only`, and both subclasses read as handing an
+    ownership field to any caller.
+    """
+
+    def test_a_parents_declared_field_carries_its_read_only(self, make_project) -> None:
+        found = surface(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Project
+
+            class BaseSerializer(serializers.ModelSerializer):
+                owner = serializers.CharField(read_only=True)
+
+            class ProjectSerializer(BaseSerializer):
+                class Meta:
+                    model = Project
+                    fields = ["id", "name", "owner"]
+            """,
+        )
+        node = found.get("shop.api.ProjectSerializer")
+        assert node is not None
+        assert node.is_read_only("owner")
+
+    def test_a_child_redeclaration_wins(self, make_project) -> None:
+        found = surface(
+            make_project,
+            """
+            from rest_framework import serializers
+            from shop.models import Project
+
+            class BaseSerializer(serializers.ModelSerializer):
+                owner = serializers.CharField(read_only=True)
+
+            class ProjectSerializer(BaseSerializer):
+                owner = serializers.CharField()
+
+                class Meta:
+                    model = Project
+                    fields = ["id", "name", "owner"]
+            """,
+        )
+        node = found.get("shop.api.ProjectSerializer")
+        assert node is not None
+        assert not node.is_read_only("owner")

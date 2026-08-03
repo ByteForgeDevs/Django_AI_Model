@@ -48,6 +48,32 @@ ALL_FIELDS = "__all__"
 against the installed DRF by the test suite rather than trusted."""
 
 
+def looks_like_model_serializer(record: ClassRecord, index: ClassIndex) -> bool:
+    """Whether a class is a ModelSerializer we cannot prove through inheritance.
+
+    Ancestry is the right test and fails on a base the repository does not
+    contain. pretix inherits almost its whole API from
+    ``i18nfield.rest_framework.I18nAwareModelSerializer``, a third-party class,
+    and reading only the chain finds 49 of its 127 serializers -- so more than
+    half the API is invisible, and every rule downstream silently under-reports
+    on it rather than being wrong in a way anyone would notice.
+
+    So the fallback asks whether the class has the *shape*, and asks strictly.
+    The name has to end in ``Serializer``, which excludes Django's forms and
+    filtersets, whose ``Meta.model`` is otherwise identical. It has to declare a
+    ``Meta`` with a ``model``, which excludes mixins and plain
+    ``Serializer`` subclasses. And at least one base has to be unresolved,
+    because if the whole chain is readable then the chain has already answered
+    and guessing over it would be worse than the gap.
+    """
+    if not record.name.endswith("Serializer"):
+        return False
+    if not index.unresolved_bases(record):
+        return False
+    meta = meta_class(record.node)
+    return meta is not None and _assigned(meta.body, "model") is not None
+
+
 @dataclass(frozen=True, slots=True)
 class SerializerField:
     """A field written out in the serializer body, as opposed to derived."""
@@ -106,6 +132,7 @@ class SerializerNode:
 
     declared: dict[str, SerializerField] = field(default_factory=dict)
     extra_kwargs_read_only: tuple[str, ...] = ()
+    extra_kwargs_write_only: tuple[str, ...] = ()
 
     unreadable: tuple[str, ...] = ()
     """Meta options that are present but not statically resolvable -- a
@@ -148,6 +175,16 @@ class SerializerNode:
             or name in self.extra_kwargs_read_only
             or bool(declared and declared.read_only)
         )
+
+    def is_write_only(self, name: str) -> bool:
+        """Whether the field is accepted on input but never returned.
+
+        The correct way to carry a secret through an API, and so the single
+        fact that separates a serializer leaking a password from one handling
+        it properly.
+        """
+        declared = self.declared.get(name)
+        return name in self.extra_kwargs_write_only or bool(declared and declared.write_only)
 
 
 def _names(node: ast.expr | None) -> tuple[tuple[str, ...], bool]:
@@ -229,18 +266,22 @@ def read_declared(node: ast.ClassDef) -> dict[str, SerializerField]:
     return out
 
 
-def read_extra_kwargs(node: ast.expr | None) -> tuple[tuple[str, ...], bool]:
-    """Field names that ``extra_kwargs`` marks read-only.
+def read_extra_kwargs(node: ast.expr | None) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+    """Field names that ``extra_kwargs`` marks read-only and write-only.
 
-    ``extra_kwargs = {"password": {"write_only": True}}`` is the usual shape;
-    only the read-only half matters here, because that is what decides whether
-    a write can reach a field.
+    ``extra_kwargs = {"password": {"write_only": True}}`` is the usual shape,
+    and both halves matter for different questions. Read-only decides whether a
+    write can reach a field. Write-only decides whether a field ever appears in
+    a *response*, which is the difference between NetBox exposing every user's
+    password hash and NetBox doing the textbook correct thing -- one keyword
+    apart, in a file the field list gives no hint about.
     """
     if node is None:
-        return (), False
+        return (), (), False
     if not isinstance(node, ast.Dict):
-        return (), True
-    out: list[str] = []
+        return (), (), True
+    read: list[str] = []
+    write: list[str] = []
     partial = False
     for key, value in zip(node.keys, node.values, strict=False):
         name = literal(key) if key is not None else None
@@ -250,9 +291,32 @@ def read_extra_kwargs(node: ast.expr | None) -> tuple[tuple[str, ...], bool]:
         for inner_key, inner_value in zip(value.keys, value.values, strict=False):
             if inner_key is None:
                 partial = True
-            elif literal(inner_key) == "read_only" and literal(inner_value) is True:
-                out.append(name)
-    return tuple(out), partial
+                continue
+            option = literal(inner_key)
+            if literal(inner_value) is not True:
+                continue
+            if option == "read_only":
+                read.append(name)
+            elif option == "write_only":
+                write.append(name)
+    return tuple(read), tuple(write), partial
+
+
+def inherited_declared(record: ClassRecord, index: ClassIndex) -> dict[str, SerializerField]:
+    """Declared fields for a serializer, merged across its ancestry.
+
+    DRF collects declared fields by walking the MRO in reverse, so a field
+    declared once on a base class applies to every subclass that never
+    redeclares it. Reading only the class's own body makes an inherited
+    ``read_only=True`` invisible, which is the difference between pretix
+    deliberately protecting ``owner`` and pretix appearing to hand it to any
+    caller. Nearest declaration wins, matching Python's own resolution order.
+    """
+    merged: dict[str, SerializerField] = {}
+    for ancestor in reversed(index.ancestry(record)):
+        merged.update(read_declared(ancestor.node))
+    merged.update(read_declared(record.node))
+    return merged
 
 
 def build_serializer(record: ClassRecord, index: ClassIndex) -> SerializerNode:
@@ -264,8 +328,9 @@ def build_serializer(record: ClassRecord, index: ClassIndex) -> SerializerNode:
         path=record.path,
         lineno=node.lineno,
         end_lineno=node.end_lineno or node.lineno,
-        is_model_serializer=index.inherits(record, MODEL_SERIALIZER_BASES),
-        declared=read_declared(node),
+        is_model_serializer=index.inherits(record, MODEL_SERIALIZER_BASES)
+        or looks_like_model_serializer(record, index),
+        declared=inherited_declared(record, index),
         bases=record.bases,
     )
 
@@ -302,9 +367,11 @@ def build_serializer(record: ClassRecord, index: ClassIndex) -> SerializerNode:
     if partial:
         unreadable.append("read_only_fields")
 
-    serializer.extra_kwargs_read_only, partial = read_extra_kwargs(
-        _assigned(meta.body, "extra_kwargs")
-    )
+    (
+        serializer.extra_kwargs_read_only,
+        serializer.extra_kwargs_write_only,
+        partial,
+    ) = read_extra_kwargs(_assigned(meta.body, "extra_kwargs"))
     if partial:
         unreadable.append("extra_kwargs")
 
