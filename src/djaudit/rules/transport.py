@@ -17,7 +17,7 @@ from djaudit.models import Confidence, Family, Finding, Severity, Tier
 from djaudit.registry import RuleMeta, register
 from djaudit.rules._base import (
     FlagRule,
-    InsecureDefaultRule,
+    SecurityMiddlewareSetting,
     SettingGroup,
     SettingsRule,
     could_be_off,
@@ -30,7 +30,7 @@ _HTTPS_CHECKLIST = "https://docs.djangoproject.com/en/stable/howto/deployment/ch
 
 
 @register
-class SslRedirectDisabled(FlagRule):
+class SslRedirectDisabled(SecurityMiddlewareSetting, FlagRule):
     """``SECURE_SSL_REDIRECT`` is off, so Django serves plain HTTP."""
 
     setting = "SECURE_SSL_REDIRECT"
@@ -42,6 +42,13 @@ class SslRedirectDisabled(FlagRule):
     consequence = (
         "a request that arrives over plain HTTP is answered over plain HTTP rather "
         "than redirected, unless something in front of Django is doing it instead"
+    )
+
+    inert_consequence = (
+        "no redirect happens at all -- SecurityMiddleware is the only thing in Django "
+        "that reads this setting, so the line reads as though plain HTTP were being "
+        "turned away while every plain HTTP request is answered normally, which is "
+        "worse than leaving it off because it stops anyone looking further"
     )
 
     meta = RuleMeta(
@@ -215,7 +222,7 @@ def _duration(seconds: int) -> str:
 
 
 @register
-class HstsNotEnforced(InsecureDefaultRule):
+class HstsNotEnforced(SecurityMiddlewareSetting):
     """``SECURE_HSTS_SECONDS`` is unset, zero, or shorter than a year."""
 
     setting = "SECURE_HSTS_SECONDS"
@@ -226,10 +233,18 @@ class HstsNotEnforced(InsecureDefaultRule):
 
     corrected_as = "sets a longer max-age"
 
+    inert_consequence = (
+        "no Strict-Transport-Security header is ever sent -- SecurityMiddleware is what "
+        "builds it and it is not installed -- so the browser is never told anything, "
+        "while the settings file records a policy that looks finished"
+    )
+
     def insecure(self, value: Value) -> bool:
         return could_be_under(value, ONE_YEAR)
 
     def describe_state(self, resolved: ResolvedSetting) -> str:
+        if self._inert:
+            return super().describe_state(resolved)
         literal = resolved.value.literal
         if resolved.is_default or literal == 0:
             return "is never set" if resolved.is_default else "is 0"
@@ -238,6 +253,8 @@ class HstsNotEnforced(InsecureDefaultRule):
         return f"is {resolved.value.describe()}"
 
     def consequence_for(self, resolved: ResolvedSetting) -> str:
+        if self._inert:
+            return super().consequence_for(resolved)
         literal = resolved.value.literal
         if isinstance(literal, int) and not isinstance(literal, bool) and 0 < literal < ONE_YEAR:
             return (
@@ -284,7 +301,7 @@ class HstsNotEnforced(InsecureDefaultRule):
 
 
 @register
-class HstsSubdomainsExcluded(InsecureDefaultRule):
+class HstsSubdomainsExcluded(SecurityMiddlewareSetting):
     """``SECURE_HSTS_INCLUDE_SUBDOMAINS`` is off while HSTS is switched on."""
 
     setting = "SECURE_HSTS_INCLUDE_SUBDOMAINS"
@@ -295,6 +312,11 @@ class HstsSubdomainsExcluded(InsecureDefaultRule):
         "the HTTPS-only policy stops at the bare hostname and every subdomain is still "
         "reachable over plain HTTP, which is enough for an attacker to serve a page from "
         "one and set a cookie that the parent domain will accept"
+    )
+
+    inert_consequence = (
+        "includeSubDomains is never sent, because the header it rides on is never sent "
+        "either -- SecurityMiddleware builds both and it is not installed"
     )
 
     def insecure(self, value: Value) -> bool:

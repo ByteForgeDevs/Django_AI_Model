@@ -1337,6 +1337,49 @@ than after twenty-six of them disagree, is cheaper.
   every note in the file describes a tree nobody is scanning any more — a
   failure that would otherwise look exactly like success.
 - **1.9.4** — Tune severity and confidence based on the triage; document every downgrade.
+
+  **Done, and the honest result is that there were no downgrades to make.**
+  Both benchmarks sit at 100% precision and the near-miss project is silent at
+  default thresholds, so nothing in the evidence says any rule is too loud. What
+  the pass across the family did expose was the opposite failure, and it was a
+  serious one.
+
+  `django/middleware/security.py` reads `SECURE_SSL_REDIRECT`,
+  `SECURE_HSTS_SECONDS`, `SECURE_HSTS_INCLUDE_SUBDOMAINS` and
+  `SECURE_CONTENT_TYPE_NOSNIFF` in its `__init__`, and **nothing else in Django
+  reads any of them**. `DJS-006`, `DJS-007`, `DJS-008` and `DJS-018` all checked
+  the value and none of them checked whether anything was listening. So a
+  project that wrote every one of those settings down correctly and left
+  `SecurityMiddleware` out of `MIDDLEWARE` got silence from all four: no
+  redirect, no HSTS, no nosniff, and a settings file that says the opposite.
+  That is worse than the failure the rules were built for, because the ordinary
+  failure at least looks like what it is — a reader who greps for
+  `SECURE_SSL_REDIRECT` finds `True` and stops looking.
+
+  `DJS-017` already knew this about its own `XFrameOptionsMiddleware`, and
+  `_base.py` already had the `insecure_here()` hook for exactly this shape, so
+  the family was inconsistent with itself rather than short of a mechanism. The
+  four now share `SecurityMiddlewareSetting`, which reports the setting as inert
+  when the middleware is definitely absent.
+
+  Three deliberate limits keep it quiet where it should be. Only an *explicit*
+  safe value is reported this way — a setting nobody mentioned expresses no
+  intent, and where the default is already unsafe the value branch is firing
+  anyway, so the two branches are mutually exclusive and nothing is said twice.
+  A `MIDDLEWARE` we could not fully resolve counts as installed, because plenty
+  of projects assemble it conditionally. And a module that never assigns
+  `MIDDLEWARE` at all is left alone: Django's default really is the empty list,
+  but such a module is a fragment or a test harness rather than a deployment.
+
+  That last line is the one downgrade in the substep. `DJS-017` did not have it
+  and fired on any settings module with no `MIDDLEWARE`, so it has been narrowed
+  to match — the family has to answer the same question the same way or the
+  reasoning behind it is arbitrary.
+
+  One further wrinkle needed fixing underneath. `InsecureDefaultRule` downgrades
+  a base that every heir corrects, which is right for a *value* and wrong here:
+  an heir repeating the same safe value has repaired nothing. That predicate is
+  now the `corrected_downstream()` hook, and the inert branch declines it.
 - **1.9.5** — `docs/rules/DJS.md` — one section per rule: what, why, remediation, references, and known limitations.
 - **1.9.6** — Update README and this plan with measured precision and recall.
 

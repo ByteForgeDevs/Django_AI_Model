@@ -571,6 +571,19 @@ class InsecureDefaultRule(SettingsRule):
         """
         return self.insecure(group.setting.value)
 
+    def corrected_downstream(self, group: SettingGroup) -> bool:
+        """Whether every module inheriting this one repairs the finding.
+
+        A base left insecure and corrected everywhere downstream is ordinary
+        split-settings practice rather than a defect, so ``inspect`` downgrades
+        it. That reasoning is about the *value*, and it stops being true for
+        the rules whose defect is a missing implementation: an heir that
+        assigns the same safe value the base already assigned has repaired
+        nothing, and telling the reader it did would send them looking at the
+        wrong file.
+        """
+        return self.overridden(group.module, lambda rs: not self.insecure(rs.value))
+
     def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
         resolved = group.setting
         if not self.insecure_here(ctx, group):
@@ -585,7 +598,7 @@ class InsecureDefaultRule(SettingsRule):
         severity: Severity | None = self.severity_for(resolved)
         ceiling: Confidence | None = self.ceiling_for(resolved)
         caveats: tuple[str, ...] = ()
-        corrected = self.overridden(group.module, lambda rs: not self.insecure(rs.value))
+        corrected = self.corrected_downstream(group)
         if resolved.is_default and self.overridden(
             group.module, lambda rs: rs.is_assigned or not self.insecure(rs.value)
         ):
@@ -638,3 +651,85 @@ class FlagRule(InsecureDefaultRule):
 
     def insecure(self, value: Value) -> bool:
         return could_be_off(value)
+
+
+SECURITY_MIDDLEWARE = "django.middleware.security.SecurityMiddleware"
+"""The only thing in Django that reads ``SECURE_SSL_REDIRECT``,
+``SECURE_HSTS_SECONDS``, ``SECURE_HSTS_INCLUDE_SUBDOMAINS`` and
+``SECURE_CONTENT_TYPE_NOSNIFF``. Every one of them is loaded in its
+``__init__`` and used nowhere else in the framework."""
+
+
+class SecurityMiddlewareSetting(InsecureDefaultRule):
+    """A setting that does nothing unless ``SecurityMiddleware`` is installed.
+
+    Four rules share this and each was, on its own, only half a rule. They
+    checked the value and never checked whether anything reads it, so a project
+    that wrote every one of them down correctly and left the middleware out of
+    ``MIDDLEWARE`` got silence from all four -- no redirect, no HSTS, no
+    nosniff, and a settings file that says otherwise. That is worse than the
+    ordinary failure these rules were built for, because the ordinary failure
+    at least looks like what it is.
+
+    Only an *explicit* safe value is reported this way. A setting nobody
+    mentioned expresses no intent, and where the default is the unsafe one the
+    value branch is already firing; adding a second finding there would be one
+    mistake and two tickets. So the two branches are mutually exclusive by
+    construction, which is also what keeps the split-settings downgrade honest.
+    """
+
+    inert_consequence: str = ""
+    """What fails while the setting is written down and read by nothing."""
+
+    _inert = False
+    """Set per ``inspect`` by ``insecure_here``, which always runs first."""
+
+    def middleware_missing(self, group: SettingGroup) -> bool:
+        """Whether ``MIDDLEWARE`` was read in full and did not contain it.
+
+        Three-valued underneath: a list we could not resolve answers ``None``
+        and is treated as installed, because plenty of projects build
+        ``MIDDLEWARE`` conditionally and reading "could not tell" as "absent"
+        would fire this on every one of them.
+
+        A module that never assigns ``MIDDLEWARE`` at all is the same kind of
+        unknown and is treated the same way. Django's default really is the
+        empty list, so the letter of it says nothing is installed -- but a
+        settings module with no middleware whatsoever is a fragment or a
+        harness rather than a deployment, and announcing that its security
+        headers are inert would be true, useless, and loud.
+        """
+        view = self.views.get(group.module.dotted)
+        if view is None or not view.get("MIDDLEWARE").is_assigned:
+            return False
+        return lists_entry(view, "MIDDLEWARE", SECURITY_MIDDLEWARE) is False
+
+    def inert_here(self, group: SettingGroup) -> bool:
+        resolved = group.setting
+        if resolved.is_default or self.insecure(resolved.value):
+            return False
+        return self.middleware_missing(group)
+
+    def insecure_here(self, ctx: ProjectContext, group: SettingGroup) -> bool:
+        self._inert = self.inert_here(group)
+        return self._inert or self.insecure(group.setting.value)
+
+    def corrected_downstream(self, group: SettingGroup) -> bool:
+        # Every heir assigns the same safe value the base does -- that is what
+        # made this inert in the first place -- so the inherited check would
+        # read the whole chain as a base corrected downstream and downgrade the
+        # one finding that is certainly true.
+        return False if self._inert else super().corrected_downstream(group)
+
+    def describe_state(self, resolved: ResolvedSetting) -> str:
+        if not self._inert:
+            return super().describe_state(resolved)
+        return (
+            f"is {resolved.value.describe()} and is read by nothing, because "
+            f"MIDDLEWARE does not contain {SECURITY_MIDDLEWARE!r}"
+        )
+
+    def consequence_for(self, resolved: ResolvedSetting) -> str:
+        if not self._inert:
+            return super().consequence_for(resolved)
+        return self.inert_consequence

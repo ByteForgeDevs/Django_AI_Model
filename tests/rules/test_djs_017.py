@@ -123,3 +123,15 @@ class TestRemediation:
         finding = audit(build(tmp_path, 'X_FRAME_OPTIONS = "ALLOW-FROM https://x.test"\n'))[0]
         assert "frame-ancestors" in finding.remediation
         assert "xframe_options_exempt" in finding.remediation
+
+
+def test_a_module_that_never_mentions_middleware_is_not_accused(tmp_path):
+    """It has not told us the middleware is absent, only that it is not here.
+
+    Django's empty default agrees on the letter of it, but a settings module
+    with no middleware at all is a fragment or a test harness rather than
+    something serving requests. The four settings SecurityMiddleware
+    implements are held to the same line, and the family has to answer this
+    the same way or the reasoning is arbitrary.
+    """
+    assert not audit(build(tmp_path, middleware=""))

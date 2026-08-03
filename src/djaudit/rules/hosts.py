@@ -15,6 +15,7 @@ from djaudit.models import Confidence, Family, Severity, Tier
 from djaudit.registry import RuleMeta, register
 from djaudit.rules._base import (
     InsecureDefaultRule,
+    SecurityMiddlewareSetting,
     SettingGroup,
     any_entry,
     could_be_off,
@@ -477,7 +478,14 @@ class ClickjackingProtectionOff(InsecureDefaultRule):
 
     def _missing_middleware(self, group: SettingGroup) -> bool:
         view = self.views.get(group.module.dotted)
-        if view is None:
+        if view is None or not view.get("MIDDLEWARE").is_assigned:
+            # A module that never mentions MIDDLEWARE has not told us the
+            # middleware is absent, only that this is not where it is decided.
+            # Django's empty default agrees on the letter of it, but a settings
+            # module with no middleware at all is a fragment or a harness
+            # rather than something serving requests, and reporting that its
+            # headers are missing is true, useless and loud. The four settings
+            # SecurityMiddleware implements are held to the same line.
             return False
         if installs_middleware(view, FRAMING_MIDDLEWARE) is not False:
             return False
@@ -575,7 +583,7 @@ class ClickjackingProtectionOff(InsecureDefaultRule):
 
 
 @register
-class ContentTypeSniffingAllowed(InsecureDefaultRule):
+class ContentTypeSniffingAllowed(SecurityMiddlewareSetting):
     """``SECURE_CONTENT_TYPE_NOSNIFF`` has been turned off."""
 
     setting = "SECURE_CONTENT_TYPE_NOSNIFF"
@@ -587,6 +595,12 @@ class ContentTypeSniffingAllowed(InsecureDefaultRule):
         "browsers go back to guessing what a response really is from its bytes, "
         "which is how a file a user uploaded gets executed as something other "
         "than what it was served as"
+    )
+
+    inert_consequence = (
+        "no X-Content-Type-Options header is sent regardless -- the middleware that "
+        "sends it is not installed -- so browsers sniff every response, and the one "
+        "line in the settings file that mentions the problem says it is handled"
     )
 
     def insecure(self, value: Value) -> bool:
