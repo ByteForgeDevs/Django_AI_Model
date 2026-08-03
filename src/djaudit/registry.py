@@ -41,6 +41,16 @@ class RuleMeta:
     rationale: str
     remediation: str
     references: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = ()
+    """What this rule cannot see, in the reader's terms.
+
+    Every rule here reasons about source and none of them can see a deployment,
+    so each one has a boundary where its claim stops. Those boundaries are
+    already encoded in the ``ceiling`` each rule sets, but a confidence level
+    is a number and a number does not tell somebody staring at a finding *why*
+    it might not apply to them. Written next to the rule so it goes stale in
+    the same commit that makes it wrong, and rendered into ``docs/rules``.
+    """
 
 
 class Rule(ABC):

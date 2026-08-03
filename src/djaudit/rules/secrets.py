@@ -64,6 +64,14 @@ class HardcodedSecretKey(SettingsRule):
             "https://docs.djangoproject.com/en/stable/howto/deployment/checklist/#secret-key",
             "https://cwe.mitre.org/data/definitions/798.html",
         ),
+        limitations=(
+            "Judges the value in the file, not the value at runtime. A key read from the "
+            "environment with a literal fallback is reported on the fallback, which is correct "
+            "for the deployment that forgets the variable and noise for the one that does not.",
+            "Cannot tell a key that signs real sessions from one that was rotated the day it "
+            "was committed. Rotation is invisible from source, so the finding says the key is "
+            "readable, not that it is live.",
+        ),
     )
 
     def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
@@ -165,6 +173,11 @@ class WeakSecretKey(SettingsRule):
             "https://docs.djangoproject.com/en/stable/ref/settings/#secret-key",
             "https://docs.djangoproject.com/en/stable/howto/deployment/checklist/#secret-key",
             "https://cwe.mitre.org/data/definitions/1392.html",
+        ),
+        limitations=(
+            "Recognises published and structurally weak keys, not all guessable ones. A short "
+            "key drawn from a real random source is weak in a way this cannot measure, and a "
+            "long key someone typed by hand may be far more guessable than it looks.",
         ),
     )
 
@@ -388,6 +401,11 @@ class HardcodedDatabasePassword(SettingsRule):
             "https://cwe.mitre.org/data/definitions/798.html",
             "https://owasp.org/Top10/A05_2021-Security_Misconfiguration/",
         ),
+        limitations=(
+            "Reads the alias mapping only. A password that reaches Django through a "
+            "DATABASE_URL, a service file or a libpq environment variable is not visible here, "
+            "and is not reported.",
+        ),
     )
 
     def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:
@@ -530,6 +548,13 @@ class HardcodedServiceCredential(SettingsRule):
             "https://cwe.mitre.org/data/definitions/798.html",
             "https://owasp.org/Top10/A05_2021-Security_Misconfiguration/",
             "https://docs.djangoproject.com/en/stable/topics/settings/",
+        ),
+        limitations=(
+            "Matches on the name and then judges the value, so a credential stored under a name "
+            "nobody would guess is missed, and a policy value under a credential-shaped name "
+            "has to be told apart by what it holds.",
+            "Cannot know whether the credential is still valid. A revoked key in the history is "
+            "not a live exposure, and nothing in the source says which it is.",
         ),
     )
 

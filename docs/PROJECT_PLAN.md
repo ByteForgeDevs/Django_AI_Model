@@ -1381,6 +1381,32 @@ than after twenty-six of them disagree, is cheaper.
   an heir repeating the same safe value has repaired nothing. That predicate is
   now the `corrected_downstream()` hook, and the inert branch declines it.
 - **1.9.5** — `docs/rules/DJS.md` — one section per rule: what, why, remediation, references, and known limitations.
+
+  **Done.** The page is generated from the registry by
+  `scripts/gen_rule_docs.py`, and CI fails if the committed copy is not what
+  the code currently says. Hand-written rule documentation drifts within a
+  release or two, and stale security documentation is worse than none: it
+  describes behaviour the tool no longer has, and the reader has no way to tell
+  which half is true. Four of the five sections — title, grade, rationale,
+  remediation, references — already existed on `RuleMeta` and were only ever a
+  copy away from being published.
+
+  The fifth needed adding. `RuleMeta` gained `limitations`, and all 27 rules
+  now carry one. Every rule in this phase reads source and none of them can see
+  a deployment, so each has a boundary where its claim stops — a redirect at
+  nginx, an HSTS header from a CDN, a connection pooler that makes `CONN_MAX_AGE
+  = 0` correct, a `PGSSLMODE` that overrides `sslmode`, a subdomain wildcard
+  that is only as safe as whoever can create a subdomain. Those boundaries were
+  already encoded in each rule's `ceiling`, but a confidence level is a number,
+  and a number does not tell somebody staring at a finding *why* it might not
+  apply to them. Writing them next to the rule means they go stale in the same
+  commit that makes them wrong.
+
+  `tests/test_rule_docs.py` holds the field to a standard rather than a
+  presence check: at least sixty characters, a capitalised sentence ending in a
+  full stop, not copied out of the rationale, and mandatory for any rule
+  shipping below `firm` — a rule that admits it is unsure owes the reader the
+  reason.
 - **1.9.6** — Update README and this plan with measured precision and recall.
 
 ---

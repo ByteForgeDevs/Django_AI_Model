@@ -58,6 +58,12 @@ jobs:
       - name: benchmark verdicts are a completed review
         run: uv run python scripts/check_triage.py
 
+      # The rule reference is generated from the registry, so an edit to a
+      # rule's grade or wording that never reaches the page turns published
+      # security documentation into a description of a tool we no longer ship.
+      - name: rule reference matches the registry
+        run: uv run python scripts/gen_rule_docs.py --check
+
       - name: pytest
         run: uv run pytest
 

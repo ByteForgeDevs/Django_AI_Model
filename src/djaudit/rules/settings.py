@@ -48,6 +48,15 @@ class DebugEnabled(SettingsRule):
             "https://docs.djangoproject.com/en/stable/ref/settings/#debug",
             "https://docs.djangoproject.com/en/stable/howto/deployment/checklist/",
         ),
+        limitations=(
+            "Reads the module, not the process. A deployment can hand Django a different "
+            "settings module than the one this looks like, or override DEBUG from an "
+            "environment variable we resolved to a default; that is why an env-dependent value "
+            "is reported at lower confidence rather than at certainty.",
+            "Classifying a module as production-reachable is a judgement about names and "
+            "imports. A module with an unusual name that only ever runs locally can be misread "
+            "as one that ships.",
+        ),
     )
 
     def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:

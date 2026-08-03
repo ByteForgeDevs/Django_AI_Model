@@ -267,6 +267,12 @@ class DebugToolingInstalled(SettingsRule):
             "https://django-debug-toolbar.readthedocs.io/en/latest/installation.html",
             "https://github.com/jazzband/django-silk#authentication--authorisation",
         ),
+        limitations=(
+            "Knows the package is installed, not what it exposes. What a debug app actually "
+            "reveals depends on the urlconf, which this phase does not read.",
+            "Requires the app to be present on every branch it could read, so a project that "
+            "assembles INSTALLED_APPS in a way we cannot follow is left alone.",
+        ),
     )
 
 
@@ -392,6 +398,13 @@ class DebugToolingDeployed(Rule):
         references=(
             "https://packaging.python.org/en/latest/discussions/install-requires-vs-requirements/",
             "https://docs.djangoproject.com/en/stable/howto/deployment/checklist/",
+        ),
+        limitations=(
+            "Reads dependency manifests, so a package installed by a Dockerfile, a system "
+            "package or an editable checkout is invisible.",
+            "Classifying a manifest as production or development is a guess from its filename "
+            "and its declared groups, and a project with an unusual layout can be read either "
+            "way.",
         ),
     )
 
@@ -536,6 +549,14 @@ class AdminAtDefaultPath(Rule):
         references=(
             "https://docs.djangoproject.com/en/stable/ref/contrib/admin/",
             "https://docs.djangoproject.com/en/stable/howto/deployment/checklist/",
+        ),
+        limitations=(
+            "Reads the routes in the urlconf it can find and does not follow include(), so an "
+            "admin mounted through an included module is not seen.",
+            "A path built at runtime -- from an environment variable or a site prefix -- can "
+            "only be reported tentatively, because the literal part is all we have.",
+            "Silence depends on recognising a lockout or second-factor package by name, so a "
+            "project that rate-limits the admin some other way is still reported.",
         ),
     )
 
@@ -743,5 +764,13 @@ class ErrorReportsLeakRequests(SettingsRule):
         references=(
             "https://docs.djangoproject.com/en/stable/ref/logging/#django.utils.log.AdminEmailHandler",
             "https://docs.djangoproject.com/en/stable/howto/error-reporting/#filtering-error-reports",
+        ),
+        limitations=(
+            "Says what the configuration does, not what any particular error report contained. "
+            "Whether an exception ever occurs on a request carrying something sensitive is a "
+            "near-certainty rather than a fact.",
+            "A replacement reporter filter is resolved inside the repository. One that lives in "
+            "an installed package cannot be read, so it is reported tentatively with that said "
+            "in the caveat.",
         ),
     )

@@ -78,6 +78,13 @@ class SslRedirectDisabled(SecurityMiddlewareSetting, FlagRule):
             _HTTPS_CHECKLIST,
             "https://docs.djangoproject.com/en/stable/ref/settings/#secure-ssl-redirect",
         ),
+        limitations=(
+            "A redirect at nginx, a load balancer or a CDN does the same job and is invisible "
+            "from inside the repository. The flag really is off; whether that matters is the "
+            "inference, which is why this never claims certainty.",
+            "SECURE_REDIRECT_EXEMPT is not read, so a project that redirects everything except "
+            "a health check is graded the same as one that redirects everything.",
+        ),
     )
 
 
@@ -121,6 +128,11 @@ class SessionCookieNotSecure(FlagRule):
             "https://docs.djangoproject.com/en/stable/ref/settings/#session-cookie-secure",
             "https://cwe.mitre.org/data/definitions/614.html",
         ),
+        limitations=(
+            "Nothing in front of Django changes this one, so the value is the whole story -- "
+            "but a session backend that does not use a cookie at all makes the setting moot, "
+            "and that is not checked.",
+        ),
     )
 
 
@@ -160,6 +172,11 @@ class CsrfCookieNotSecure(FlagRule):
             _HTTPS_CHECKLIST,
             "https://docs.djangoproject.com/en/stable/ref/settings/#csrf-cookie-secure",
         ),
+        limitations=(
+            "Reports the flag, not the deployment. A site served only over HTTPS with HSTS "
+            "already in force is much less exposed than the finding's severity suggests, and "
+            "neither of those is visible from the setting.",
+        ),
     )
 
 
@@ -198,6 +215,11 @@ class SessionCookieNotHttpOnly(FlagRule):
         references=(
             "https://docs.djangoproject.com/en/stable/ref/settings/#session-cookie-httponly",
             "https://owasp.org/www-community/HttpOnly",
+        ),
+        limitations=(
+            "Django's default is already True, so this can only fire on an explicit assignment. "
+            "A project that reads the session cookie from JavaScript through some other "
+            "mechanism is not detected.",
         ),
     )
 
@@ -297,6 +319,13 @@ class HstsNotEnforced(SecurityMiddlewareSetting):
             _HSTS_DOCS,
             "https://docs.djangoproject.com/en/stable/ref/settings/#secure-hsts-seconds",
         ),
+        limitations=(
+            "The Strict-Transport-Security header is very commonly sent by nginx or a CDN "
+            "instead, and none of that is visible here. This says Django is not sending it, not "
+            "that the response lacks it.",
+            "Django only sends the header on requests it considers secure, so a project whose "
+            "proxy configuration is wrong can have this setting right and still send nothing.",
+        ),
     )
 
 
@@ -364,6 +393,13 @@ class HstsSubdomainsExcluded(SecurityMiddlewareSetting):
             _HTTPS_CHECKLIST,
             _HSTS_DOCS,
             "https://docs.djangoproject.com/en/stable/ref/settings/#secure-hsts-include-subdomains",
+        ),
+        limitations=(
+            "Only fires once SECURE_HSTS_SECONDS is definitely non-zero. A duration read from "
+            "the environment is treated as off, so a project that enables HSTS at deploy time "
+            "will not be told its subdomains are excluded.",
+            "Cannot see whether every subdomain can actually serve HTTPS, which is the thing "
+            "that decides whether turning this on is safe.",
         ),
     )
 
@@ -486,5 +522,13 @@ class ProxySslHeaderTrusted(SettingsRule):
         references=(
             _HTTPS_CHECKLIST,
             "https://docs.djangoproject.com/en/stable/ref/settings/#secure-proxy-ssl-header",
+        ),
+        limitations=(
+            "The proxy is the entire question and cannot be seen from the repository. A "
+            "well-formed value is reported at low severity and tentative confidence precisely "
+            "because the setting is right whenever exactly one proxy sets the header and strips "
+            "it from client requests.",
+            "Does not check whether the named header is one the deployment's proxy actually "
+            "overwrites, because nothing in the source says which proxy that is.",
         ),
     )

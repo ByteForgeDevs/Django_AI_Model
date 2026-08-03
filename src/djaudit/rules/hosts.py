@@ -117,6 +117,12 @@ class AllowedHostsUnrestricted(InsecureDefaultRule):
             _HOSTS_DOCS,
             "https://docs.djangoproject.com/en/stable/topics/security/#host-header-validation",
         ),
+        limitations=(
+            "A proxy can enforce the Host header before Django sees it. The list says what it "
+            "says; whether anything else filters first is the inference.",
+            "Silent while DEBUG is on, because Django then allows localhost and its variants "
+            "and an empty list is the normal state of a module you only run locally.",
+        ),
     )
 
 
@@ -280,6 +286,12 @@ class CsrfTrustedOriginsTooBroad(InsecureDefaultRule):
             _CSRF_DOCS,
             "https://docs.djangoproject.com/en/stable/ref/csrf/",
         ),
+        limitations=(
+            "Whether trusting your own subdomains is safe depends on who can create one -- a "
+            "tenant, a docs host, a stale CNAME -- and that is the one thing the source cannot "
+            "say. The subdomain-wildcard branch is capped at tentative for that reason and "
+            "stays out of a default run.",
+        ),
     )
 
 
@@ -369,6 +381,13 @@ class CorsAllowsAllOrigins(InsecureDefaultRule):
             _CORS_DOCS,
             "https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS",
         ),
+        limitations=(
+            "Reads the setting and the middleware list, not the response. A CORS policy "
+            "enforced at an edge proxy, or a project that swaps in its own middleware, is not "
+            "modelled.",
+            "Silent when CORS_ALLOW_CREDENTIALS is also on, because that pairing is DJS-016 and "
+            "reporting both would be one mistake and two tickets.",
+        ),
     )
 
 
@@ -438,6 +457,11 @@ class CorsWildcardWithCredentials(InsecureDefaultRule):
             _CORS_DOCS,
             "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Credentials",
             "https://owasp.org/www-community/attacks/CORS_OriginHeaderScrutiny",
+        ),
+        limitations=(
+            "Requires both halves to be readable. A credentials flag or an origin policy "
+            "assembled at runtime leaves this quiet, and the weaker DJS-015 does not fire "
+            "either when credentials could be on.",
         ),
     )
 
@@ -579,6 +603,14 @@ class ClickjackingProtectionOff(InsecureDefaultRule):
             "https://docs.djangoproject.com/en/stable/ref/clickjacking/",
             "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options",
         ),
+        limitations=(
+            "An edge proxy can send X-Frame-Options itself, which is invisible here.",
+            "A module that never assigns MIDDLEWARE at all is left alone: Django's default is "
+            "the empty list, but such a module is a fragment or a test harness rather than a "
+            "deployment.",
+            "Content-Security-Policy frame-ancestors supersedes this header and is checked for, "
+            "but only under the three setting names in current use.",
+        ),
     )
 
 
@@ -642,5 +674,12 @@ class ContentTypeSniffingAllowed(SecurityMiddlewareSetting):
         references=(
             "https://docs.djangoproject.com/en/stable/ref/settings/#secure-content-type-nosniff",
             "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options",
+        ),
+        limitations=(
+            "Django ships this on, so it can only fire where somebody wrote the line to switch "
+            "it off, or where SecurityMiddleware is missing.",
+            "Cannot see whether the responses in question are ones a browser would sniff. The "
+            "risk is concentrated in user-uploaded content, and nothing in the settings says "
+            "whether the project serves any.",
         ),
     )

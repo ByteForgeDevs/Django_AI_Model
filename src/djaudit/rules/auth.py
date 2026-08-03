@@ -138,6 +138,14 @@ class WeakPasswordHasher(InsecureDefaultRule):
             "https://docs.djangoproject.com/en/stable/topics/auth/passwords/#how-django-stores-passwords",
             "https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html",
         ),
+        limitations=(
+            "Judges the list, which is exactly what Django hashes with -- there is no proxy or "
+            "environment in between. What it cannot tell you is whether any password in the "
+            "database was written by the weak hasher, which is what decides how urgent the fix "
+            "is.",
+            "A fast hasher below a strong one is not reported, because that is how legacy "
+            "hashes are verified during a migration.",
+        ),
     )
 
 
@@ -245,5 +253,12 @@ class NoPasswordValidators(InsecureDefaultRule):
             _VALIDATORS_DOCS,
             "https://docs.djangoproject.com/en/stable/ref/settings/#auth-password-validators",
             "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html",
+        ),
+        limitations=(
+            "Validators are not the only place a policy can live. A custom form or serializer "
+            "can enforce one and never touch this setting, which is what Healthchecks does, so "
+            "the absence of validators is a fact and the absence of a policy is not.",
+            "Only fires where django.contrib.auth is installed, and treats an INSTALLED_APPS it "
+            "could not fully read as installed.",
         ),
     )

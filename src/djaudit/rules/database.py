@@ -274,6 +274,11 @@ class ConnectionsNotReused(DatabaseAliasRule):
             "https://docs.djangoproject.com/en/stable/ref/databases/#persistent-database-connections",
             "https://docs.djangoproject.com/en/stable/ref/databases/#connection-pool",
         ),
+        limitations=(
+            "A connection pooler in front of Postgres makes 0 the correct value and is "
+            "invisible from here. So is a deployment whose worker model makes persistent "
+            "connections harmful.",
+        ),
     )
 
 
@@ -435,6 +440,13 @@ class PostgresWithoutTls(DatabaseAliasRule):
             "https://docs.djangoproject.com/en/stable/ref/databases/#postgresql-notes",
             "https://cwe.mitre.org/data/definitions/319.html",
         ),
+        limitations=(
+            "The libpq client also reads sslmode from PGSSLMODE and from a service file, "
+            "neither of which is in the repository. The setting is read exactly; what it means "
+            "for a deployment is the inference.",
+            "A database reached over a Unix socket or a private link may not need TLS at all, "
+            "and the host is usually an environment variable we cannot resolve.",
+        ),
     )
 
 
@@ -580,5 +592,10 @@ class DatabaseKeyAtModuleLevel(SettingsRule):
             _DATABASES_DOCS,
             "https://docs.djangoproject.com/en/stable/topics/db/transactions/#tying-transactions-to-http-requests",
             "https://docs.djangoproject.com/en/stable/ref/settings/#std-setting-DATABASE-ATOMIC_REQUESTS",
+        ),
+        limitations=(
+            "Django's ConnectionHandler reads these keys out of the alias mapping and nowhere "
+            "else, so the claim is about the framework rather than a deployment. The limit is "
+            "the list of key names: one this rule does not know is not reported.",
         ),
     )
