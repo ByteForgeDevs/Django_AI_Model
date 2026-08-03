@@ -1747,6 +1747,41 @@ building it here pays for itself twice.
   Healthchecks' 12.
 - **2.1.8** — Graph queries: `is_user_owned(model)` (path to the user model within N hops), `relation_path`, `reachable_fields`. This is what the authorization rules consume.
 
+  **Done.** `graph/queries.py` with a frozen `RelationPath` carrying the edges,
+  the resolved target, and the three properties that decide how much a route
+  proves: `lookup` (`project__owner` — the string a `get_queryset` override
+  must contain), `is_optional` (a nullable hop, so scoping *drops* rows rather
+  than protecting them) and `is_multi`. Exposed on `ModelGraph` as
+  `relation_path`, `path_to_user`, `is_user_owned` and `reachable_fields`.
+
+  The design was set by a measurement, not by taste. Traversing every forward
+  relation called **133 of NetBox's 140** models user-owned, on chains like
+  `datafile__source__jobs__user` — "owned by whoever last ran a job against
+  the source of my file". Two causes. `GenericRelation` is the *reverse* of a
+  `GenericForeignKey`, and NetBox declares **397** of them, so half the graph's
+  edges pointed backwards. And a many-to-many hop does not give a row an
+  owner, it gives it a set of them; filtering along one returns duplicates.
+  Restricting ownership to single-valued forward hops leaves **12 of 140**,
+  every one a direct `user`/`created_by` foreign key — correct for an
+  infrastructure inventory whose objects are org-wide, not personal.
+  Healthchecks is unmoved at **10 of 12**, reaching its user through
+  `project__owner` and `owner__project__owner`, both verified against source;
+  the two exceptions are a rate-limit bucket and a log record, neither owned.
+  `allow_multi=True` keeps the looser reading for callers who want it.
+
+  Reverse traversal is opt-in and confined to `reachable_fields`, since forward
+  is what a request can *set* and reverse only what it can read — and it is
+  spelled with the query name, not the accessor (`filter(books__title=…)`, not
+  `books_set`). It also explodes: 368 paths at depth 2 from `circuits.Circuit`
+  forward, 1900 with reverse included, which is what the depth cap is for.
+  `max_hops=4` is headroom over the deepest real chain found (3).
+
+  One bug surfaced: a foreign key to `settings.AUTH_USER_MODEL` resolving to
+  Django's own `auth.User` has `target=None`, because that class is not in the
+  project's source — so the most important query returned a path with no
+  destination. `RelationPath` now carries the target rather than deriving it.
+  `RelationEdge` gained `null` and `is_multi_valued`. 27 tests.
+
 ### Step 2.2 — API surface discovery
 
 - **2.2.1** — Serializer discovery: `Serializer`, `ModelSerializer`, declared fields, `Meta.model`, `Meta.fields`, `Meta.exclude`, `read_only_fields`.

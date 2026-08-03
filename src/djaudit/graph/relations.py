@@ -209,6 +209,7 @@ def build_edges(model: ModelNode, bindings: dict[str, str]) -> list[RelationEdge
                 related_name=_string_kwarg(fld, "related_name"),
                 related_query_name=_string_kwarg(fld, "related_query_name"),
                 symmetrical=_bool_kwarg(fld, "symmetrical"),
+                null=fld.null,
                 lineno=fld.lineno,
                 end_lineno=fld.end_lineno,
             )

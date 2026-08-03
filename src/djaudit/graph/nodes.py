@@ -11,7 +11,10 @@ import ast
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from djaudit.graph.queries import RelationPath
 
 DJANGO_MODEL_BASES = frozenset(
     {
@@ -73,6 +76,24 @@ class RelationEdge:
     implicit: bool = False
     """Django created this relation rather than the project declaring it --
     the ``<parent>_ptr`` link of multi-table inheritance."""
+
+    @property
+    def is_multi_valued(self) -> bool:
+        """The far side is many rows, so this hop cannot express ownership."""
+        return self.kind in self.MULTI_VALUED
+
+    MULTI_VALUED = frozenset({"ManyToManyField", "GenericRelation"})
+    """Kinds where the far side is a set of rows rather than one row.
+
+    ``GenericRelation`` belongs here despite being declared like a field: it is
+    the reverse side of a ``GenericForeignKey``, so it says other rows point at
+    this one. NetBox declares 397 of them, and treating them as forward links
+    makes almost every model look owned by whoever last ran a job against it.
+    """
+
+    null: bool = False
+    """The foreign key is nullable, so a row may point at nothing. Scoping a
+    queryset on a path through one silently drops the rows that do."""
 
     on_delete: str | None = None
     through: str | None = None
@@ -554,6 +575,30 @@ class ModelGraph:
     def concrete(self) -> list[ModelNode]:
         """Models that own a table, in label order."""
         return sorted((m for m in self.models.values() if m.is_concrete), key=lambda m: m.label)
+
+    def relation_path(self, source: str, target: str, **kwargs: int) -> RelationPath | None:
+        """The shortest forward route between two models, or ``None``."""
+        from djaudit.graph.queries import relation_path  # noqa: PLC0415  (cycle)
+
+        return relation_path(self, source, target, **kwargs)
+
+    def path_to_user(self, model: str, **kwargs: object) -> RelationPath | None:
+        """How a row of ``model`` reaches the user who owns it."""
+        from djaudit.graph.queries import path_to_user  # noqa: PLC0415  (cycle)
+
+        return path_to_user(self, model, **kwargs)  # type: ignore[arg-type]
+
+    def is_user_owned(self, model: str, **kwargs: object) -> bool:
+        """Whether rows of ``model`` belong to a user at all."""
+        from djaudit.graph.queries import is_user_owned  # noqa: PLC0415  (cycle)
+
+        return is_user_owned(self, model, **kwargs)  # type: ignore[arg-type]
+
+    def reachable_fields(self, model: str, **kwargs: object) -> dict[str, FieldNode]:
+        """Every field reachable from ``model``, keyed by its ORM lookup path."""
+        from djaudit.graph.queries import reachable_fields  # noqa: PLC0415  (cycle)
+
+        return reachable_fields(self, model, **kwargs)  # type: ignore[arg-type]
 
     def add(self, model: ModelNode) -> None:
         """Insert a model, keeping the first definition of a duplicated label.
