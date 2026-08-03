@@ -395,6 +395,34 @@ def entries(
     return found
 
 
+def entries_of(value: Value) -> tuple[list[object] | None, ...]:
+    """Every list this value could be, or ``(None,)`` if we cannot tell.
+
+    A conditional is not one list but several, and a rule that only looked at
+    the first would miss the branch that matters.
+    """
+    if value.is_conditional:
+        return tuple(item for branch in value.branches for item in entries_of(branch))
+    if value.is_literal and isinstance(value.literal, (list, tuple)):
+        return (list(value.literal),)
+    return (None,)
+
+
+def any_entry(value: Value, predicate: Callable[[object], bool]) -> bool:
+    """Whether some resolvable branch holds an entry matching ``predicate``."""
+    return any(
+        any(predicate(entry) for entry in entries)
+        for entries in entries_of(value)
+        if entries is not None
+    )
+
+
+def definitely_empty(value: Value) -> bool:
+    """Whether every branch we could read is an empty list."""
+    branches = entries_of(value)
+    return all(entries == [] for entries in branches)
+
+
 def assignment_value(setting: ResolvedSetting) -> ast.expr | None:
     """The right-hand side of the assignment that decided a setting."""
     definition = setting.definition

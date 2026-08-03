@@ -61,3 +61,11 @@ USE_TZ = True
 STRIPE_SECRET_KEY = "fixture-stripe-value-not-real-0123456789"
 PASSWORD_RESET_TIMEOUT = 3600
 NOTIFICATION_TOKEN = "app.notifications.TokenBackend"
+
+# PLANTED DEFECT: MD5 put first to speed the test suite up, in the module every
+# environment imports (DJS-019). PBKDF2 is kept below it, so logins keep working
+# and nothing about the application looks wrong -- which is why this survives.
+PASSWORD_HASHERS = [
+    "django.contrib.auth.hashers.MD5PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+]

@@ -917,6 +917,33 @@ than after twenty-six of them disagree, is cheaper.
 ### Step 1.7 — Authentication and database rules
 
 - **1.7.1** — `DJS-019` weak `PASSWORD_HASHERS` (MD5, SHA1, or unsalted) in a production-reaching module.
+
+  **Done.** Django hashes with `PASSWORD_HASHERS[0]` and keeps the rest only to
+  verify hashes that already exist, so only the leading entry is reported. That
+  is the whole design of the rule: leaving a weak hasher further down the list
+  is Django's own documented migration path, and flagging it would flag the
+  fix. The blind spot is recorded rather than hidden — an account that has not
+  logged in since the migration still holds the old hash and we say nothing.
+
+  `PBKDF2SHA1PasswordHasher` is explicitly not weak: SHA1 there is the PRF
+  inside PBKDF2, iterated hundreds of thousands of times. Matching on the
+  substring rather than the class name would have made a real settings module a
+  false positive, so there is a test pinning it.
+
+  Measured first, as always. Healthchecks sets `PASSWORD_HASHERS` explicitly
+  with Argon2 first; NetBox never sets it and inherits Django's PBKDF2 default.
+  Both stay silent, so recall comes from the fixture: `base.py` now puts MD5
+  first with PBKDF2 below it — the shape a test-suite speed-up leaves behind,
+  which survives review precisely because every existing login keeps working.
+  Reported at `high`/`certain`, since the list is read directly with no proxy,
+  middleware or environment between it and what Django writes to the database.
+
+  The four hashers Django removed in 5.1 are still recognised. A settings
+  module naming one is describing what its database already holds, and reading
+  a repository is not the same as running it.
+
+  `entries_of`, `any_entry` and `definitely_empty` moved from `hosts.py` into
+  `_base.py`; they are generic list helpers and a second family now needs them.
 - **1.7.2** — `DJS-020` `AUTH_PASSWORD_VALIDATORS` empty or absent.
 - **1.7.3** — `DJS-021` `CONN_MAX_AGE` at the default of 0, forcing a new connection per request.
 - **1.7.4** — `DJS-022` Postgres connection without `sslmode=require`.

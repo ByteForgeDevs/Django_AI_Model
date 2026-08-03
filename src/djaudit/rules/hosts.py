@@ -8,7 +8,6 @@ family does not: the value is a *list*, so the question is not "is this on" but
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from urllib.parse import urlsplit
 
 from djaudit.context import ProjectContext
@@ -17,41 +16,16 @@ from djaudit.registry import RuleMeta, register
 from djaudit.rules._base import (
     InsecureDefaultRule,
     SettingGroup,
+    any_entry,
     could_be_off,
     could_be_true,
+    definitely_empty,
+    entries_of,
 )
 from djaudit.settings import ResolvedSetting, SettingsView
 from djaudit.values import Value
 
 _HOSTS_DOCS = "https://docs.djangoproject.com/en/stable/ref/settings/#allowed-hosts"
-
-
-def entries_of(value: Value) -> tuple[list[object] | None, ...]:
-    """Every list this value could be, or ``(None,)`` if we cannot tell.
-
-    A conditional is not one list but several, and a rule that only looked at
-    the first would miss the branch that matters.
-    """
-    if value.is_conditional:
-        return tuple(item for branch in value.branches for item in entries_of(branch))
-    if value.is_literal and isinstance(value.literal, (list, tuple)):
-        return (list(value.literal),)
-    return (None,)
-
-
-def any_entry(value: Value, predicate: Callable[[object], bool]) -> bool:
-    """Whether some resolvable branch holds an entry matching ``predicate``."""
-    return any(
-        any(predicate(entry) for entry in entries)
-        for entries in entries_of(value)
-        if entries is not None
-    )
-
-
-def definitely_empty(value: Value) -> bool:
-    """Whether every branch we could read is an empty list."""
-    branches = entries_of(value)
-    return all(entries == [] for entries in branches)
 
 
 @register

@@ -11,7 +11,7 @@ import pytest
 
 from djaudit import engine
 from djaudit.models import Confidence, Severity
-from djaudit.rules.hosts import any_entry, definitely_empty, entries_of
+from djaudit.rules._base import any_entry, definitely_empty, entries_of
 from djaudit.values import Value
 
 MARKERS = "INSTALLED_APPS = []\nDATABASES = {}\nSECRET_KEY = 'x'\n"
