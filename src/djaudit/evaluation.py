@@ -20,6 +20,13 @@ A manifest is an ``expected.json`` beside a project::
 ``must_not_report`` entries are control cases -- code that looks like a defect
 but is not. Hitting one is a hard failure regardless of the precision score,
 because those are exactly the false positives that get a tool uninstalled.
+
+Two conditions fail a fixture without being about any expectation at all: a
+blocking diagnostic, and a rule that crashed. Both mean part of the catalogue
+never ran, and a rule that never ran satisfies every ``must_not_report`` entry
+in the manifest by doing nothing. On a fixture that is mostly control cases
+that reads as a pass. Scoring silence is the whole thing this harness exists to
+prevent, so it refuses to score a run it knows was incomplete.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from djaudit import engine
+from djaudit.context import Diagnostic
 from djaudit.models import Confidence, Finding, Severity
 
 MANIFEST_NAME = "expected.json"
@@ -110,6 +118,11 @@ class EvalReport:
     missing: list[Expectation] = field(default_factory=list)
     unexpected: list[Finding] = field(default_factory=list)
     forbidden: list[Finding] = field(default_factory=list)
+    incomplete: list[Diagnostic] = field(default_factory=list)
+    """Blocking diagnostics: rule families that never ran on this fixture."""
+
+    rule_errors: dict[str, str] = field(default_factory=dict)
+    """Rules that crashed. Their silence is not a passed control case."""
 
     @property
     def true_positives(self) -> int:
@@ -140,11 +153,25 @@ class EvalReport:
 
     @property
     def passed(self) -> bool:
-        return not (self.missing or self.misgraded or self.unexpected or self.forbidden)
+        return not (
+            self.incomplete
+            or self.rule_errors
+            or self.missing
+            or self.misgraded
+            or self.unexpected
+            or self.forbidden
+        )
 
     def failures(self) -> list[str]:
         """Human-readable failure lines, ordered by how much they matter."""
         lines: list[str] = []
+        # First, because they invalidate everything below them: a score
+        # computed on a run that did not happen is not a low score, it is not
+        # a score.
+        for diagnostic in self.incomplete:
+            lines.append(f"INCOMPLETE {diagnostic.code}: {diagnostic.message}")
+        for rule_id, message in sorted(self.rule_errors.items()):
+            lines.append(f"RULE CRASHED {rule_id}: {message}")
         for finding in self.forbidden:
             lines.append(
                 f"FALSE POSITIVE on a control case: {finding.rule_id} at "
@@ -184,7 +211,11 @@ def evaluate(
         min_confidence=Confidence.TENTATIVE,
     )
 
-    report = EvalReport(project=project)
+    report = EvalReport(
+        project=project,
+        incomplete=[d for d in result.context.diagnostics if d.blocking],
+        rule_errors=dict(result.rule_errors),
+    )
     remaining = list(result.findings)
 
     for finding in list(remaining):

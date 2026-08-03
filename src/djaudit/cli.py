@@ -269,6 +269,16 @@ def evaluate_command(
         f"fn={report.false_negatives}[/dim]"
     )
 
+    # Say plainly that the numbers above describe a run that did not finish.
+    # `djaudit run` has refused to exit 0 on a blocking diagnostic since Phase
+    # 1; scoring one and calling it a result would make the exit code depend on
+    # which command happened to be used.
+    if report.incomplete or report.rule_errors:
+        Console(stderr=True).print(
+            "[bold red]error:[/bold red] the analysis was incomplete; "
+            "these scores describe a run that did not examine the project"
+        )
+
     if not report.passed:
         raise typer.Exit(EXIT_FINDINGS)
     console.print("[green]evaluation passed[/green]")
@@ -347,6 +357,14 @@ def benchmark(
 
 
 def _print_benchmark(console: Console, report: BenchmarkReport) -> None:
+    # Printed first: precision measured over a project that was never
+    # discovered is 100% of nothing, and the reader needs to know that before
+    # reaching the table.
+    for diagnostic in report.incomplete:
+        console.print(
+            f"[bold red]analysis incomplete[/bold red] {diagnostic.code}: {diagnostic.message}"
+        )
+
     for rule_id, message in sorted(report.rule_errors.items()):
         console.print(f"[red]rule crashed[/red] {rule_id}: {message}")
 

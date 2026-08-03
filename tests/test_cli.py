@@ -273,6 +273,55 @@ class TestBenchmarkCommand:
         assert "precision 100.0%" in result.output
 
 
+class TestScoringCommandsRefuseAnIncompleteRun:
+    """`run` has refused to exit 0 on a blocking diagnostic since Phase 1.
+
+    `eval` and `benchmark` did not, so whether CI noticed a project the tool
+    could not read depended on which command the workflow happened to call --
+    and those two are the only commands CI calls. Both score silence, and
+    silence is what an unread project produces: every control case satisfied,
+    nothing untriaged, precision 100%.
+    """
+
+    def unreadable(self, tmp_path):
+        root = tmp_path / "proj"
+        (root / "conf").mkdir(parents=True)
+        (root / "manage.py").write_text("import os\n")
+        (root / "conf" / "settings.py").write_text(
+            "from configurations import Configuration\n\n"
+            "class Base(Configuration):\n    SECRET_KEY = 'x'\n    DEBUG = True\n"
+        )
+        return root
+
+    def test_eval_exits_non_zero(self, tmp_path):
+        root = self.unreadable(tmp_path)
+        (root / "expected.json").write_text(
+            json.dumps({"must_not_report": [{"rule_id": "DJS-001", "file": "conf/settings.py"}]})
+        )
+
+        result = runner.invoke(app, ["eval", str(root)])
+
+        assert result.exit_code == EXIT_FINDINGS
+        assert "INCOMPLETE" in result.output
+
+    def test_benchmark_exits_non_zero(self, tmp_path):
+        root = self.unreadable(tmp_path)
+        path = tmp_path / "triage.json"
+        Triage(target="fixture").save(path)
+
+        result = runner.invoke(app, ["benchmark", str(root), "--triage", str(path)])
+
+        assert result.exit_code == EXIT_FINDINGS
+        assert "analysis incomplete" in result.output
+
+    def test_a_readable_project_is_unaffected(self, vulnerable_project):
+        # The guard must not turn every fixture red; it fires on the projects
+        # nothing could read, not on the ones with nothing to say.
+        result = runner.invoke(app, ["eval", str(vulnerable_project)])
+
+        assert result.exit_code == EXIT_OK
+
+
 class TestJobSummary:
     """CI writes markdown to $GITHUB_STEP_SUMMARY so a red build explains itself."""
 
