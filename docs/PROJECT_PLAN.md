@@ -2410,6 +2410,32 @@ their own. Substep 2.6.1 extends `RULE_ID_PATTERN` to admit `DJD`.
   wrong answer — which is a different argument from `DJP`'s, where the code is
   right and slow.
 - **2.6.2** — `DJD-001` `ForeignKey` with `on_delete=CASCADE` to the user model on financial or audit records — informational, high value in review.
+
+  **Done.** `rules/datamodel.py` with `ModelRule`, `name_tokens()` and
+  `CascadingRetainedRecord`. All three benchmarks are silent, and the probe
+  behind that silence is the substep's real result: the word list matches
+  **nineteen** retained-record models across NetBox and pretix, **four** of them
+  carry a foreign key to the user, and all four are `SET_NULL` or `PROTECT` —
+  NetBox's `ObjectChange` and `JournalEntry`, pretix's `LogEntry` and
+  `StaffSessionAuditLog`. Two mature projects independently made the choice this
+  rule asks for, which is the strongest available evidence that the rule asks
+  for the right thing. The other fifteen never link to a Django user at all,
+  because a pretix `Order` belongs to an event rather than to `auth.User`.
+
+  Two calibrations came out of measuring rather than testing. NetBox's
+  `Subscription` is a *change-notification* subscription that cascades
+  correctly, so `subscription` is out of the word list even though a billing
+  subscription is exactly the target — recall traded for the right to be
+  believed. And names are matched by splitting on camel case rather than by
+  substring, because `Recorder` contains `order` and `HistoricPassword`
+  contains `histor`; adjacent words are then re-joined so `ChangeLog`,
+  `LogEntry` and `StaffSessionAuditLog` reach a single term.
+
+  `ModelRule` iterates abstract bases as well as concrete models. The positive
+  control found that omission: a cascading user FK declared on an abstract base
+  is invisible otherwise, since the base is not concrete and every subclass's
+  copy is inherited. That is the highest-leverage place in a schema to get a
+  field wrong, and it was reporting nothing.
 - **2.6.3** — `DJD-002` `CharField` with `null=True`, which creates two representations of empty.
 - **2.6.4** — `DJD-003` `Meta.ordering` absent on a model that is paginated, producing unstable pagination.
 
