@@ -799,6 +799,38 @@ than after twenty-six of them disagree, is cheaper.
   value of a setting can be a fact and another a judgement, and grading the two
   apart means grading their certainty apart too.
 - **1.6.3** — `DJS-015` `CORS_ALLOW_ALL_ORIGINS` enabled.
+
+  **Done.** Read from `corsheaders/conf.py` and `corsheaders/middleware.py`
+  rather than from the README, and both files changed the design. `conf.py`
+  reads `getattr(settings, "CORS_ALLOW_ALL_ORIGINS", getattr(settings,
+  "CORS_ORIGIN_ALLOW_ALL", False))`, so the pre-3.5 name is still live — which
+  matters immediately, because it is the only spelling NetBox uses. It also
+  means the modern name wins by being *assigned at all*, even when assigned
+  `False`, so a project part-way through the rename has a legacy `True` that
+  the package never reads and that we must not report.
+
+  That is a shape the base can own rather than one rule, so `SettingsRule`
+  gained `aliases` and `resolve()`, which walks the same chain the package
+  walks. `groups()` and `overridden()` both go through it. Rules without
+  aliases are unaffected.
+
+  Two preconditions keep it quiet. `CORS_ALLOW_CREDENTIALS` being on hands the
+  finding to `DJS-016`, because the middleware then stops sending `*` and
+  starts echoing the caller's origin — a different and much worse defect, and
+  one ticket is the right number. And the setting only produces a header if
+  `CorsMiddleware` is installed, so `installs_middleware()` answers in three
+  values: installed, definitely not installed, or unreadable. Only the middle
+  one buys silence; plenty of projects assemble `MIDDLEWARE` conditionally, and
+  reading "cannot tell" as "not installed" would lose every one of them.
+
+  Graded `medium`/`firm`, not higher: a wildcard is correct for an API whose
+  data is already public. The two readings worth having are in the message —
+  an internal service reachable through any browser inside the perimeter, and
+  what happens the day someone switches credentials on.
+
+  `vulnerable_project` uses the legacy spelling so the alias chain is exercised
+  by the recall gate itself; `overridden_project` names its front-end in
+  `CORS_ALLOWED_ORIGINS` instead.
 - **1.6.4** — `DJS-016` CORS wildcard combined with `CORS_ALLOW_CREDENTIALS`.
 - **1.6.5** — `DJS-017` `X_FRAME_OPTIONS` permissive or `XFrameOptionsMiddleware` absent.
 - **1.6.6** — `DJS-018` `SECURE_CONTENT_TYPE_NOSNIFF` disabled.

@@ -21,6 +21,10 @@ ALLOWED_HOSTS = ["app.example.test"]
 # Full scheme://host on every entry, and no wildcard to widen who is trusted.
 CSRF_TRUSTED_ORIGINS = ["https://app.example.test", "https://admin.example.test"]
 
+# The modern names, with the origins named rather than waived.
+CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOWED_ORIGINS = ["https://app.example.test"]
+
 SECURE_SSL_REDIRECT = True
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True

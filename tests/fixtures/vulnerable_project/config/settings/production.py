@@ -27,6 +27,9 @@ ALLOWED_HOSTS = ["*"]
 # Copied from a Django 3 answer: without a scheme these match nothing at all.
 CSRF_TRUSTED_ORIGINS = ["app.example.test", "https://admin.example.test"]
 
+# The pre-3.5 spelling, which django-cors-headers still honours.
+CORS_ORIGIN_ALLOW_ALL = True
+
 SECURE_HSTS_SECONDS = 3600
 SECURE_HSTS_INCLUDE_SUBDOMAINS = False
 

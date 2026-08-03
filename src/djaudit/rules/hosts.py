@@ -19,7 +19,7 @@ from djaudit.rules._base import (
     SettingGroup,
     could_be_true,
 )
-from djaudit.settings import ResolvedSetting
+from djaudit.settings import ResolvedSetting, SettingsView
 from djaudit.values import Value
 
 _HOSTS_DOCS = "https://docs.djangoproject.com/en/stable/ref/settings/#allowed-hosts"
@@ -302,5 +302,94 @@ class CsrfTrustedOriginsTooBroad(InsecureDefaultRule):
         references=(
             _CSRF_DOCS,
             "https://docs.djangoproject.com/en/stable/ref/csrf/",
+        ),
+    )
+
+
+_CORS_DOCS = "https://github.com/adamchainz/django-cors-headers#configuration"
+CORS_MIDDLEWARE = "corsheaders.middleware.CorsMiddleware"
+
+
+def installs_middleware(view: SettingsView, dotted: str) -> bool | None:
+    """Whether ``MIDDLEWARE`` contains ``dotted``, or ``None`` if unreadable.
+
+    The three-valued answer is the point. A setting that configures middleware
+    which is not installed does nothing, so silence is right -- but only when we
+    genuinely read the list and it was not there. Plenty of projects build
+    ``MIDDLEWARE`` conditionally, and treating "could not read" as "not
+    installed" would turn every one of those into a missed finding.
+    """
+    middleware = view.get("MIDDLEWARE")
+    if all(entries is None for entries in entries_of(middleware.value)):
+        return None
+    return any_entry(middleware.value, lambda entry: entry == dotted)
+
+
+@register
+class CorsAllowsAllOrigins(InsecureDefaultRule):
+    """``django-cors-headers`` is configured to answer every origin."""
+
+    setting = "CORS_ALLOW_ALL_ORIGINS"
+    aliases = ("CORS_ORIGIN_ALLOW_ALL",)
+    ceiling = Confidence.FIRM
+    corrected_as = "turns it off"
+
+    consequence = (
+        "every response the middleware touches carries "
+        "Access-Control-Allow-Origin: *, which lets any page on the internet read "
+        "it -- intended behaviour for an API whose data is already public, and a "
+        "way out of the network for anything reachable only from inside it, "
+        "because a browser on the corporate LAN is a route to an intranet service "
+        "that no firewall rule covers"
+    )
+
+    def insecure(self, value: Value) -> bool:
+        return could_be_true(value)
+
+    def applies(self, ctx: ProjectContext, group: SettingGroup) -> bool:
+        view = self.views.get(group.module.dotted)
+        if view is None:
+            return False
+        # Credentials plus a wildcard is a different and far worse defect, and
+        # DJS-016 reports it. Saying it twice would be one mistake, two tickets.
+        if could_be_true(view.get("CORS_ALLOW_CREDENTIALS").value):
+            return False
+        # The setting is read by middleware. Without the middleware there is no
+        # header, no matter what the setting says.
+        return installs_middleware(view, CORS_MIDDLEWARE) is not False
+
+    meta = RuleMeta(
+        id="DJS-015",
+        title="CORS is open to every origin",
+        family=Family.DJS,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "The same-origin policy stops one site reading another's responses, and CORS "
+            "is how a site waives that. Waiving it for every origin is deliberate and "
+            "correct for an API whose data is already public, so this is reported at "
+            "medium rather than treated as a breach. It is worth reading twice in two "
+            "cases. The first is an internal service: a wildcard means any page an "
+            "employee visits can read it through their browser, which sits inside the "
+            "network perimeter, and no firewall rule sees that request. The second is a "
+            "site that later switches CORS_ALLOW_CREDENTIALS on -- at that point "
+            "django-cors-headers stops sending '*' and starts echoing the caller's own "
+            "origin back, which turns this setting into cross-origin account access. "
+            "django-cors-headers still honours the pre-3.5 name CORS_ORIGIN_ALLOW_ALL, "
+            "so both spellings are read the way the package reads them."
+        ),
+        remediation=(
+            "Replace it with CORS_ALLOWED_ORIGINS listing the front-ends that call this "
+            "API, each as a full scheme://host. If the set is genuinely open-ended, "
+            "CORS_ALLOWED_ORIGIN_REGEXES will narrow it further than a wildcard, and "
+            "CORS_URLS_REGEX will confine CORS to the API paths rather than applying it "
+            "to the whole site. If the wildcard is intentional, make sure it stays paired "
+            "with CORS_ALLOW_CREDENTIALS left off, because that pairing is the only thing "
+            "keeping browsers from sending cookies with these requests."
+        ),
+        references=(
+            _CORS_DOCS,
+            "https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS",
         ),
     )

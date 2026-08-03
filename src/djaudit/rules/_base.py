@@ -110,6 +110,29 @@ class SettingsRule(Rule):
     settings leaves this empty and overrides :meth:`selects` instead.
     """
 
+    aliases: tuple[str, ...] = ()
+    """Older names for :attr:`setting`, in falling order of precedence.
+
+    Third-party apps rename their settings and keep reading the old name, which
+    they nearly always do as ``getattr(settings, NEW, getattr(settings, OLD,
+    default))`` -- so the new name wins by being *assigned at all*, even when it
+    is assigned the harmless value. A rule that looked only at the new name
+    would miss every project that has not migrated, and one that looked at both
+    independently would report a legacy assignment the new name has already
+    overruled. :meth:`resolve` follows the same chain the app does.
+    """
+
+    def resolve(self, view: SettingsView) -> ResolvedSetting:
+        """The setting as the framework reads it, following :attr:`aliases`."""
+        primary = view.get(self.setting)
+        if primary.is_assigned:
+            return primary
+        for alias in self.aliases:
+            fallback = view.get(alias)
+            if fallback.is_assigned:
+                return fallback
+        return primary
+
     def selects(self, name: str) -> bool:
         """Whether this rule is about the setting called ``name``."""
         return name == self.setting
@@ -146,7 +169,7 @@ class SettingsRule(Rule):
             # default for a setting nobody has heard of, so it sees only what
             # the project actually assigns.
             found = (
-                [view.get(self.setting)]
+                [self.resolve(view)]
                 if self.setting
                 else [rs for name, rs in view.settings.items() if self.selects(name)]
             )
@@ -199,7 +222,7 @@ class SettingsRule(Rule):
             and module.dotted in view.chain
             and view.module.role.reaches_production
         ]
-        return bool(heirs) and all(safe(heir.get(self.setting)) for heir in heirs)
+        return bool(heirs) and all(safe(self.resolve(heir)) for heir in heirs)
 
     @abstractmethod
     def inspect(self, ctx: ProjectContext, group: SettingGroup) -> Iterator[Finding]:

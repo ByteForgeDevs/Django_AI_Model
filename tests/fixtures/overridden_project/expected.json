@@ -1,5 +1,5 @@
 {
-  "description": "The normal split-settings pattern: base enables DEBUG, production unconditionally disables it. The base finding must survive but be downgraded to low/tentative so it stays below default CI gates. Development is a control case. base.py carries the throwaway key startproject generates, which DJS-003 claims for being guessable; DJS-002 must stay quiet on it rather than report the same line for the lesser reason. It is reported once for the base and production pair that share it. production.py also sets the transport and cookie flags, which Django ships off: those rules fire on a project that never mentions them, so this is the control proving that setting them is enough to stop it. CSRF_TRUSTED_ORIGINS is written the way Django reads it -- full scheme://host, no wildcard -- so DJS-014 must stay silent here even though the same fixture pair reports it next door.",
+  "description": "The normal split-settings pattern: base enables DEBUG, production unconditionally disables it. The base finding must survive but be downgraded to low/tentative so it stays below default CI gates. Development is a control case. base.py carries the throwaway key startproject generates, which DJS-003 claims for being guessable; DJS-002 must stay quiet on it rather than report the same line for the lesser reason. It is reported once for the base and production pair that share it. production.py also sets the transport and cookie flags, which Django ships off: those rules fire on a project that never mentions them, so this is the control proving that setting them is enough to stop it. CSRF_TRUSTED_ORIGINS is written the way Django reads it -- full scheme://host, no wildcard -- so DJS-014 must stay silent here even though the same fixture pair reports it next door. CORS is configured the way django-cors-headers intends -- allow-all off and the front-end named in CORS_ALLOWED_ORIGINS -- so DJS-015 must stay silent.",
   "expected": [
     {
       "rule_id": "DJS-001",
@@ -87,6 +87,14 @@
     },
     {
       "rule_id": "DJS-014",
+      "file": "config/settings/base.py"
+    },
+    {
+      "rule_id": "DJS-015",
+      "file": "config/settings/production.py"
+    },
+    {
+      "rule_id": "DJS-015",
       "file": "config/settings/base.py"
     }
   ]
