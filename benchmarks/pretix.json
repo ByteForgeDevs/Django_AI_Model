@@ -185,6 +185,86 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "GiftCardFilter.Meta.fields lists 'secret'. GiftCard.secret carries verbose_name 'Gift card code' -- it is the code a customer types in, and looking a card up by it is how a redemption endpoint works. Genuinely bearer credential material, since holding the code is enough to spend the balance, but the lookup is exact and listing gift cards needs organizer API credentials, so a caller cannot read a code they do not already have."
+    },
+    {
+      "fingerprint": "144c4de2eb7319b6",
+      "rule_id": "DJD-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/invoices.py",
+      "line": 143,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Invoice declares fifteen nullable string columns -- invoice_from_name and the rest of the two address blocks -- with no blank=True and no default. Migration 0100_auto_20181023_2300 added them with AddField(..., null=True) and no backfill, so every invoice written before October 2018 holds NULL and every one after holds a string or ''. The cost is visible in the model itself: address_invoice_to reads ((self.invoice_to_zipcode or '') + ' ' + (self.invoice_to_city or '') + ' ' + (state_name or '')).strip() and then filters the assembled parts with `if p and p.strip()`, which is the defensive read Django's documentation warns the pattern will force. True positive."
+    },
+    {
+      "fingerprint": "59ba44e82cbed522",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/base/models/seating.py",
+      "line": 178,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Seat.row_label and Seat.seat_label are nullable with no blank=True. The seating-plan importer at seating.py:125 sets row_label = None explicitly and only assigns when `if r.get('row_label')` is truthy, so NULL is the deliberate spelling of absent while a JSON plan supplying an empty string would store ''. The dual representation is real and the labels are display-only, so a query that misses one population changes a rendered label rather than a total. Accepted."
+    },
+    {
+      "fingerprint": "f8dd87a2e6bca5ad",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/plugins/banktransfer/models.py",
+      "line": 82,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "BankTransaction.currency is nullable with no blank=True. Migration 0009_banktransaction_currency adds it and runs a set_currency data migration that backfills from the related event, which is exactly the remediation this rule recommends -- but the rows whose event lookup fails keep NULL and the column stays nullable, so new writes can still produce one. The finding is correct and the residue is small. Accepted."
+    },
+    {
+      "fingerprint": "fb5c58545525900a",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/plugins/banktransfer/models.py",
+      "line": 45,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "BankImportJob.currency, the same nullable currency column as BankTransaction and added by the same series of migrations. An import job is a short-lived record of one upload, so the NULL population ages out rather than accumulating. Correct as stated, accepted."
+    },
+    {
+      "fingerprint": "6cb130f365bafa1c",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/plugins/banktransfer/models.py",
+      "line": 118,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "RefundExport.currency, third of the banktransfer plugin's nullable currency columns. Same judgement as the other two: the statement is true, the column has both spellings of empty, and the plugin reads it through code that already tolerates the absence. Accepted."
+    },
+    {
+      "fingerprint": "6c9bac354f9e2141",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/base/models/mail.py",
+      "line": 141,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "OutgoingMail.body_html is a nullable TextField with no blank=True. Here the two values arguably mean different things -- a message with no HTML alternative part at all, versus one carrying an empty part -- and that is a distinction MIME genuinely makes. This is the case the rule's limitation about deliberate absence describes. Accepted."
+    },
+    {
+      "fingerprint": "930da2a607c3b984",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/base/models/devices.py",
+      "line": 164,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Device.security_profile is nullable with no blank=True. Devices enrolled before profiles existed hold NULL, and pretix resolves the profile through a lookup that treats a missing entry as the permissive default, so both spellings already funnel to one branch. Correct as stated, accepted."
+    },
+    {
+      "fingerprint": "aea1ca3dae8b444d",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/base/models/items.py",
+      "line": 118,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "ItemCategory declares two nullable cross-selling columns with no blank=True. Both are recent additions to a long-lived model, so the NULL population is every category created before the feature shipped. Reading them through a truthiness check makes the two spellings equivalent in practice. Correct as stated, accepted."
     }
   ]
 }

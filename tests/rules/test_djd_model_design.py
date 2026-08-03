@@ -188,3 +188,157 @@ class FinalInvoice(OwnedInvoice):
 """
         found = run(make_project, "DJD-001", models_source=source)
         assert [f.location.line for f in found] == [5]
+
+
+def field(decl: str, meta: str = "") -> str:
+    return f"""
+from django.db import models
+
+class Note(models.Model):
+    {decl}
+{meta}
+"""
+
+
+class TestNullableStringField:
+    """DJD-002 -- two spellings of empty in one column."""
+
+    def test_reports_a_nullable_charfield(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJD-002",
+            models_source=field("title = models.CharField(max_length=50, null=True)"),
+        )
+        assert len(found) == 1
+        assert found[0].severity is Severity.LOW
+        assert "title" in found[0].message
+
+    def test_silent_when_blank_is_declared(self, make_project) -> None:
+        # 166 of the 191 nullable string fields on the benchmarks are this
+        # shape; reporting them would bury everything else the tool says.
+        found = run(
+            make_project,
+            "DJD-002",
+            models_source=field("title = models.CharField(max_length=50, null=True, blank=True)"),
+        )
+        assert found == []
+
+    def test_silent_when_not_nullable(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJD-002",
+            models_source=field('title = models.CharField(max_length=50, default="")'),
+        )
+        assert found == []
+
+    def test_silent_on_a_non_string_field(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJD-002",
+            models_source=field("count = models.IntegerField(null=True)"),
+        )
+        assert found == []
+
+    def test_silent_when_unique(self, make_project) -> None:
+        found = run(
+            make_project,
+            "DJD-002",
+            models_source=field("slug = models.SlugField(null=True, unique=True)"),
+        )
+        assert found == []
+
+    def test_silent_when_a_composite_unique_spans_it(self, make_project) -> None:
+        # pretix's Customer is unique on (organizer, email) and must hold many
+        # email-less customers per organizer, which is what null buys. Reading
+        # only field-level unique reported it.
+        source = """
+from django.db import models
+
+class Note(models.Model):
+    owner = models.CharField(max_length=50)
+    email = models.EmailField(null=True)
+
+    class Meta:
+        unique_together = (("owner", "email"),)
+"""
+        assert run(make_project, "DJD-002", models_source=source) == []
+
+    def test_silent_when_a_unique_constraint_spans_it(self, make_project) -> None:
+        source = """
+from django.db import models
+
+class Note(models.Model):
+    owner = models.CharField(max_length=50)
+    email = models.EmailField(null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["owner", "email"], name="u"),
+        ]
+"""
+        assert run(make_project, "DJD-002", models_source=source) == []
+
+    def test_reports_a_textfield(self, make_project) -> None:
+        found = run(
+            make_project, "DJD-002", models_source=field("body = models.TextField(null=True)")
+        )
+        assert len(found) == 1
+
+    def test_groups_a_model_into_one_finding(self, make_project) -> None:
+        # pretix's Invoice declares fifteen of these and they are one migration
+        # to fix, not fifteen findings to read.
+        source = """
+from django.db import models
+
+class Note(models.Model):
+    a = models.CharField(max_length=5, null=True)
+    b = models.CharField(max_length=5, null=True)
+    c = models.TextField(null=True)
+"""
+        found = run(make_project, "DJD-002", models_source=source)
+        assert len(found) == 1
+        assert "3 nullable string columns" in found[0].message
+        assert all(n in found[0].message for n in ("a", "b", "c"))
+
+    def test_counts_one_column_in_the_singular(self, make_project) -> None:
+        found = run(
+            make_project, "DJD-002", models_source=field("body = models.TextField(null=True)")
+        )
+        assert "1 nullable string column with" in found[0].message
+
+    def test_evidence_lists_every_line(self, make_project) -> None:
+        source = """
+from django.db import models
+
+class Note(models.Model):
+    a = models.CharField(max_length=5, null=True)
+    b = models.TextField(null=True)
+"""
+        found = run(make_project, "DJD-002", models_source=source)
+        content = found[0].evidence[0].content
+        assert "line 4" in content and "line 5" in content
+
+    def test_reports_a_file_field(self, make_project) -> None:
+        found = run(
+            make_project, "DJD-002", models_source=field("doc = models.FileField(null=True)")
+        )
+        assert len(found) == 1
+
+    def test_reports_the_abstract_base_not_each_child(self, make_project) -> None:
+        source = """
+from django.db import models
+
+class Owned(models.Model):
+    label = models.CharField(max_length=5, null=True)
+
+    class Meta:
+        abstract = True
+
+class Note(Owned):
+    pass
+
+class Memo(Owned):
+    pass
+"""
+        found = run(make_project, "DJD-002", models_source=source)
+        assert [f.location.line for f in found] == [4]

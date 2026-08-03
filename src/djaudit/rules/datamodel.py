@@ -216,3 +216,114 @@ class CascadingRetainedRecord(ModelRule):
                     ),
                 ),
             )
+
+
+STRING_FIELDS = frozenset(
+    {
+        "CharField",
+        "TextField",
+        "SlugField",
+        "EmailField",
+        "URLField",
+        "FilePathField",
+        "FileField",
+        "ImageField",
+    }
+)
+"""Field kinds whose Python value is a string, and whose empty value is `""`.
+
+`FileField` and `ImageField` are in the list because the column holds a path
+and the empty path is `""`, which is the same collision on a different name.
+"""
+
+
+def covered_by_uniqueness(model: ModelNode, name: str) -> bool:
+    """Whether a uniqueness rule spans this column.
+
+    Django documents `null=True` as the way to have more than one row with no
+    value, and that argument does not weaken when the uniqueness is composite:
+    pretix's `Customer` is unique on `(organizer, email)` and has to be able to
+    hold many customers of one organizer with no email at all. Reading only
+    field-level `unique=True` reported exactly that field, which is how this
+    check came to exist.
+    """
+    if any(name in group for group in model.unique_together):
+        return True
+    return any(c.is_unique and name in c.fields for c in model.constraints)
+
+
+@register
+class NullableStringField(ModelRule):
+    meta = RuleMeta(
+        id="DJD-002",
+        title="Nullable string column has two empty values",
+        family=Family.DJD,
+        severity=Severity.LOW,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "A nullable string column can be empty in two ways, `NULL` and `''`, and "
+            "Django's own documentation asks projects not to build one. The cost is "
+            "not paid at the declaration, it is paid at every read: `filter(x='')` "
+            "does not match the `NULL` rows and `filter(x=None)` does not match the "
+            "empty ones, so a query that looks exhaustive silently returns a subset. "
+            "Because `blank=True` is absent here the project's own validation layer "
+            "would reject the empty value, which means any `NULL` in the column "
+            "arrived from a migration backfill or a direct write rather than from "
+            "anything that states which spelling means empty."
+        ),
+        remediation=(
+            "Drop `null=True` and give the column `default=''`, then write a data "
+            "migration that rewrites the existing `NULL`s to `''` so the two "
+            "populations converge. If the column genuinely needs to distinguish "
+            "'not supplied' from 'supplied as empty', keep `null=True`, add "
+            "`blank=True` to say so, and make the distinction explicit at every "
+            "read rather than leaving it to whichever spelling a row happens to hold."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/models/fields/#null",
+            "https://docs.djangoproject.com/en/stable/ref/models/fields/#blank",
+        ),
+        limitations=(
+            "Fields carrying `blank=True` are not reported even though they hold the "
+            "same two values, because the project has then stated that empty is a "
+            "permitted input and the convention is at least written down somewhere.",
+            "A string column spanned by any uniqueness rule is exempt, whether that "
+            "is `unique=True` or a composite, since Django documents `null` "
+            "as the way to allow more than one row with no value and the alternative "
+            "would be a unique constraint that rejects the second empty string.",
+        ),
+    )
+
+    def inspect(self, ctx: ProjectContext, model: ModelNode) -> Iterator[Finding]:
+        bad = [
+            f
+            for f in model.fields.values()
+            if f.kind in STRING_FIELDS
+            and f.null
+            and not f.blank
+            and not f.unique
+            and not covered_by_uniqueness(model, f.name)
+        ]
+        if not bad:
+            return
+        # One finding per model, not per column: pretix's Invoice declares
+        # fifteen of these and they are one migration to fix, not fifteen.
+        names = ", ".join(f.name for f in bad)
+        yield self.finding(
+            message=(
+                f"{model.label} declares {len(bad)} nullable string "
+                f"{'column' if len(bad) == 1 else 'columns'} with no `blank=True`: {names}."
+            ),
+            location=self.at(ctx, model, bad[0].lineno),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.AST,
+                    content="\n".join(
+                        f"{f.name} = models.{f.kind}(..., null=True)  # line {f.lineno}"
+                        for f in bad
+                    ),
+                    source=ctx.rel(model.path),
+                ),
+            ),
+        )

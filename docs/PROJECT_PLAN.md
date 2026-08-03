@@ -2437,6 +2437,37 @@ their own. Substep 2.6.1 extends `RULE_ID_PATTERN` to admit `DJD`.
   copy is inherited. That is the highest-leverage place in a schema to get a
   field wrong, and it was reporting nothing.
 - **2.6.3** — `DJD-002` `CharField` with `null=True`, which creates two representations of empty.
+
+  **Done.** `NullableStringField`, plus `covered_by_uniqueness()`. The
+  interesting part of this substep is what it declines to report. Django's
+  documentation says plainly to avoid `null` on string fields, and taken
+  literally that fires **191 times** across the three benchmarks — 55 on
+  NetBox, 132 on pretix — which would bury every other finding the tool makes.
+  A rule nobody can read is not a rule.
+
+  The discriminator is `blank`. Where `blank=True` is present the project has
+  said that empty is a permitted input and which spelling it means; where it is
+  absent, the database accepts a `NULL` that the project's own validation layer
+  would reject, so those rows can only have come from a backfill or a direct
+  write. That cut leaves 25 columns, all on pretix, and grouping them per model
+  — one migration, one finding — gives **8 reports, 0 on NetBox, 0 on
+  healthchecks**.
+
+  pretix's `Invoice` is the true positive and proves the rule is about a real
+  cost rather than a style preference. Migration `0100` added all fifteen
+  address columns as `AddField(..., null=True)` with no backfill, so invoices
+  written before October 2018 hold `NULL` and later ones hold a string. The
+  model pays for it on every read: `address_invoice_to` is written as
+  `((self.invoice_to_zipcode or "") + " " + (self.invoice_to_city or "") + …)`
+  and then filters the assembled parts again. That is the defensive read the
+  documentation warns the pattern will force, sitting in the source.
+
+  `covered_by_uniqueness` came out of measuring, not designing. The rule
+  exempted field-level `unique=True` and duly reported `Customer.email`, which
+  is unique on `(organizer, email)` and needs `null` for exactly the documented
+  reason — many customers of one organizer with no email, where `''` would
+  collide on the second one. The exemption has to follow `unique_together` and
+  `UniqueConstraint` as well.
 - **2.6.4** — `DJD-003` `Meta.ordering` absent on a model that is paginated, producing unstable pagination.
 
 ### Step 2.7 — Benchmark and document
