@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from djaudit.models import Location
 
 if TYPE_CHECKING:
+    from djaudit.api.discovery import ApiSurface
     from djaudit.graph.nodes import ModelGraph
 
 MAX_SNIPPET_LENGTH = 240
@@ -98,6 +99,7 @@ class ProjectContext:
     _trees: dict[Path, ast.Module | None] = field(default_factory=dict, repr=False)
     _lines: dict[Path, list[str]] = field(default_factory=dict, repr=False)
     _model_graph: ModelGraph | None = field(default=None, repr=False)
+    _api_surface: ApiSurface | None = field(default=None, repr=False)
     _modules: dict[str, Path] | None = field(default=None, repr=False)
     parse_errors: dict[Path, str] = field(default_factory=dict, repr=False)
 
@@ -117,6 +119,20 @@ class ProjectContext:
 
             self._model_graph = build_model_graph(self)
         return self._model_graph
+
+    @property
+    def api_surface(self) -> ApiSurface:
+        """Serializers, views, routes and querysets, resolved once per run.
+
+        Lazy for the same reason the model graph is: a project with no DRF pays
+        for one pass over the class index and nothing more, and a run that asks
+        only about settings never triggers it at all.
+        """
+        if self._api_surface is None:
+            from djaudit.api import build_api_surface  # noqa: PLC0415  (cycle)
+
+            self._api_surface = build_api_surface(self, self.model_graph)
+        return self._api_surface
 
     def module_path(self, dotted: str) -> Path | None:
         """The file a dotted module name refers to, or ``None`` if it is not ours.

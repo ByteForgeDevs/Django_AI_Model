@@ -2010,6 +2010,30 @@ building it here pays for itself twice.
 ### Step 2.3 — Authorization rules
 
 - **2.3.1** — `DJA-001` `DEFAULT_PERMISSION_CLASSES` set to `AllowAny`, or absent (DRF's own default is `AllowAny`).
+  **Done.** The foundation first: `ProjectContext.api_surface`, cached the same
+  way the model graph is so seven rules share one pass over 1200 files rather
+  than each rebuilding it, and `rules/_api.py` carrying the loop every `DJA`
+  rule runs — resolve the surface, resolve the guards, hand each routed
+  endpoint to a rule that supplies only its judgement.
+
+  One policy decision was unavoidable there. A project with a permissive
+  `dev.py` and a locked-down `production.py` has two different answers to
+  "what is the default permission", so `production_settings` picks the module
+  that ships: an entrypoint named by `DJANGO_SETTINGS_MODULE` wins outright,
+  then the most production-like role, then the longer import chain, because a
+  module that overrides a base is a later word than the base. Every finding
+  names the module it read, so the reader never has to guess which file the
+  tool was looking at. It resolves `netbox.netbox.settings` and
+  `src.pretix.settings` on the two benchmarks.
+
+  `DJA-001` itself is reported against the settings module rather than per
+  endpoint — one line decides this for the whole project, and reporting it per
+  view would have produced 151 identical sentences on NetBox. It fires on an
+  explicit `AllowAny` and on the setting being absent, which is the same thing
+  because DRF's own default is `AllowAny`, and it counts how many routed views
+  actually rely on it: `HIGH` when any do, `LOW` when none do, since a
+  permissive default nothing inherits is a latent hazard rather than a live
+  one. Silent on both benchmarks, correctly — both set the default explicitly.
 - **2.3.2** — `DJA-002` view with no explicit permission classes under a permissive default.
 - **2.3.3** — `DJA-003` `AllowAny` on a view exposing write methods.
 - **2.3.4** — `DJA-004` **IDOR** — `get_queryset` on a user-owned model not scoped to `request.user`. The flagship rule of this phase.

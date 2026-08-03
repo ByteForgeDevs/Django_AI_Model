@@ -56,6 +56,15 @@ class ApiSurface:
     querysets: dict[str, QuerysetNode] = field(default_factory=dict)
     """What rows each view can reach, and whether the request narrows them."""
 
+    index: ClassIndex | None = None
+    """The class index this surface was built from.
+
+    Kept because permission resolution is deliberately not done here -- it
+    depends on which settings module a rule considers authoritative -- and a
+    rule that has the surface should not have to rebuild the index to finish
+    the job.
+    """
+
     by_model: dict[str, list[SerializerNode]] = field(default_factory=dict)
     """Serializers keyed by the model label they serialise. A model reachable
     through several serializers is exposed by the loosest of them, so a rule
@@ -178,6 +187,7 @@ def build_api_surface(
     for view in discover_function_views(ctx, index):
         surface.views[view.label] = view
 
+    surface.index = index
     surface.routes = build_route_graph(ctx, surface, index)
 
     # Only routed views: an unrouted one is a base class the project wrote for
