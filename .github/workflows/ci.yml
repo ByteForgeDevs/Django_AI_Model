@@ -177,6 +177,17 @@ jobs:
             --triage benchmarks/${{ matrix.target.name }}.json \
             --summary "$GITHUB_STEP_SUMMARY"
 
+      # A different question from precision, against a different oracle. The
+      # findings gate asks whether what we said is true; this asks whether we
+      # read the project at all. Its answer comes from the target's own
+      # migrations -- written by Django at runtime with every package
+      # installed -- so it is independent of anything djaudit believes.
+      - name: model graph coverage
+        run: |
+          uv run python scripts/graph_coverage.py target \
+            --name ${{ matrix.target.name }} \
+            --expect benchmarks/graph/${{ matrix.target.name }}.json
+
       - name: upload report
         if: always()
         uses: actions/upload-artifact@v4

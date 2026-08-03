@@ -2578,6 +2578,55 @@ their own. Substep 2.6.1 extends `RULE_ID_PATTERN` to admit `DJD`.
   routed views, five serializers, six models — because a fixture discovery
   never reached would satisfy every silence assertion and prove nothing.
 - **2.7.3** — Validate the model graph against NetBox, which has hundreds of models — a strong correctness test.
+
+  **Done.** The precision benchmarks ask whether what we report is true. This
+  asks a different question against a different oracle: did we read the project
+  at all? A graph that silently drops half a codebase reports nothing and scores
+  100% precision, so the two gates are not substitutes.
+
+  The oracle is the target's own migrations. Django wrote them by introspecting
+  live model classes with every third-party package installed and every
+  metaclass run, so they record what actually exists rather than a second
+  opinion from the same source. `scripts/graph_coverage.py` replays
+  `CreateModel`/`DeleteModel`/`RenameModel`/`AddField`/`RemoveField`/`RenameField`
+  with `ast` — never importing — and compares the result to the graph.
+
+  It reads app labels from `apps.py` itself rather than borrowing djaudit's
+  discovery, on the principle that an oracle sharing the code under test is not
+  an oracle. That paid for itself immediately: pretix first scored 13/113
+  because the oracle keyed models by directory name while pretix declares
+  `label = 'pretixbase'`. The graph had been right; the oracle was wrong.
+
+  | target | models | fields | relations resolved |
+  |---|---|---|---|
+  | healthchecks | 12/12 (100%) | 127/127 (100%) | 8/13 — the other 5 point at `User` |
+  | netbox | 144/145 (99.3%) | 1795/1856 (96.7%) | 847/886 — 38 `ContentType`, 1 `Permission` |
+  | pretix | 103/113 (91.2%) | 1071/1075 (99.6%) | 258/261 |
+
+  The gate's value is not the percentage but the requirement that **every single
+  gap be named**. NetBox's 61 missing fields are 55 from `MPTTModel`, 4 from
+  `AbstractBaseUser` and 2 from `TagBase` — bases that live in site-packages,
+  which the static tier deliberately does not read. Attributing them means
+  walking the MRO (`dcim.Region` → `netbox.NestedGroupModel` → `MPTTModel`),
+  and for models missing from the graph entirely, consulting the class index to
+  distinguish "inherits a base outside the project" from something worse.
+  pretix produced a third bucket that had to be invented for it:
+  `Event_SettingsStore` has no `class` statement anywhere in the tree, because
+  django-hierarkey generates it while the module imports. A static reader cannot
+  see it, and saying so is more useful than a round number. An unattributed miss
+  is `None`, and `None` fails the build.
+
+  Floors and ceilings rather than equality: models/fields/relations found may
+  rise and may not fall; unexplained counts may fall and may not rise. Coverage
+  improving should not be a red build.
+
+  19 tests, which found three bugs in the oracle before the oracle could accuse
+  the graph: positional `CreateModel('Order', [...])` silently lost its field
+  list, an MPTT test fixture had a base chain that never reached `models.Model`,
+  and a "we simply missed this model" test had a premise Django would not
+  accept. Two more cover relation accounting, where counting `to='self'` and
+  `GenericForeignKey` as unresolved had invented 19 NetBox failures out of
+  nothing.
 - **2.7.4** — Triage pass on both benchmarks.
 - **2.7.5** — `docs/rules/DJA.md`, plus an architecture note on the model graph.
 

@@ -1,0 +1,10 @@
+{
+  "target": "netbox",
+  "models_expected": 145,
+  "models_found": 144,
+  "fields_expected": 1856,
+  "fields_found": 1795,
+  "relations_resolved": 847,
+  "models_unexplained": 0,
+  "fields_unexplained": 0
+}

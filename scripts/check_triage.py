@@ -91,6 +91,9 @@ def check(path: Path, pinned: dict[str, tuple[str, str]]) -> list[str]:
 
 
 def main() -> int:
+    # Non-recursive on purpose: ``benchmarks/graph/`` holds model-graph
+    # coverage records, which are a different artifact with a different
+    # gate and no verdicts to review.
     files = sorted(BENCHMARKS.glob("*.json"))
     if not files:
         print("TRIAGE INCOMPLETE: no benchmark triage files found", file=sys.stderr)
