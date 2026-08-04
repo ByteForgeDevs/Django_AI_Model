@@ -2719,7 +2719,20 @@ their own. Substep 2.6.1 extends `RULE_ID_PATTERN` to admit `DJD`.
 **Goal.** The flagship capability. Roughly 10 `DJP` and 10 `DJI` rules built on
 local dataflow analysis.
 
-**Entry criteria.** Phase 2 merged. Model graph available.
+**Entry criteria.** Phase 2 merged, and the two things it leaves behind
+acknowledged before dataflow is built on top of them.
+
+The route graph walks every module's AST three times — router variables,
+`register()` calls, endpoints — and pretix already takes 16 s against a 10 s
+budget with no dataflow in it at all. So Substep 3.6.3 is a fix with a
+measurement attached, not a measurement that might find nothing, and it also
+has to build the CI gate that the risk register spent Phase 2 describing as
+though it existed.
+
+Substep 1.10.2 (`django-configurations`) is still deferred. A class-configured
+project now fails loudly rather than scoring as clean, which is the floor
+rather than the fix: every `DJS` rule is still skipped on such a project, and
+`DJP` and `DJI` will be too.
 
 **Exit criteria.** N+1 detection demonstrated with a measured false-positive
 rate; injection rules triaged on both benchmarks.
@@ -2791,6 +2804,14 @@ We therefore build the dataflow foundation first, and we default this family to
   `build_route_graph`, which walks each module's full AST three times — router
   variables, `register()` calls, endpoints — so the first move is one walk that
   collects all three, not a faster dataflow pass.
+
+  This substep also builds the CI gate itself, which does not exist: risk 8
+  described a 10 s budget "enforced in CI" for the whole of Phase 2 while no
+  workflow step timed anything. The budget applies to the slowest target, not
+  to NetBox — a ceiling that the worst case is allowed to exceed is not a
+  ceiling. A run that exceeds it fails the build; a run that beats it by a wide
+  margin should tighten it, since a budget nothing ever approaches stops
+  measuring anything.
 - **3.6.4** — Triage pass; publish the N+1 false-positive rate honestly, including in the README.
 - **3.6.5** — `docs/rules/DJP.md` and `docs/rules/DJI.md`, plus a dataflow design note stating the analysis limits explicitly.
 
@@ -3003,9 +3024,11 @@ conversation.
 | 5 | Django 6.0 vs 5.2 behavioural drift | Medium | Medium | Version-aware rule gating from the detected version |
 | 6 | Live tier executes hostile code | Low | Critical | Opt-in, sandboxed, timed out, no inherited secrets, explicit consent message |
 | 7 | Model graph wrong on unusual patterns | Medium | Medium | Checked against each target's own migrations by `scripts/graph_coverage.py`; every gap must be attributed or the build fails |
-| 8 | Analysis too slow on large repositories | Medium | Medium | 10 s budget on NetBox enforced in CI from Phase 3. Measured at the end of Phase 2: NetBox 9 s, pretix 16 s — see 3.6.3 |
+| 8 | Analysis too slow on large repositories | Medium | Medium | **Unmitigated: nothing in CI times a run.** Measured by hand at the end of Phase 2 — Healthchecks 2 s, NetBox 9 s, pretix 16 s against a 10 s budget, so pretix is over before any dataflow exists. Substep 3.6.3 owns both the single-pass fix and building the gate, with the budget applied to the slowest target rather than to NetBox alone |
 | 9 | LLM layer erodes determinism | Medium | High | Model may never create or suppress a finding; all output labelled |
 | 10 | Benchmark repositories drift | Low | Low | Pinned by commit SHA; updated deliberately |
+| 11 | A project djaudit cannot read scores as a clean one | Medium | High | Discovery emits a blocking diagnostic rather than returning quietly, and `run`, `eval` and `benchmark` all refuse to exit 0 on one. Pinned by tests using a class-configured project, which is the shape we detect and cannot yet parse |
+| 12 | A gate passes because what it checks is absent | High | High | Three found and fixed in Phase 2 alone — a doc generator hardcoded to one family, a triage citation nothing verified, a plan checker that only read the plan. Every new gate must be shown failing on the defect it exists to catch, in the commit that adds it |
 
 ---
 
