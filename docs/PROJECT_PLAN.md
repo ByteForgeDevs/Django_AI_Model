@@ -3179,7 +3179,41 @@ We therefore build the dataflow foundation first, and we default this family to
   is no faster parser in the standard library**, so this is close to the floor
   for whole-project dataflow in CPython. The budget was raised rather than the
   measurement massaged; see 3.6.3.
-- **3.2.2** — `DJP-002` reverse relation or many-to-many accessed in a loop without `prefetch_related`.
+- **3.2.2** — `DJP-002` reverse relation or many-to-many accessed in a loop
+  without `prefetch_related`. **Done.** The rule reuses Phase 2's
+  `RelationEdge.accessor` and `ModelGraph.incoming`, so a reverse accessor is
+  matched by the name Django actually installs rather than by guessing
+  `_set`. Two things had to be kept apart from DJP-001. `select_related`
+  cannot substitute — *including* its bare no-argument form, which sets the
+  ALL_FORWARD marker and would otherwise silence every many-to-many — so
+  coverage is tested by a new `ChainSpec.prefetches()` that deliberately does
+  not honour that marker. And the attribute is not the query: `book.tags`
+  builds a manager for free, and only the call after it talks to the database.
+
+  Two whole classes of finding were removed after measurement, both because
+  the remediation would have been false. **Writes**: `groups.add(g)` and
+  `invoices.all().update(...)` do cost one query per row, but no cache can
+  serve a write and a write invalidates the cache it would have filled.
+  **Cloning reads**: `values_list`, `filter`, `first` and `iterator` clone the
+  queryset and discard `_result_cache`, so prefetching adds a query rather
+  than removing one. That second one was found only by running Django:
+  `scripts/prefetch_cache_probe.py` counts queries with and without the
+  prefetch and shows the cloning forms going from 4 to **5**, strictly worse.
+  It is now a CI gate, because the split is an assumption about another
+  project's internals that our own tests cannot observe. The first attempt at
+  this guard was a denylist of write methods; it was wrong, because it named
+  the writes and missed `values_list`, which turned out to be the single most
+  common form in the corpora. The allowlist replaced it.
+
+  Both exclusions are per call, not per loop, so a genuine finding standing
+  next to a write is still reported. *Measured:* 16 raw findings fell to
+  **9** — healthchecks 0, NetBox 2, pretix 7 — and all 9 are true positives
+  against source, **0% false-positive rate**. The 7 removed were exactly the
+  writes and the cloning reads. Seven of the nine are in data migrations and
+  two are in tests; the one production path is pretix's order-list exporter,
+  which runs a query per multiple-choice question on every export. Seven
+  guards, all shown load-bearing by defect injection (2/6/2/1/1/5/2 test
+  failures). Empty-graph control reports nothing. 42 rule tests.
 - **3.2.3** — `DJP-003` relation traversal inside a `SerializerMethodField` or serializer property, where the queryset is defined in the view — the most common real-world N+1 and the one existing tools miss.
 - **3.2.4** — `DJP-004` query executed inside a loop body (`.get`, `.filter().first()`, `.count`, `.exists`).
 - **3.2.5** — Prefetch-awareness refinement: honour `Prefetch(...)` objects, nested lookups, and `to_attr`. *Done when:* the false-positive rate on NetBox is measured and documented.
@@ -3576,9 +3610,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **46 rules are
+document specifies, and most of it is still only specified: **47 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first of Phase 3's.
+2, plus the first two of Phase 3's.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

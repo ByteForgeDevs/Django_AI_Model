@@ -127,6 +127,22 @@ class ChainSpec:
                 return True
         return False
 
+    def prefetches(self, path: str) -> bool:
+        """Whether ``path`` -- which ends at many rows -- is already prefetched.
+
+        Deliberately not :meth:`covers`. A bare ``select_related()`` fetches
+        every forward single-valued relation and so covers any path made of
+        them, but it cannot touch a many-to-many or a reverse foreign key:
+        those are more rows than the row being selected, and Django will not
+        join them in. Only ``prefetch_related`` reaches them, and unlike
+        ``select_related`` its no-argument form *clears* the list rather than
+        asking for everything, so there is no all-paths marker to honour here.
+        """
+        for fetched in self.prefetch_related:
+            if fetched == path or fetched.startswith(f"{path}__"):
+                return True
+        return False
+
     def deferred_access(self, field_name: str) -> bool:
         """Whether reading ``field_name`` on a row costs an extra query.
 

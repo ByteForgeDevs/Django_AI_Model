@@ -355,6 +355,26 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-03",
       "note": "django-debug-toolbar in base_requirements.txt:15, pinned through to requirements.txt:4. NetBox handles this about as well as it can be handled with a single distribution: settings.py:472 lists debug_toolbar in INSTALLED_APPS and settings.py:511 removes it again under `if not DEBUG and 'collectstatic' not in sys.argv`, so the app is not installed on a normal production run. That is precisely why DJS-024 stays silent here and why this rule speaks instead: the package is still on the machine, and what keeps the toolbar off is the value of DEBUG rather than the absence of the code. NetBox is a self-hosted product whose operators are told to enable DEBUG when troubleshooting -- shipping the toolbar so that it works when they do is a deliberate product decision, not an oversight, and splitting the image in two to avoid it would cost their users more than it saves. Accepted rather than false positive because the statement is true and the exposure is real: an operator who leaves DEBUG on after an incident gets a SQL panel, and NetBox's own threat model would rather they knew that. The rule is low severity for exactly this reason -- it is a fact about the deployment, not an accusation."
+    },
+    {
+      "fingerprint": "69a7db935ca4b526",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_custom_validation.py",
+      "line": 143,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "`for provider in Provider.objects.all():` at line 142 with `len(provider.asns.all())` at 143. `asns` is a forward ManyToManyField on circuits.Provider, so the far side is many rows and no join can flatten it -- `select_related` is not an option here, only `prefetch_related('asns')`. The queryset is a bare `.all()` with no prefetch, so this is one extra SELECT per provider. Test code, so the runtime cost is a slow suite rather than a slow request, but the detection is exactly right and the fix is one chained call."
+    },
+    {
+      "fingerprint": "39500fbbb00f2aa5",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_custom_validation.py",
+      "line": 155,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "`for provider in Provider.objects.all():` at line 154 with `provider.asns.exists()` at 155. `.exists()` is genuinely fixed by prefetching and this is worth stating because it is not obvious: the related manager's `get_queryset()` returns the entry in `_prefetched_objects_cache` when one exists, and `QuerySet.exists()` short-circuits to `bool(self._result_cache)` whenever the cache is populated. So `prefetch_related('asns')` removes this query rather than merely adding one. Without it, one SELECT per provider."
     }
   ]
 }

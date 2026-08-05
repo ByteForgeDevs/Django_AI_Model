@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJP` — performance and ORM efficiency
 
-1 rules on the queries a Django project makes without meaning to. The ORM
+2 rules on the queries a Django project makes without meaning to. The ORM
 makes the expensive thing and the cheap thing look identical: `book.author.name`
 is an attribute access whether the author arrived with the book or costs its own
 round trip, and the source gives no indication which. Every rule here reports a
@@ -50,6 +50,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | Rule | Title | Severity | Confidence |
 |---|---|---|---|
 | [`DJP-001`](#djp-001--forward-relation-followed-in-a-loop-without-select_related) | Forward relation followed in a loop without select_related | medium | firm |
+| [`DJP-002`](#djp-002--reverse-or-many-to-many-relation-evaluated-in-a-loop-without-prefetch_related) | Reverse or many-to-many relation evaluated in a loop without prefetch_related | medium | firm |
 
 ---
 
@@ -70,4 +71,27 @@ $ djaudit run . --min-severity info --min-confidence tentative
 **References**
 
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#select-related>
+- <https://docs.djangoproject.com/en/stable/topics/db/optimization/#retrieve-everything-at-once-if-you-know-you-will-need-it>
+
+---
+
+### DJP-002 — Reverse or many-to-many relation evaluated in a loop without prefetch_related
+
+**Severity** medium · **Confidence** firm · **Tier** static
+
+**What it means.** Evaluating a related manager inside a loop runs one query per row, and unlike a foreign key this one cannot be fixed with a join: the far side is many rows, so there is no single row to join it into. The cost is also easier to miss than DJP-001's, because the expensive part is not the attribute but the `.all()` after it, and that reads like ordinary collection access rather than like a database call.
+
+**How to fix it.** Add `prefetch_related` naming the same path the loop walks: `Author.objects.prefetch_related('book_set')`. Django issues one extra query for the whole set rather than one per row, and joins them in Python. Note that `select_related` cannot substitute here, including its bare no-argument form -- it only follows relations that are a single row. If the related rows need filtering or ordering, pass a `Prefetch` object rather than dropping back to per-row queries.
+
+**What this rule cannot see.**
+
+- A queryset built in one function and iterated in another is not followed, so a loop over a parameter is not reported here.
+- A manager stored in a variable and evaluated later is not tracked: the rule wants the call to be written on the attribute chain it can read.
+- Only `all`, `count` and `exists` are reported, because only those read back out of the prefetch cache. Every other manager method -- `values_list`, `filter`, `first`, `iterator` -- clones the queryset and discards the cache, so prefetching would add a query rather than remove one. Those loops are still one query per row and still want fixing; the fix is a restructured query or a `Prefetch` object, not this one.
+- A write through a related manager is not reported. `groups.add(g)` and `invoices.all().update(...)` cost one query per row, but no cache can serve a write and a write invalidates the cache it would have filled. Those belong to a bulk-write rule.
+- A reverse one-to-one is not reported here. It returns a single row and `select_related` follows it, which makes it DJP-001's question -- and DJP-001 currently reads only the forward side, so that case is a known gap in the family rather than a silence this rule chose.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#prefetch-related>
 - <https://docs.djangoproject.com/en/stable/topics/db/optimization/#retrieve-everything-at-once-if-you-know-you-will-need-it>

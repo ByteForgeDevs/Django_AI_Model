@@ -274,3 +274,218 @@ class UnfetchedForwardRelation(LoopRule):
                 "loop_line": str(site.lineno),
             },
         )
+
+
+MULTI_VALUED_REVERSE = frozenset({"ForeignKey", "ManyToManyField"})
+"""Relation kinds whose *reverse* side is many rows, and so needs prefetching.
+
+A reverse `OneToOneField` is deliberately absent: it yields a single instance,
+`select_related` follows it, and it belongs to DJP-001's question rather than
+this one. `GenericRelation` is absent too -- its reverse side is the
+`GenericForeignKey`, which is one row and not addressable by a lookup path.
+"""
+
+
+@dataclass(frozen=True)
+class ManyHop:
+    """The step at which a path stops being one row and becomes many."""
+
+    accessor: str
+    edge: RelationEdge
+    reverse: bool
+
+    def describe(self) -> str:
+        side = "reverse" if self.reverse else "forward"
+        return f"{self.edge.source}.{self.edge.field_name} ({self.edge.kind}, {side})"
+
+
+def many_hop(graph: ModelGraph, model: str, name: str) -> ManyHop | None:
+    """The multi-valued relation ``name`` reaches from ``model``, if any.
+
+    Two directions answer to one attribute name. Forward is a field the model
+    declares; reverse is the accessor Django adds to the *target* of somebody
+    else's relation, which is why it is found through the incoming index rather
+    than by looking at this model at all.
+    """
+    forward = relations_of(graph, model).get(name)
+    if forward is not None and forward.is_multi_valued:
+        return ManyHop(name, forward, reverse=False)
+    # The index holds only edges that gave the target an accessor, so a
+    # `related_name` ending in `+` and a symmetrical self-referential
+    # many-to-many are already absent: Django adds no attribute for either, and
+    # naming one in `prefetch_related` would be a crash rather than a fix.
+    for edge in graph.incoming.get(model, ()):
+        if edge.accessor == name and edge.kind in MULTI_VALUED_REVERSE:
+            return ManyHop(name, edge, reverse=True)
+    return None
+
+
+CACHE_READS = frozenset({"all", "count", "exists"})
+"""The only manager methods a `prefetch_related` can serve.
+
+Measured, not reasoned: `scripts/prefetch_cache_probe.py` runs each expression
+against a real SQLite database with and without the prefetch and counts
+queries. `.all()`, `len(.all())`, `.count()` and `.exists()` drop from 4 to 2.
+`.values_list()`, `.filter()`, `.first()`, `.order_by()[:1]` and `.iterator()`
+go from 4 to *5* -- every one of them clones the queryset, which discards
+`_result_cache`, so the prefetch is paid for and then thrown away.
+
+An allowlist rather than a denylist because the denylist was tried first and
+was wrong: it named the writes and missed `values_list`, which is the single
+most common form of this mistake in the corpora.
+"""
+
+
+def evaluations(site: LoopSite) -> set[int]:
+    """Ids of attribute nodes whose rows a prefetch would actually serve.
+
+    Three things have to be true before `prefetch_related` is the fix, and
+    each one silently excludes findings the rule would otherwise report.
+
+    A related manager is not a query. `book.tags` builds a manager and costs
+    nothing; only the call after it talks to the database. Reporting the bare
+    attribute would flag every place a manager is merely named.
+
+    The call has to read rows. `contact.groups.add(g)` issues an INSERT and
+    `event.invoices.all().update(...)` issues one UPDATE that never brings a
+    row into Python. There is no read for a cache to serve, and a write
+    invalidates the cache it would have filled.
+
+    And the read has to go through the cache. Anything that clones the
+    queryset -- `values_list`, `filter`, `first`, `iterator` -- starts from an
+    empty result cache and queries again, so prefetching adds a query instead
+    of removing one. Those loops are still one query per row and still want
+    fixing; they want a restructured query or `Prefetch(queryset=...)`, which
+    is a different finding with a different fix.
+    """
+    read: list[ast.Attribute] = []
+    discarded: set[int] = set()
+    for node in _per_iteration(site):
+        for child in ast.walk(node):
+            if not (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)):
+                continue
+            func = child.func
+            if func.attr in CACHE_READS:
+                read.append(func)
+                continue
+            # `.all().values_list()` -- the cache is filled and then dropped,
+            # so the inner read is not served either.
+            inner = func.value
+            if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute):
+                discarded.add(id(inner.func))
+    return {id(func) for func in read if id(func) not in discarded}
+
+
+@register
+class UnprefetchedMultiValuedRelation(LoopRule):
+    """DJP-002 -- many rows fetched one row at a time."""
+
+    meta = RuleMeta(
+        id="DJP-002",
+        title="Reverse or many-to-many relation evaluated in a loop without prefetch_related",
+        family=Family.DJP,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "Evaluating a related manager inside a loop runs one query per row, and "
+            "unlike a foreign key this one cannot be fixed with a join: the far side "
+            "is many rows, so there is no single row to join it into. The cost is "
+            "also easier to miss than DJP-001's, because the expensive part is not "
+            "the attribute but the `.all()` after it, and that reads like ordinary "
+            "collection access rather than like a database call."
+        ),
+        remediation=(
+            "Add `prefetch_related` naming the same path the loop walks: "
+            "`Author.objects.prefetch_related('book_set')`. Django issues one extra "
+            "query for the whole set rather than one per row, and joins them in "
+            "Python. Note that `select_related` cannot substitute here, including "
+            "its bare no-argument form -- it only follows relations that are a "
+            "single row. If the related rows need filtering or ordering, pass a "
+            "`Prefetch` object rather than dropping back to per-row queries."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/models/querysets/#prefetch-related",
+            "https://docs.djangoproject.com/en/stable/topics/db/optimization/#retrieve-everything-at-once-if-you-know-you-will-need-it",
+        ),
+        limitations=(
+            "A queryset built in one function and iterated in another is not "
+            "followed, so a loop over a parameter is not reported here.",
+            "A manager stored in a variable and evaluated later is not tracked: the "
+            "rule wants the call to be written on the attribute chain it can read.",
+            "Only `all`, `count` and `exists` are reported, because only those read "
+            "back out of the prefetch cache. Every other manager method -- "
+            "`values_list`, `filter`, `first`, `iterator` -- clones the queryset and "
+            "discards the cache, so prefetching would add a query rather than remove "
+            "one. Those loops are still one query per row and still want fixing; the "
+            "fix is a restructured query or a `Prefetch` object, not this one.",
+            "A write through a related manager is not reported. `groups.add(g)` and "
+            "`invoices.all().update(...)` cost one query per row, but no cache can "
+            "serve a write and a write invalidates the cache it would have filled. "
+            "Those belong to a bulk-write rule.",
+            "A reverse one-to-one is not reported here. It returns a single row and "
+            "`select_related` follows it, which makes it DJP-001's question -- and "
+            "DJP-001 currently reads only the forward side, so that case is a known "
+            "gap in the family rather than a silence this rule chose.",
+        ),
+    )
+
+    def inspect(self, ctx: ProjectContext, rows: Rows) -> Iterator[Finding]:
+        graph = ctx.model_graph
+        called = evaluations(rows.site)
+        reported: set[str] = set()
+        for node, parts in accesses(rows.site, rows.name):
+            if id(node) not in called:
+                continue
+            walk = traversal(graph, rows.model, parts)
+            reached = walk.edges[-1].target if walk.edges else rows.model
+            rest = parts[len(walk.steps) :]
+            if reached is None or not rest:
+                continue
+            hop = many_hop(graph, reached, rest[0])
+            if hop is None:
+                continue
+            path = "__".join([*walk.steps, hop.accessor])
+            if path in reported or rows.spec.prefetches(path):
+                continue
+            reported.add(path)
+            yield self.report_many(ctx, rows, node, walk, hop)
+
+    def report_many(
+        self,
+        ctx: ProjectContext,
+        rows: Rows,
+        node: ast.Attribute,
+        walk: Traversal,
+        hop: ManyHop,
+    ) -> Finding:
+        site, spec, model = rows.site, rows.spec, rows.model
+        path = "__".join([*walk.steps, hop.accessor])
+        written = ", ".join(sorted(spec.prefetch_related)) or "nothing"
+        return self.finding(
+            location=ctx.location(site.path, node),
+            message=(
+                f"`{ast.unparse(node)}` reaches many rows through `{path}` on each "
+                f"row of a `{model}` queryset that did not prefetch it, costing one "
+                f"query per row."
+            ),
+            confidence=None if spec.confident else Confidence.TENTATIVE,
+            severity=Severity.HIGH if site.loop.nested else None,
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.AST,
+                    content=(
+                        f"loop at line {site.lineno} over {model}\n"
+                        f"prefetch_related: {written}\n"
+                        f"relation reached: {hop.describe()}"
+                    ),
+                    source=f"{ctx.rel(site.path)}:{site.lineno}",
+                ),
+            ),
+            properties={
+                "model": model,
+                "path": path,
+                "depth": str(site.loop.depth),
+                "loop_line": str(site.lineno),
+            },
+        )

@@ -455,6 +455,76 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "ALLOWED_HOSTS = ['*'] at settings.py:255 is unconditional. pretix needs to answer on organizer- and event-specific custom domains, so it cannot enumerate hosts ahead of time, and it resolves them itself in pretix.multidomain.middlewares.MultiDomainMiddleware. But that middleware does not reject an unrecognised host: on KnownDomain.DoesNotExist it sets mode='system' (middlewares.py:101-104) and serves the main site, so Django's host validation is disabled and nothing replaces it. deployment/docker/nginx.conf:89 forwards `Host $http_host` verbatim, so the header arrives unfiltered. That leaves the documented consequence intact -- absolute URLs, including password-reset links, are built from an attacker-supplied Host, and cache keys derived from it can be poisoned. Genuinely mitigable by pinning SITE_URL's host plus the KnownDomain set, so this is a real finding rather than an accepted trade-off."
+    },
+    {
+      "fingerprint": "adcfd6134d1938ae",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/exporters/orderlist.py",
+      "line": 678,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "The best finding in this set and the only one on a production path. Line 673 does `questions = list(Question.objects.filter(event__in=self.events))` -- no prefetch -- and line 675 loops it, reaching `q.options.all()` at 678 and again at 682. `options` is the reverse of the QuestionOption.question ForeignKey, so it is many rows per question and only `prefetch_related('options')` can fix it. One SELECT per multiple-choice question on every order-list export. Reported once although the accessor is reached twice in the two branches, which is the per-path dedupe working."
+    },
+    {
+      "fingerprint": "7cb4d2ff69c1b1f2",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0076_orderfee_squashed_0082_invoiceaddress_internal_reference.py",
+      "line": 38,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "`for i in Invoice.objects.iterator():` at 37, `for j, l in enumerate(i.lines.all()):` at 38. Reverse of InvoiceLine.invoice, so many rows per invoice and one SELECT per invoice. The `.iterator()` deserves a note: before Django 4.1 it silently ignored `prefetch_related`, which would have made the remediation wrong, but the support matrix here is 5.2 LTS and 6.0, where `prefetch_related` works with `iterator(chunk_size=...)`. True positive, and the fix needs that chunk_size argument."
+    },
+    {
+      "fingerprint": "d282df702c50c8af",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0077_auto_20170829_1126.py",
+      "line": 12,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "`for i in Invoice.objects.iterator():` at 11, `for j, l in enumerate(i.lines.all()):` at 12 -- the unsquashed original of the same `assign_positions` data migration triaged at 0076_orderfee_squashed:38. Reverse FK from InvoiceLine.invoice, many rows per invoice, one SELECT per invoice, fixable only by `prefetch_related('lines')`. Both copies are reported because both files really are in the tree and really would run; deduplicating across a squash is a question for the reporter, not for this rule."
+    },
+    {
+      "fingerprint": "535140be8559069e",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0077_auto_20171124_1629.py",
+      "line": 27,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "`for e in Event.objects.all():` at 19 reaching `e.subevents.all()` at 27, the reverse of SubEvent.event. One SELECT of subevents per event, and this loop is doing real per-row work underneath it, so the count is not theoretical. The sibling `e.checkin_lists.create(...)` at 29 and 33 is deliberately NOT reported: `.create()` is an INSERT that prefetching cannot remove and would only invalidate, so it belongs to a bulk-write rule rather than to this one."
+    },
+    {
+      "fingerprint": "ff2b36551121674d",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0077_auto_20171124_1629_squashed_0088_auto_20180328_1217.py",
+      "line": 29,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "The squashed copy of `create_checkin_lists`, identical in substance to 0077_auto_20171124_1629.py:27: `for e in Event.objects.all():` at 21 reaching `e.subevents.all()` at 29. Reverse of SubEvent.event, many rows per event, one SELECT per event, `prefetch_related('subevents')` is the only fix because there is no single row to join. Counted separately from the unsquashed file on purpose -- both are real files that Django would execute."
+    },
+    {
+      "fingerprint": "9a32538eb79c4c02",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0077_auto_20171124_1629_squashed_0088_auto_20180328_1217.py",
+      "line": 49,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "A second, distinct loop in the same squashed migration: `for q in Question.objects.all():` at 48 reaching `q.options.all()` at 49, the reverse of QuestionOption.question. One SELECT per question. Distinct from the finding at line 29 in both loop and relation, so two findings in one file is correct here rather than a dedupe failure -- the per-path suppression is scoped to a single loop, which is exactly the granularity at which a prefetch is added."
+    },
+    {
+      "fingerprint": "a5569b8fffa06f65",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0084_questionoption_position.py",
+      "line": 11,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "`for q in Question.objects.all():` at 10, `for i, option in enumerate(q.options.all()):` at 11, the standalone version of the `set_position` migration also found in the 0077 squash at line 49. Reverse of QuestionOption.question: many rows per question, one SELECT per question, and `option.save()` inside makes the loop expensive already. `prefetch_related('options')` removes the read half of that cost."
     }
   ]
 }

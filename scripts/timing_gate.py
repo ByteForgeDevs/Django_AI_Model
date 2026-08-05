@@ -44,18 +44,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from djaudit import engine
 
-TIGHTEN_BELOW = 1 / 3
-"""Warn when the best run uses less than a third of its budget.
+TIGHTEN_BELOW = 0.25
+"""Warn when the best run uses less than a quarter of its budget.
 
-A budget nothing ever approaches has stopped measuring anything. This was half
-until budgets became per-target, which made the threshold bind hardest on the
-fastest target -- exactly where it should bind least. A run's fixed costs do
-not shrink with the project: process start, imports and discovery are the same
-2s whether the tree that follows takes 0.3s or 11s, so noise is a far larger
-*fraction* of a 2s target's time than of a 13s one, and a fast target honestly
-needs proportionally more slack rather than less. A third still catches the
-case the warning exists for, which is a budget left behind by a step change in
-speed.
+A budget nothing ever approaches has stopped measuring anything, and this was
+half until Step 3.2 measured what it is actually competing with. A budget has
+to be survivable on the slowest machine that runs it -- a developer's loaded
+laptop -- while staleness can only fairly be judged against the fastest, which
+is CI. Those two pull apart by whatever the machine ratio happens to be, and
+here it is close to 2x: netbox takes 7.1s on a GitHub runner and 13.2s on the
+box this was written on. A threshold of a half or a third cannot straddle that
+gap without either failing honest local runs or warning on every green CI run,
+and a warning that fires every time teaches people to stop reading warnings. A
+quarter still catches what this exists for, which is a budget left four times
+behind by a step change in speed.
 """
 
 
