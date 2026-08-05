@@ -72,6 +72,10 @@ if TYPE_CHECKING:
 #: Attributes Django itself puts on every model class.
 IMPLICIT_MANAGERS = frozenset({"objects", "_default_manager", "_base_manager"})
 
+#: Synthetic step names for subscripting, which has no method name of its own.
+SLICE = "__slice__"
+INDEX = "__index__"
+
 #: Methods that return a queryset, so the chain continues through them.
 CHAINING = frozenset(
     {
@@ -100,6 +104,7 @@ CHAINING = frozenset(
         "select_for_update",
         "raw",
         "get_queryset",
+        SLICE,
     }
 )
 
@@ -122,6 +127,7 @@ TERMINAL = frozenset(
         "update",
         "bulk_create",
         "bulk_update",
+        INDEX,
     }
 )
 
@@ -158,8 +164,8 @@ class QuerysetValue:
     """The attribute the query started at -- ``objects`` unless declared
     otherwise."""
 
-    chain: tuple[str, ...] = ()
-    """Methods applied after the manager, in the order written."""
+    chain: tuple[Step, ...] = ()
+    """Steps applied after the manager, in the order written."""
 
     via: tuple[Binding, ...] = ()
     """Definitions walked through to get here, nearest first. Empty when the
@@ -173,7 +179,12 @@ class QuerysetValue:
     @property
     def terminal(self) -> bool:
         """The chain ends in something that is no longer a queryset."""
-        return bool(self.chain) and self.chain[-1] in TERMINAL
+        return bool(self.chain) and self.chain[-1].name in TERMINAL
+
+    @property
+    def methods(self) -> tuple[str, ...]:
+        """Just the method names, in the order written."""
+        return tuple(step.name for step in self.chain)
 
     @property
     def indirect(self) -> bool:
@@ -181,18 +192,60 @@ class QuerysetValue:
         return bool(self.via)
 
 
-def _root(node: ast.expr) -> tuple[ast.expr, list[str]]:
-    """Peel an attribute/call chain down to its root, collecting attributes."""
-    names: list[str] = []
+@dataclass(frozen=True, slots=True)
+class Step:
+    """One method in a queryset chain, with the call that applied it.
+
+    The call node is what makes 3.1.4 possible: ``select_related`` alone is not
+    a fact, ``select_related("author")`` is. A step reached by following an
+    assignment keeps the call from where it was *written*, which is the only
+    place the arguments exist.
+    """
+
+    name: str
+    call: ast.Call | None = None
+    """``None`` when the attribute was never called -- ``Book.objects`` has a
+    manager step with no call, and so does a chain that ends in an attribute."""
+
+    @property
+    def args(self) -> tuple[ast.expr, ...]:
+        return tuple(self.call.args) if self.call is not None else ()
+
+    @property
+    def keywords(self) -> tuple[ast.keyword, ...]:
+        return tuple(self.call.keywords) if self.call is not None else ()
+
+    @property
+    def called(self) -> bool:
+        return self.call is not None
+
+
+def _root(node: ast.expr) -> tuple[ast.expr, list[Step]]:
+    """Peel an attribute/call chain down to its root, collecting steps.
+
+    ``Book.objects.filter(x=1)`` gives root ``Book`` and steps ``objects`` (no
+    call) then ``filter`` (the call). The call belongs to the attribute it was
+    applied to, which is one level *out* from the attribute node itself.
+    """
+    steps: list[Step] = []
     current = node
+    pending: ast.Call | None = None
     while True:
         if isinstance(current, ast.Call):
+            pending = current
             current = current.func
         elif isinstance(current, ast.Attribute):
-            names.append(current.attr)
+            steps.append(Step(current.attr, pending))
+            pending = None
+            current = current.value
+        elif isinstance(current, ast.Subscript):
+            # `qs[:10]` is a queryset operation like any other, and dropping it
+            # here would make every sliced queryset invisible to tracking.
+            steps.append(Step(SLICE if isinstance(current.slice, ast.Slice) else INDEX))
+            pending = None
             current = current.value
         else:
-            return current, list(reversed(names))
+            return current, list(reversed(steps))
 
 
 #: Roots that mean "the object this method is on", whose model is not visible
@@ -258,7 +311,7 @@ class QuerysetTracker:
             # `self.update()` on a form and `self.count()` on anything at all,
             # which on the benchmark targets is thousands of expressions that
             # have no rows behind them.
-            if attrs and attrs[0] in QUERYSET_PROVIDERS:
+            if attrs and attrs[0].name in QUERYSET_PROVIDERS:
                 return QuerysetValue(node, Origin.SELF, chain=tuple(attrs))
             return None
 
@@ -266,7 +319,7 @@ class QuerysetTracker:
             return self._from_name(node, root, attrs)
         return None
 
-    def _from_name(self, node: ast.expr, root: ast.Name, attrs: list[str]) -> QuerysetValue | None:
+    def _from_name(self, node: ast.expr, root: ast.Name, attrs: list[Step]) -> QuerysetValue | None:
         model = self.graph.get(root.id, app_label=self.app_label)
         if model is not None and attrs:
             return self._from_manager(node, model.label, attrs)
@@ -280,18 +333,18 @@ class QuerysetTracker:
         # A bare name: does it hold a queryset?
         return self._resolve_name(root)
 
-    def _from_manager(self, node: ast.expr, label: str, attrs: list[str]) -> QuerysetValue | None:
+    def _from_manager(self, node: ast.expr, label: str, attrs: list[Step]) -> QuerysetValue | None:
         manager, *chain = attrs
         model = self.graph.get(label)
         declared = model.managers if model is not None else {}
-        if manager not in declared and manager not in IMPLICIT_MANAGERS:
+        if manager.name not in declared and manager.name not in IMPLICIT_MANAGERS:
             return None
         origin = (
             Origin.DEFAULT_MANAGER
-            if manager in {"_default_manager", "_base_manager"}
+            if manager.name in {"_default_manager", "_base_manager"}
             else Origin.MANAGER
         )
-        return QuerysetValue(node, origin, model=label, manager=manager, chain=tuple(chain))
+        return QuerysetValue(node, origin, model=label, manager=manager.name, chain=tuple(chain))
 
     def _resolve_name(self, node: ast.Name) -> QuerysetValue | None:
         """Follow a name back to the queryset it holds, if exactly one does."""
@@ -318,9 +371,9 @@ class QuerysetTracker:
         )
 
     def _extend(
-        self, node: ast.expr, base: QuerysetValue, attrs: list[str]
+        self, node: ast.expr, base: QuerysetValue, attrs: list[Step]
     ) -> QuerysetValue | None:
-        if not all(a in CHAINING | TERMINAL for a in attrs):
+        if not all(a.name in CHAINING | TERMINAL for a in attrs):
             return None
         return QuerysetValue(
             node,
@@ -367,7 +420,7 @@ def track(
     inner: set[int] = set()
 
     for node in ast.walk(scope.node):
-        if not isinstance(node, ast.Call | ast.Attribute | ast.Name):
+        if not isinstance(node, ast.Call | ast.Attribute | ast.Name | ast.Subscript):
             continue
         value = tracker.classify(node)
         if value is None:
@@ -378,7 +431,7 @@ def track(
         while current is not root:
             if isinstance(current, ast.Call):
                 current = current.func
-            elif isinstance(current, ast.Attribute):
+            elif isinstance(current, ast.Attribute | ast.Subscript):
                 current = current.value
             else:
                 break

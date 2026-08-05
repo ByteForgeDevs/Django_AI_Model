@@ -53,7 +53,7 @@ class TestOrigins:
         assert value.origin is Origin.MANAGER
         assert value.model == "shop.Book"
         assert value.manager == "objects"
-        assert value.chain == ("all",)
+        assert value.methods == ("all",)
 
     def test_the_default_manager(self):
         found, _ = analyse("qs = Book._default_manager.all()", graph_with("shop.Book"))
@@ -66,7 +66,7 @@ class TestOrigins:
         found, _ = analyse("qs = Book.published.filter(x=1)", graph)
         value = only(found)
         assert value.manager == "published"
-        assert value.chain == ("filter",)
+        assert value.methods == ("filter",)
 
     def test_an_attribute_that_is_not_a_manager_is_not_a_queryset(self):
         """`Book.DoesNotExist` is not a query, and treating it as one would put
@@ -104,7 +104,7 @@ class TestFollowingAssignment:
         found, _ = analyse(source, graph_with("shop.Book"))
         use = next(v for v in found.values() if isinstance(v.node, ast.Name) and v.node.lineno == 3)
         assert use.model == "shop.Book"
-        assert use.chain == ("all", "select_related")
+        assert use.methods == ("all", "select_related")
         assert len(use.via) == 2, "two assignments were walked through"
 
     def test_an_ambiguous_definition_stops_resolution(self):
@@ -158,13 +158,13 @@ class TestChainShape:
             "qs = Book.objects.filter(x=1).select_related('a')", graph_with("shop.Book")
         )
         value = only(found)
-        assert value.chain == ("filter", "select_related")
+        assert value.methods == ("filter", "select_related")
 
     def test_a_terminal_call_is_marked(self):
         found, _ = analyse("b = Book.objects.filter(x=1).first()", graph_with("shop.Book"))
         value = only(found)
         assert value.terminal
-        assert value.chain == ("filter", "first")
+        assert value.methods == ("filter", "first")
 
     def test_an_unknown_method_breaks_the_chain(self):
         """`.render()` is not a queryset method. `qs` is still a queryset, but
@@ -174,7 +174,7 @@ class TestChainShape:
         found, _ = analyse(source, graph_with("shop.Book"))
         at_line_2 = [v for v in found.values() if v.node.lineno == 2]
         assert all(isinstance(v.node, ast.Name) for v in at_line_2)
-        assert not any("render" in v.chain for v in found.values())
+        assert not any("render" in v.methods for v in found.values())
 
 
 class TestRelatedAccessors:
@@ -269,4 +269,4 @@ class TestRobustness:
         found, _ = analyse("qs = Book.objects", graph_with("shop.Book"))
         value = only(found)
         assert value.model == "shop.Book"
-        assert value.chain == ()
+        assert value.methods == ()

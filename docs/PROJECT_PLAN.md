@@ -2895,7 +2895,68 @@ We therefore build the dataflow foundation first, and we default this family to
   wrong. Self-referential definitions (`qs = qs.filter(...)` in a loop) are
   guarded by an in-progress set; the use is ambiguous there anyway, but the
   recursion still had to terminate.
-- **3.1.4** — Method chain analysis: accumulate `filter`, `exclude`, `select_related`, `prefetch_related`, `only`, `defer`, `annotate`, `values`, and slicing across a chain.
+- **3.1.4** — Method chain analysis: accumulate `filter`, `exclude`, `select_related`, `prefetch_related`, `only`, `defer`, `annotate`, `values`, and slicing across a chain. **Done.**
+  `dataflow/chaining.py`. 3.1.3 says a name holds a queryset over a model.
+  This says what that queryset has *already fetched*, which is the entire
+  difference between an N+1 and a correctly written loop. `DJP-001` cannot
+  emit a single finding without it: the loop body looks identical either way,
+  and only the chain distinguishes them.
+
+  To carry this, `QuerysetValue.chain` became `tuple[Step, ...]` rather than
+  `tuple[str, ...]`. A method *name* is not a fact — `select_related` alone
+  says nothing, `select_related("author")` says what was loaded. Keeping the
+  call node is what makes the arguments readable at all.
+
+  *Measured on the three corpora, zero crashes over 3,091 files:*
+
+  | target | querysets | `select_related` | `prefetch_related` | `only`/`defer` | non-instance | sliced | args unreadable |
+  |---|---|---|---|---|---|---|---|
+  | healthchecks | 2,849 | 15 | 6 | 27 | 22 | 1 | 11 |
+  | netbox | 30,782 | 48 | 219 | 29 | 1,894 | 2,788 | 239 |
+  | pretix | 18,222 | 530 | 245 | 16 | 544 | 92 | 475 |
+
+  **The non-instance column is a false-positive suppressor, not a statistic.**
+  `values()`, `values_list()` and `aggregate()` yield dicts and tuples, which
+  have no related attributes and therefore cannot produce an N+1 however they
+  are looped over. On NetBox that is 1,894 querysets — 6% of the corpus — that
+  a rule reasoning only about loops would have had to be right about by luck.
+
+  *Django semantics that invert the answer, each one a test:* a bare
+  `select_related()` means every non-null forward relation, so it is stored as
+  a sentinel rather than as an empty set that would read as "fetched nothing";
+  `select_related(None)` and `prefetch_related(None)` **clear** rather than
+  add, so a reader that only accumulates reports the exact opposite of what
+  the code does; a lookup implies its prefixes, since `select_related("a__b")`
+  loads `a` on the way to `b`; `prefetch_related(Prefetch("books", ...))`
+  hides its path inside an object; and `only()`/`defer()` make an ordinary
+  attribute read *cost* a query, which is an N+1 that no relation traversal
+  appears in.
+
+  *The unreadable column is deliberate.* `select_related(*paths)` and no
+  `select_related` at all must not look alike to a rule deciding whether to
+  speak firmly, so methods whose arguments could not be read are recorded by
+  name. 475 on pretix is 2.6% of its querysets — the size of the population
+  that will correctly be denied a `firm` finding rather than guessed at.
+
+  *Recall repair found by measurement.* `_root` stopped at `ast.Subscript`,
+  making `Book.objects.all()[:10]` invisible: the tracker returned nothing for
+  a queryset that plainly is one. Slicing is now a synthetic `SLICE`/`INDEX`
+  step, which is also what distinguishes `qs[0]` — one instance, no loop, no
+  N+1 — from `qs[:10]`. This recovered 1,352 querysets on NetBox alone that
+  3.1.3 had reported as if they did not exist.
+
+  *Risk 13 control, run deliberately this time rather than by accident.* With
+  the model graph emptied, the survivors are 33 / 127 / 340 and are **100%
+  `Origin.SELF`** on all three targets — `self.get_queryset()`, which is a
+  queryset by method name and needs no graph. No `MANAGER`, `RELATED` or
+  `DEFAULT_MANAGER` detection survives the removal of the signal it claims to
+  come from, which is the property the control exists to establish.
+
+  *Risk 12 proof.* Each of the four load-bearing behaviours was reverted in
+  turn and the suite re-run: `None`-clears → 2 tests fail, the bare-call
+  sentinel → 1, prefix coverage → 1, sentinel honoured in `covers()` → 1.
+  Every gate fails on the defect it exists to catch, and the file was verified
+  byte-identical after restoring.
 - **3.1.5** — Loop model: `for`, comprehensions, and nested loops, recording which variable binds the iteration element.
 - **3.1.6** — Cross-function propagation limited to one hop within a module, with an explicit budget. Deliberately not whole-program — unbounded interprocedural analysis on a large repository is slow and produces confident nonsense.
 
