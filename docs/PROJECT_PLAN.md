@@ -2794,7 +2794,60 @@ We therefore build the dataflow foundation first, and we default this family to
   A rule built on `resolve()` alone would reason about the wrong value one
   time in five. That number is the case for 3.1.2, and it is recorded in the
   module docstring so nobody builds on `resolve()` believing it is enough.
-- **3.1.2** — Definition–use chains within a function body.
+- **3.1.2** — Definition–use chains within a function body. **Done.**
+  `dataflow/chains.py` answers "which definition is in effect *here*", where
+  3.1.1 could only answer "which definitions exist in this scope". `Use.reaching`
+  is the set that may be in effect; `Use.unambiguous` (exactly one) is the
+  confidence signal the whole `DJP` family keys off — a rule may speak firmly
+  about an unambiguous use and must hedge about any other.
+
+  *Measured on the three corpora, 3,091 files, zero crashes.* The metric was
+  fixed before measuring so it could not be tuned afterwards: for every
+  `for TARGET in ...:`, take each read of `TARGET` in the body and ask which
+  binding the analysis names.
+
+  | target | flow-insensitive (3.1.1) | flow-sensitive (3.1.2) |
+  |---|---|---|
+  | healthchecks | 84.6% | **97.8%** |
+  | netbox | 89.5% | **98.5%** |
+  | pretix | 80.5% | **97.4%** |
+
+  pretix reproduces 3.1.1's independently-derived 80.6% to within 0.1pp, which
+  is a useful cross-check that the baseline number was real.
+
+  The residual is **not** error. All 225 remaining cases (hc 9, nb 28, px 188)
+  were checked mechanically, not sampled: in every one the loop variable is
+  genuinely rebound inside the body before the read, so naming the assignment
+  rather than the loop target is the *correct* answer. Zero unexplained. The
+  true accuracy is therefore 100% of loop-target reads; 97.4% is the floor the
+  metric can see.
+
+  *Design notes, each of which cost a wrong first attempt:*
+  - The loop fixpoint belongs **at the loop, not the function**. A whole-body
+    second pass — the first thing tried — is wiped by any assignment sitting
+    between the top of the scope and the loop, so a definition at the bottom of
+    a loop still failed to reach the top. Analysing each loop body twice, from
+    the merge of "never entered" and "completed one pass", is what actually
+    reaches the fixpoint.
+  - Because a body is analysed twice, `load` **unions** across passes. Reaching
+    definitions is a *may* analysis, so the answer is the union over all passes;
+    taking the last pass alone can only narrow a set and lie about it.
+  - *Two passes are enough, and this is measured, not assumed:* a third pass
+    changes **0 of 311,040** uses across all three corpora.
+  - Cost of the second pass: **+10% netbox, +27% pretix**. That is the price of
+    80.5% → 97.4%. Max loop nesting observed is 4 (one file each in nb and px),
+    so the 2^depth worst case stays theoretical.
+  - Comprehension scopes *are* analysed, unlike the first draft, because a large
+    share of real N+1s live in them. Only the first generator's iterable is
+    evaluated in the enclosing scope; everything else is analysed inside.
+
+  *Known cost, deliberately not paid down yet:* `def_use_all` over a whole
+  corpus takes hc 0.35s / nb 2.16s / px 2.70s. It is not wired into `engine.run()`
+  yet — the rules that consume it arrive in Step 3.2 — but that is a measured
+  2.16s of incoming netbox cost against a 10s budget. Step 3.2 must therefore
+  build chains **lazily, per scope a rule actually asks about**, not eagerly for
+  the whole tree. This is why the timing budget is not being tightened now even
+  though the gate asks for it (see 3.6.3).
 - **3.1.3** — QuerySet value tracking: recognise a queryset origin (`Model.objects...`, a related manager, a custom manager) and follow it through assignment.
 - **3.1.4** — Method chain analysis: accumulate `filter`, `exclude`, `select_related`, `prefetch_related`, `only`, `defer`, `annotate`, `values`, and slicing across a chain.
 - **3.1.5** — Loop model: `for`, comprehensions, and nested loops, recording which variable binds the iteration element.
@@ -2924,6 +2977,31 @@ We therefore build the dataflow foundation first, and we default this family to
   suite passes identically whether the policy is wired in or ripped out.
   `tests/test_gcpolicy.py` observes the threshold from inside the audit, which
   is the only point where "suppressed throughout" and "never touched" differ.
+
+  **Confirmed on the runner, which is the only measurement that counts here.**
+  Every number above is from one loaded 8-core dev box; the defect being fixed
+  was itself a measurement artefact, so it would have been circular to close
+  this out without checking CI. Same workflow, same pinned SHAs, before
+  (`91c1b8f`) and after (`b844dae`):
+
+  | target | before | after | sample spread |
+  |---|---|---|---|
+  | healthchecks | 0.90 / 1.09 / 1.39 | 1.07 / 0.91 / 0.91 | 54% → 18% |
+  | netbox | 7.08 / **11.07** / **12.99** | 5.35 / 5.22 / 5.05 | **83% → 6%** |
+  | pretix | 5.56 / **9.64** / **11.12** | 4.78 / 4.64 / 4.68 | 100% → 3% |
+
+  The monotone rise is gone on all three targets — the samples are now
+  unordered, which is what runner noise actually looks like. Every sample is
+  under budget rather than only the best one, so the gate no longer depends on
+  best-of-N to stay green.
+
+  **The budget is deliberately not being tightened yet, though the gate now
+  asks for it.** At 5.05s against 10s the gate correctly warns that a budget
+  nothing approaches has stopped measuring anything. Substep 3.1.2 measured
+  2.16s of netbox dataflow cost that Step 3.2 will bring into the run path.
+  Tightening now would mean re-loosening in two substeps' time, which trains
+  everyone to treat the budget as advisory. It is tightened when 3.2 lands and
+  the real post-dataflow figure is known.
 - **3.6.4** — Triage pass; publish the N+1 false-positive rate honestly, including in the README.
 - **3.6.5** — `docs/rules/DJP.md` and `docs/rules/DJI.md`, plus a dataflow design note stating the analysis limits explicitly.
 
