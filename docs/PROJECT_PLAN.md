@@ -3041,7 +3041,87 @@ We therefore build the dataflow foundation first, and we default this family to
   whole subtree, confirmed by reinstating that walk and watching 6 tests fail.
   The guard was kept as defence in depth and its docstring now says which of
   the two is load-bearing, rather than implying the guard is.
-- **3.1.6** — Cross-function propagation limited to one hop within a module, with an explicit budget. Deliberately not whole-program — unbounded interprocedural analysis on a large repository is slow and produces confident nonsense.
+- **3.1.6** — Cross-function propagation limited to one hop within a module,
+  with an explicit budget. Deliberately not whole-program: unbounded
+  interprocedural analysis on a large repository is slow and produces confident
+  nonsense. **Done — measured, and deliberately not enabled.**
+
+  `dataflow/interproc.py`. One hop within a module, with an explicit budget (12 call sites, 400
+  functions). A call is resolved only through a name binding that is a
+  `FUNCTION_DEF`, or a `self.`/`cls.` attribute naming a method of the
+  *enclosing* class — never a base class, whose body may live in another module.
+  Two definitions of one name record `None` and refuse. Every call site must
+  agree on model, origin and chain; one caller passing a non-queryset or a
+  terminal silences the parameter, because a caller that cannot speak must not
+  be counted as agreeing. 42 tests.
+
+  **This substep does not pay for itself, and is therefore not wired into any
+  default path.** The honest numbers, on all three corpora:
+
+  | | healthchecks | netbox | pretix |
+  |---|---|---|---|
+  | loops iterating a bare parameter | 13 | 88 | 107 |
+  | …whose function has any in-module caller | 6 | 50 | 68 |
+  | parameters actually resolved | 1 | 2 | 5 |
+  | **extra loops resolved to a model** | **+2** | **+0** | **+0** |
+  | cost of the pass | 0.61s | 2.01s | 3.75s |
+
+  The gains are real where they exist — healthchecks resolves
+  `prometheus/views.py:75 checks -> api.Check` carrying `filter/only/order_by`,
+  which is exactly the chain a deferred-field rule needs — and pretix resolves
+  `base_qs -> pretixbase.Invoice` and `subeventqs -> pretixbase.SubEvent` across
+  2 and 3 agreeing call sites. But +0 loops on the two large corpora against
+  ~3.75s on a 10s budget is not a trade worth making by default.
+
+  **Why so few, measured rather than guessed:** 56% of netbox functions taking
+  parameters (1,254 of 2,250) are never called anywhere in their own module,
+  and printing them shows why — `post(request)`, `get_queryset(request)`,
+  `is_allowed(request)`, `to_internal_value(data)`. These are *framework
+  callbacks*. Django and DRF supply their arguments, so no Python call site
+  exists for an interprocedural pass to find, in this module or any other.
+  Widening to whole-program would not reach them either.
+
+  **The lever this measurement actually found:** 6 of healthchecks' 13
+  parameter-iterating loops are Django admin actions — `send_report(qs)`,
+  `activate(qs)`, `deactivate(qs)` — where the second parameter is a queryset
+  of the `ModelAdmin`'s model *by framework contract*. That is knowable with no
+  dataflow at all, and it feeds `find_loops(parameters=...)` through the same
+  seam this substep built. The seam is kept; the walk behind it is not enabled.
+
+  **Correcting an earlier number in this plan.** 3.1.6 was scoped against "15 /
+  118 / 221 loops iterating a parameter". That measurement was wrong: it peeled
+  attribute access down to a base name, so `for f in self.fields` counted as
+  iterating the parameter `self`. Propagating a value into `self` says nothing
+  about `self.fields`. Counting only a bare parameter name — the sole shape
+  propagation can help — the true figure is **13 / 88 / 107**. The opportunity
+  was overstated by up to 2x before a line of it was written.
+
+  *Risk 12:* six defects injected. Dropping the `self` positional shift → 5
+  failures; treating `@staticmethod` as having an implicit first parameter → 1;
+  letting disagreeing callers stop silencing each other → 2; accepting a
+  terminal argument → 1; un-refusing duplicate definitions → 1. The sixth,
+  removing both `*args` guards, produced **zero failures** — investigated
+  rather than papered over. The definition-side guard is genuinely redundant
+  (over-supply already refuses the misattributing case), but the *call-site*
+  one is load-bearing and was simply untested: `render(*rows, Book.objects.all())`
+  attributes the queryset to parameter `b`, when `rows` has unknown length and
+  it may reach any parameter at all. Test added; it now fails on the defect.
+  A dead `_Target.ambiguous` field was found the same way — declared and read
+  but never set — and removed, since refusal is really carried by a `None`
+  entry in the name map.
+
+  *Risk 13:* with an empty model graph, resolved parameters fall 1/2/5 → 0/0/3
+  and loops-over-a-known-model fall to 0 on all three. Every pretix survivor
+  printed verbatim is `Origin.SELF` with `model=None` — `self.get_queryset()`,
+  recognised by framework contract rather than by the graph, and unable to
+  drive a model-attributed finding. This reproduces 3.1.4's control exactly.
+
+  *Defect found in already-committed 3.1.5:* `Loop.node` is
+  `ast.For | ast.AsyncFor | ast.comprehension`, and `ast.comprehension` carries
+  no `lineno`. Any rule reporting at `loop.node.lineno` would have raised
+  `AttributeError` on every comprehension — found when the validation script
+  did precisely that. `Loop.anchor` and `Loop.lineno` added, anchoring a
+  comprehension to its iterable; removing the special case fails 2 tests.
 
 ### Step 3.2 — N+1 detection
 

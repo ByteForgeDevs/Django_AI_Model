@@ -447,3 +447,33 @@ class TestALeftQuerysetIsNotRows:
     def test_a_custom_queryset_method_is_still_rows(self) -> None:
         loop = only_loop("for b in Book.objects.filter(a=1).published():\n    print(b)\n")
         assert loop.over_model == BOOK
+
+
+class TestReportingPosition:
+    """A rule has to cite a line. `ast.comprehension` carries none, so reading
+    `loop.node.lineno` raises on every comprehension."""
+
+    def test_a_for_loop_reports_its_own_line(self) -> None:
+        loop = only_loop("def f():\n    for b in Book.objects.all():\n        pass\n")
+        assert loop.lineno == 2
+
+    def test_a_comprehension_reports_its_iterable(self) -> None:
+        loop = only_loop(
+            "def f():\n    return [\n        b\n        for b in Book.objects.all()\n    ]\n"
+        )
+        assert loop.lineno == 4
+
+    def test_every_loop_kind_exposes_a_line(self) -> None:
+        source = (
+            "async def f():\n"
+            "    for a in Book.objects.all():\n"
+            "        pass\n"
+            "    async for b in Book.objects.all():\n"
+            "        pass\n"
+            "    return [c for c in Book.objects.all()]\n"
+        )
+        found = loops_in(source)
+        assert len(found) == 3
+        for loop in found:
+            assert loop.lineno > 0
+            assert loop.anchor is not None

@@ -48,7 +48,7 @@ unaffected either way: it is a join, and joins survive iteration.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -148,6 +148,24 @@ class Loop:
     ``chunk_size``: a ``ValueError`` at runtime on Django >= 4.1."""
 
     @property
+    def anchor(self) -> ast.expr | ast.stmt:
+        """A node that carries a source position.
+
+        ``ast.comprehension`` is not a statement and has no ``lineno``, so a
+        rule that reports at ``loop.node`` raises ``AttributeError`` on every
+        comprehension it sees. The iterable is the right anchor anyway: it is
+        the expression whose cost the finding is about.
+        """
+        if isinstance(self.node, ast.comprehension):
+            return self.iterable
+        return self.node
+
+    @property
+    def lineno(self) -> int:
+        """Line to report a finding against."""
+        return self.anchor.lineno
+
+    @property
     def element(self) -> Target | None:
         """The single target holding a row, if exactly one does."""
         rows = [t for t in self.targets if t.binds is Bind.ELEMENT]
@@ -175,6 +193,8 @@ class Loop:
 class _Resolver:
     tracker: QuerysetTracker
     chains: DefUse
+    parameters: Mapping[int, QuerysetValue] = field(default_factory=dict)
+    scope: Scope | None = None
     seen: set[int] = field(default_factory=set)
 
     def iterated(
@@ -198,11 +218,28 @@ class _Resolver:
                 return value, (name, *rest)
 
         if isinstance(node, ast.Name):
+            supplied = self._from_parameter(node)
+            if supplied is not None:
+                return supplied, ()
             following = self._through_assignment(node)
             if following is not None:
                 return self.iterated(following, hops + 1)
 
         return None, ()
+
+    def _from_parameter(self, node: ast.Name) -> QuerysetValue | None:
+        """What the module's own callers pass for this parameter, if they agree.
+
+        Only consulted when the name is genuinely a parameter here. A local
+        that happens to share a parameter's name elsewhere must not pick up
+        its value.
+        """
+        if not self.parameters or self.scope is None:
+            return None
+        binding = self.scope.resolve(node.id)
+        if binding is None or binding.kind is not BindingKind.PARAMETER:
+            return None
+        return self.parameters.get(id(binding.node))
 
     def _through_assignment(self, node: ast.Name) -> ast.expr | None:
         """One hop back along the def-use chain, when exactly one definition
@@ -428,6 +465,7 @@ def find_loops(
     graph: ModelGraph,
     *,
     app_label: str | None = None,
+    parameters: Mapping[int, QuerysetValue] | None = None,
 ) -> list[Loop]:
     """Every loop in ``scope``, with its targets resolved to rows where known.
 
@@ -452,7 +490,7 @@ def find_loops(
         return []
 
     tracker = QuerysetTracker(scope, chains, graph, app_label=app_label)
-    finder = _Finder(_Resolver(tracker, chains))
+    finder = _Finder(_Resolver(tracker, chains, parameters or {}, scope))
 
     body = getattr(scope.node, "body", None)
     if isinstance(scope.node, ast.Lambda) or not isinstance(body, list):
