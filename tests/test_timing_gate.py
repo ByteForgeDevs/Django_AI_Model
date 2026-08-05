@@ -180,6 +180,57 @@ class TestMeasuring:
         )
         assert measure(tmp_path, 10.0, "target", 1).rule_errors == ("DJP-001",)
 
+    def test_it_collects_before_every_sample(self, tmp_path, monkeypatch):
+        """Each sample must start from the same heap.
+
+        Without this, sample N is measured while CPython is still holding
+        sample N-1's garbage, and every sample after the first reads high. That
+        is not hypothetical: the gate's first CI run reported netbox at 7.08s,
+        11.07s, 12.99s -- monotonically rising across three identical runs,
+        which was read as runner noise until the shape gave it away. Only
+        best-of-N kept the gate green while it was measuring itself.
+        """
+        events = []
+
+        def run(_root):
+            events.append("run")
+            return FakeResult()
+
+        monkeypatch.setattr("timing_gate.gc.collect", lambda *a, **k: events.append("collect"))
+        monkeypatch.setattr("timing_gate.engine.run", run)
+        measure(tmp_path, 10.0, "target", 3)
+        assert events == ["collect", "run", "collect", "run", "collect", "run"]
+
+    def test_it_drops_the_result_before_the_next_sample(self, tmp_path, monkeypatch):
+        """Holding the previous result alive would defeat the collect.
+
+        The result owns the project context, which owns every parsed AST. If a
+        reference outlives the loop iteration, the collect at the top of the
+        next one has nothing it is allowed to free.
+
+        The assertion has to be made *at collect time*. Asserting that the
+        first result is dead by the end of the loop passes either way, because
+        rebinding ``result`` on the next iteration drops it regardless -- just
+        too late to be collected.
+        """
+        import weakref
+
+        refs: list[weakref.ref[FakeResult]] = []
+        alive_at_collect: list[bool] = []
+
+        def run(_root):
+            result = FakeResult()
+            refs.append(weakref.ref(result))
+            return result
+
+        def collect(*_args, **_kwargs):
+            alive_at_collect.append(any(ref() is not None for ref in refs))
+
+        monkeypatch.setattr("timing_gate.engine.run", run)
+        monkeypatch.setattr("timing_gate.gc.collect", collect)
+        measure(tmp_path, 10.0, "target", 3)
+        assert alive_at_collect == [False, False, False]
+
 
 class TestTheCommand:
     def _stub(self, monkeypatch, result: FakeResult, delay: float = 0.0) -> None:

@@ -34,6 +34,7 @@ than buried in a log nobody opens.
 from __future__ import annotations
 
 import argparse
+import gc
 import sys
 import time
 from dataclasses import dataclass
@@ -103,12 +104,19 @@ def measure(target: Path, budget: float, name: str, runs: int) -> Timing:
     incomplete: tuple[str, ...] = ()
     rule_errors: tuple[str, ...] = ()
     for _ in range(runs):
+        # Each sample must start from the same heap. Without this, run N races
+        # against run N-1's uncollected garbage and every sample after the
+        # first is biased upward -- which is exactly what CI was reporting:
+        # netbox 7.08s, 11.07s, 12.99s, monotonically rising, read as runner
+        # noise when it was the measurement contaminating itself.
+        gc.collect()
         started = time.perf_counter()
         result = engine.run(target)
         times.append(time.perf_counter() - started)
         findings = len(result.findings)
         incomplete = tuple(d.code for d in result.context.diagnostics if d.blocking)
         rule_errors = tuple(sorted(result.rule_errors))
+        del result
     return Timing(name, budget, tuple(times), findings, incomplete, rule_errors)
 
 

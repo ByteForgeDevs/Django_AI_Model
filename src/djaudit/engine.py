@@ -10,6 +10,7 @@ from djaudit import fingerprint as fp
 from djaudit.baseline import Baseline
 from djaudit.context import ProjectContext
 from djaudit.discovery import build_context
+from djaudit.gcpolicy import deferred_full_collection
 from djaudit.models import Confidence, Family, Finding, Severity, Tier
 from djaudit.registry import Rule, select
 from djaudit.suppression import is_suppressed
@@ -69,7 +70,38 @@ def run(
     Rules are isolated: one raising an exception is recorded in
     ``rule_errors`` and the run continues. A single unusual construct in a large
     codebase must never cost the user the other 40 rules' worth of results.
+
+    The run holds every parsed AST live throughout, so full garbage collections
+    during it traverse a large heap and free nothing. See
+    :mod:`djaudit.gcpolicy` for why they are suppressed here and what it costs.
     """
+    with deferred_full_collection():
+        return _audit(
+            root,
+            families=families,
+            tiers=tiers,
+            include=include,
+            exclude=exclude,
+            min_severity=min_severity,
+            min_confidence=min_confidence,
+            baseline=baseline,
+            context=context,
+        )
+
+
+def _audit(
+    root: Path,
+    *,
+    families: set[Family] | None,
+    tiers: set[Tier] | None,
+    include: set[str] | None,
+    exclude: set[str] | None,
+    min_severity: Severity,
+    min_confidence: Confidence,
+    baseline: Baseline | None,
+    context: ProjectContext | None,
+) -> RunResult:
+    """The audit itself. Separated so :func:`run` reads as policy, then work."""
     started = time.perf_counter()
     ctx = context if context is not None else build_context(root)
     if tiers is None:

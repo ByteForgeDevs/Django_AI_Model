@@ -2842,6 +2842,52 @@ We therefore build the dataflow foundation first, and we default this family to
   The saving is structural, so correctness tests cannot protect it — a reader
   that walks again returns exactly the right answer, only slower. Both new
   gates were therefore run against the defect they exist to catch, per risk 12.
+
+  **What the gate found on its first CI run — including a defect in itself.**
+  It reported healthchecks 0.90/1.09/1.39s, NetBox 7.08/11.07/12.99s, pretix
+  5.56/9.64/11.12s. All passed on best-of-three, but every target's three
+  samples rose monotonically, and noise is unordered. Two of NetBox's three
+  samples were over budget; the mean would have failed the build.
+
+  The cause was the gate measuring itself. It took its samples in one process
+  without collecting in between, so each sample ran against the previous one's
+  uncollected garbage and every sample after the first read high. Best-of-N —
+  chosen for runner noise — was quietly concealing a bias in our own harness.
+  `measure()` now collects and drops the previous result before each sample.
+  NetBox's spread fell from 83% (7.08→12.99) to 3% (7.77→8.02), which matters
+  more than the absolute number: a gate whose samples vary by 83% cannot detect
+  any regression smaller than 83%.
+
+  **And the bias was hiding a real cost.** Isolating it showed generation-2
+  collection alone was 19–22% of a run. A run holds every parsed AST live
+  throughout — ~2.3M tracked objects on NetBox — so each full collection
+  traverses the entire working set and frees almost nothing, four or five times
+  per run. `djaudit.gcpolicy` suppresses generation 2 for the span of a run and
+  restores the thresholds on exit, leaving generations 0 and 1 collecting so
+  peak memory stays bounded by the working set.
+
+  | target | gen-2 on | suppressed | gc fully off |
+  |---|---|---|---|
+  | healthchecks | 1.58s | 1.35s | 1.24s |
+  | netbox | 9.22s | 7.43s | 6.43s |
+  | pretix | 8.57s | 6.65s | 5.69s |
+
+  Disabling collection outright is a further 14% and was rejected: it reclaims
+  nothing for the duration, making peak memory a function of total allocation.
+  That is fine for a CLI that exits and wrong for a library embedded in a
+  long-lived host, which is exactly what Phase 6's LLM layer is.
+
+  Checked end-to-end rather than on our own timer, because moving work outside
+  the measured region is the eighth way a number here has lied: total process
+  wall time went NetBox 10.74s→9.12s and pretix 9.60s→8.43s. Of NetBox's 1.79s
+  in-run saving, 1.62s survives to process wall, so ~90% is work removed and
+  ~10% is paid back at teardown. That distinction is recorded rather than
+  rounded away.
+
+  Suppressing collection changes no output at all, so the entire rest of the
+  suite passes identically whether the policy is wired in or ripped out.
+  `tests/test_gcpolicy.py` observes the threshold from inside the audit, which
+  is the only point where "suppressed throughout" and "never touched" differ.
 - **3.6.4** — Triage pass; publish the N+1 false-positive rate honestly, including in the README.
 - **3.6.5** — `docs/rules/DJP.md` and `docs/rules/DJI.md`, plus a dataflow design note stating the analysis limits explicitly.
 
@@ -3054,7 +3100,7 @@ conversation.
 | 5 | Django 6.0 vs 5.2 behavioural drift | Medium | Medium | Version-aware rule gating from the detected version |
 | 6 | Live tier executes hostile code | Low | Critical | Opt-in, sandboxed, timed out, no inherited secrets, explicit consent message |
 | 7 | Model graph wrong on unusual patterns | Medium | Medium | Checked against each target's own migrations by `scripts/graph_coverage.py`; every gap must be attributed or the build fails |
-| 8 | Analysis too slow on large repositories | Medium | Medium | **Mitigated in Phase 3.** `scripts/timing_gate.py` runs on every benchmark target in CI and fails the build over a 10 s budget declared once, in `RUN_BUDGET_SECONDS`, so the slowest target binds it rather than a chosen one. It takes the best of three runs because runner noise is one-sided, and refuses to time a run that emitted a blocking diagnostic or crashed a rule — an incomplete run is fast for the worst possible reason. Substep 3.6.3's single-pass fix took the slowest target from 8.4 s to 6.3 s |
+| 8 | Analysis too slow on large repositories | Medium | Medium | **Mitigated in Phase 3.** `scripts/timing_gate.py` runs on every benchmark target in CI and fails the build over a 10 s budget declared once, in `RUN_BUDGET_SECONDS`, so the slowest target binds it rather than a chosen one. It takes the best of three runs because runner noise is one-sided, collecting between samples so they do not measure each other, and refuses to time a run that emitted a blocking diagnostic or crashed a rule — an incomplete run is fast for the worst possible reason. Substep 3.6.3's single-pass fix took the slowest target from 8.4 s to 6.3 s, and suppressing generation-2 collection for the span of a run removed a further 19–22% |
 | 9 | LLM layer erodes determinism | Medium | High | Model may never create or suppress a finding; all output labelled |
 | 10 | Benchmark repositories drift | Low | Low | Pinned by commit SHA; updated deliberately |
 | 11 | A project djaudit cannot read scores as a clean one | Medium | High | Discovery emits a blocking diagnostic rather than returning quietly, and `run`, `eval` and `benchmark` all refuse to exit 0 on one. Pinned by tests using a class-configured project, which is the shape we detect and cannot yet parse |
