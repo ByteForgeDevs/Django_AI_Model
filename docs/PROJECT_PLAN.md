@@ -2848,7 +2848,53 @@ We therefore build the dataflow foundation first, and we default this family to
   build chains **lazily, per scope a rule actually asks about**, not eagerly for
   the whole tree. This is why the timing budget is not being tightened now even
   though the gate asks for it (see 3.6.3).
-- **3.1.3** — QuerySet value tracking: recognise a queryset origin (`Model.objects...`, a related manager, a custom manager) and follow it through assignment.
+- **3.1.3** — QuerySet value tracking: recognise a queryset origin (`Model.objects...`, a related manager, a custom manager) and follow it through assignment. **Done.**
+  `dataflow/querysets.py`. Chains say which definition reaches a name; this says
+  whether that definition is a queryset and over which model. Without the model
+  label nothing downstream is possible — `book.author` cannot be called an
+  unprefetched forward relation until `book` is known to be a `Book`.
+
+  *Measured on the three corpora with a fully discovered context, zero crashes:*
+
+  | target | models | querysets found | reached only via assignment | model resolved |
+  |---|---|---|---|---|
+  | healthchecks | 12 | 2,849 | 705 (24.7%) | 98.8% |
+  | netbox | 187 | 29,430 | 4,386 (14.9%) | 99.6% |
+  | pretix | 106 | 18,209 | 4,644 (25.5%) | 98.1% |
+
+  **The middle column is the case for this substep.** One queryset in four on
+  two of the three targets is never written inline at the point it is used —
+  it is named first and used later. A matcher that only recognises
+  `Model.objects...` spelled out at the loop silently misses all of them, and
+  would have reported an N+1 false-negative rate nobody could see.
+
+  *Recall was checked against a ground truth counted independently of the
+  tracker* — every `<Name>.objects` in the source where `<Name>` is a model in
+  the graph — because a tracker grading its own homework is the fourth way a
+  number here has lied. Coverage is **100.0% on all three targets**, 739/739,
+  9,323/9,323 and 5,038/5,038, with no gaps to explain.
+
+  *A false-positive source found by measuring rather than by reading.* The
+  first version treated any queryset-shaped method on `self` as a queryset
+  origin, which is how `self.get(...)` on a DRF view, `self.update()` on a
+  form and `self.count()` on anything at all became "querysets". It inflated
+  healthchecks by 33× on a corpus with 12 models — visible only because the
+  first run was done against an empty graph, where every remaining detection
+  had to be spurious. `Origin.SELF` now requires `get_queryset` /
+  `get_query_set` / `filter_queryset` specifically. Accidentally running
+  against an empty graph turned out to be the most informative control in the
+  substep, and is worth repeating deliberately elsewhere: with the real
+  signal removed, everything still detected is noise.
+
+  *Limits, stated so they are not mistaken for bugs:* resolution stops at an
+  **ambiguous** use rather than picking a branch, for the reason 3.1.2 gives.
+  A queryset arriving as a parameter is not followed — that is 3.1.6's bounded
+  job. `self.model.objects` and `get_user_model().objects` yield an
+  `UNKNOWN` origin carrying the method chain but no model, so a caller can
+  reason about what was applied without being handed a model that might be
+  wrong. Self-referential definitions (`qs = qs.filter(...)` in a loop) are
+  guarded by an in-progress set; the use is ambiguous there anyway, but the
+  recursion still had to terminate.
 - **3.1.4** — Method chain analysis: accumulate `filter`, `exclude`, `select_related`, `prefetch_related`, `only`, `defer`, `annotate`, `values`, and slicing across a chain.
 - **3.1.5** — Loop model: `for`, comprehensions, and nested loops, recording which variable binds the iteration element.
 - **3.1.6** — Cross-function propagation limited to one hop within a module, with an explicit budget. Deliberately not whole-program — unbounded interprocedural analysis on a large repository is slow and produces confident nonsense.
@@ -3218,7 +3264,9 @@ conversation.
 | 9 | LLM layer erodes determinism | Medium | High | Model may never create or suppress a finding; all output labelled |
 | 10 | Benchmark repositories drift | Low | Low | Pinned by commit SHA; updated deliberately |
 | 11 | A project djaudit cannot read scores as a clean one | Medium | High | Discovery emits a blocking diagnostic rather than returning quietly, and `run`, `eval` and `benchmark` all refuse to exit 0 on one. Pinned by tests using a class-configured project, which is the shape we detect and cannot yet parse |
-| 12 | A gate passes because what it checks is absent | High | High | Three found and fixed in Phase 2 alone — a doc generator hardcoded to one family, a triage citation nothing verified, a plan checker that only read the plan. Every new gate must be shown failing on the defect it exists to catch, in the commit that adds it |
+| 12 | A gate passes because what it checks is absent | High | High | Three found and fixed in Phase 2 alone — a doc generator hardcoded to one family, a triage citation nothing verified, a plan checker that only read the plan. Two more in Phase 3: the timing-gate test that asserted a result was dead by end of loop, which rebinding achieves anyway, and 3.1.2's reachability test, which put an unconditional rebind after the branch and so passed with the reachability filter deleted. Every new gate must be shown failing on the defect it exists to catch, in the commit that adds it |
+| 13 | A detector is measured only where it fires, so its noise floor is never seen | Medium | High | **Run the detector with its real signal removed and count what survives.** 3.1.3's queryset tracker was first measured by accident against an empty model graph, where every remaining detection was by construction spurious — which is how a rule claiming `self.get(...)` on a DRF view and `self.update()` on a form as querysets was caught, 33× over-detection on a 12-model project. Precision measured only on a populated graph would have buried it in true positives. The empty-input control is cheap, is now a test, and is run deliberately for each new detector |
+| 14 | A local timing number is quoted as the budget position | High | Medium | The dev box runs at load ~7 on 8 cores, and the same unchanged commit measures NetBox at 7.40 s and 8.96 s an hour apart — a 21% swing from load alone, verified by stashing the working tree and re-running. CI measured the same commit at 5.05 s. **Local timings are only ever valid as a same-session A/B against a stashed tree; CI is the only authoritative budget position.** Commit messages before `3.1.3` quote local figures as though they were the gate's, which overstates the deficit by up to 75% |
 
 ---
 
