@@ -2710,6 +2710,13 @@ their own. Substep 2.6.1 extends `RULE_ID_PATTERN` to admit `DJD`.
   it; pretix is already over that budget before dataflow analysis has been
   written, so 3.6.3 starts from a known deficit rather than discovering one.
 
+  **Corrected in Phase 3, and left standing rather than edited away.** The 16s
+  was measured with a profiler attached — overhead of 2.6–3.5× — so the real
+  figure was 7.58s and pretix was never over budget, nor ever the slowest
+  target. NetBox was, at 8.40s. The diagnosis was right, the remedy was right,
+  and the number used to argue for both was wrong; 3.6.3 records what a clean
+  clock says. A run timed under a profiler is not the run anyone else has.
+
 ---
 
 # Phase 3 — Performance and injection
@@ -2722,12 +2729,13 @@ local dataflow analysis.
 **Entry criteria.** Phase 2 merged, and the two things it leaves behind
 acknowledged before dataflow is built on top of them.
 
-The route graph walks every module's AST three times — router variables,
-`register()` calls, endpoints — and pretix already takes 16 s against a 10 s
-budget with no dataflow in it at all. So Substep 3.6.3 is a fix with a
-measurement attached, not a measurement that might find nothing, and it also
-has to build the CI gate that the risk register spent Phase 2 describing as
-though it existed.
+The route graph walked every module's AST three times — router variables,
+`register()` calls, endpoints — which was 74% of a run before any dataflow
+existed. Substep 3.6.3 was therefore taken first rather than last: a
+measurement taken on top of a known, fixable inefficiency measures the
+inefficiency. It is **done** — one shared scan, slowest target 8.40s → 6.34s,
+and the CI timing gate the risk register spent Phase 2 describing as though it
+existed now exists. Dataflow is built on that, with a gate already watching it.
 
 Substep 1.10.2 (`django-configurations`) is still deferred. A class-configured
 project now fails loudly rather than scoring as clean, which is the floor
@@ -2796,22 +2804,44 @@ We therefore build the dataflow foundation first, and we default this family to
 
 - **3.6.1** — N+1 fixture project with true positives, correctly prefetched near-misses, and `Prefetch`-object cases. It must also carry a paginated `ModelViewSet` over an unordered model, giving `DJD-003` its first end-to-end case: that rule ends Phase 2 firing in no fixture and on no benchmark target, so its zero is currently unexamined, and the shape it needs is one this fixture builds anyway.
 - **3.6.2** — Injection fixture project including sanitised near-misses.
-- **3.6.3** — Performance profiling: dataflow analysis must not push a NetBox-scale run beyond 10 seconds.
+- **3.6.3** — Performance profiling: dataflow analysis must not push a NetBox-scale run beyond 10 seconds. **Done.**
 
-  **Entering position, measured at the end of Phase 2:** Healthchecks 2s,
-  NetBox 9s, pretix 16s. pretix is already over budget before any dataflow
-  exists. Profiling attributes roughly three quarters of the time to
-  `build_route_graph`, which walks each module's full AST three times — router
-  variables, `register()` calls, endpoints — so the first move is one walk that
-  collects all three, not a faster dataflow pass.
+  **Entering position, re-measured at the start of Phase 3:** Healthchecks
+  1.52s, NetBox 8.40s, pretix 7.58s — best of five, on the engine's own timer.
+  The 16s recorded for pretix at the end of Phase 2 was measured with a
+  profiler attached, whose overhead here is 2.6–3.5×; unprofiled, pretix was
+  never the slowest target and NetBox always was. Nothing was over budget. The
+  conclusion the number was used to justify survives, because the budget binds
+  the slowest target either way, but the figure itself was wrong and is
+  corrected here rather than quietly dropped.
 
-  This substep also builds the CI gate itself, which does not exist: risk 8
+  Profiling attributed 74% of a run to `build_route_graph`, which walked each
+  module's full AST three times — router variables, `register()` calls,
+  endpoints. Those three passes cannot simply be merged, because router
+  bindings must be known project-wide before any registration resolves; the
+  walk is shared instead. `ast.walk` calls fell 4,887,549 → 1,812,631 and the
+  slowest target went **8.40s → 6.34s**, with output byte-identical on all
+  three targets.
+
+  **Outcome:** Healthchecks 1.09s, NetBox 6.34s, pretix 5.60s.
+
+  This substep also built the CI gate itself, which did not exist: risk 8
   described a 10 s budget "enforced in CI" for the whole of Phase 2 while no
-  workflow step timed anything. The budget applies to the slowest target, not
-  to NetBox — a ceiling that the worst case is allowed to exceed is not a
-  ceiling. A run that exceeds it fails the build; a run that beats it by a wide
-  margin should tighten it, since a budget nothing ever approaches stops
-  measuring anything.
+  workflow step timed anything. `scripts/timing_gate.py` runs on every target,
+  with the budget declared once in `RUN_BUDGET_SECONDS` so the slowest target
+  binds it rather than a chosen one. A run that exceeds it fails the build; a
+  run that beats it by more than half only warns, because failing CI for an
+  improvement would punish the improvement — an asymmetry stated plainly in the
+  script rather than dressed up as a gate.
+
+  It refuses to time a run that emitted a blocking diagnostic or crashed a
+  rule. That is not defensive programming: a project djaudit cannot read
+  finishes in 0.15s and posts the best headroom on the board, so without the
+  check the fastest way to pass a timing gate is to break the analyser.
+
+  The saving is structural, so correctness tests cannot protect it — a reader
+  that walks again returns exactly the right answer, only slower. Both new
+  gates were therefore run against the defect they exist to catch, per risk 12.
 - **3.6.4** — Triage pass; publish the N+1 false-positive rate honestly, including in the README.
 - **3.6.5** — `docs/rules/DJP.md` and `docs/rules/DJI.md`, plus a dataflow design note stating the analysis limits explicitly.
 
@@ -3024,7 +3054,7 @@ conversation.
 | 5 | Django 6.0 vs 5.2 behavioural drift | Medium | Medium | Version-aware rule gating from the detected version |
 | 6 | Live tier executes hostile code | Low | Critical | Opt-in, sandboxed, timed out, no inherited secrets, explicit consent message |
 | 7 | Model graph wrong on unusual patterns | Medium | Medium | Checked against each target's own migrations by `scripts/graph_coverage.py`; every gap must be attributed or the build fails |
-| 8 | Analysis too slow on large repositories | Medium | Medium | **Unmitigated: nothing in CI times a run.** Measured by hand at the end of Phase 2 — Healthchecks 2 s, NetBox 9 s, pretix 16 s against a 10 s budget, so pretix is over before any dataflow exists. Substep 3.6.3 owns both the single-pass fix and building the gate, with the budget applied to the slowest target rather than to NetBox alone |
+| 8 | Analysis too slow on large repositories | Medium | Medium | **Mitigated in Phase 3.** `scripts/timing_gate.py` runs on every benchmark target in CI and fails the build over a 10 s budget declared once, in `RUN_BUDGET_SECONDS`, so the slowest target binds it rather than a chosen one. It takes the best of three runs because runner noise is one-sided, and refuses to time a run that emitted a blocking diagnostic or crashed a rule — an incomplete run is fast for the worst possible reason. Substep 3.6.3's single-pass fix took the slowest target from 8.4 s to 6.3 s |
 | 9 | LLM layer erodes determinism | Medium | High | Model may never create or suppress a finding; all output labelled |
 | 10 | Benchmark repositories drift | Low | Low | Pinned by commit SHA; updated deliberately |
 | 11 | A project djaudit cannot read scores as a clean one | Medium | High | Discovery emits a blocking diagnostic rather than returning quietly, and `run`, `eval` and `benchmark` all refuse to exit 0 on one. Pinned by tests using a class-configured project, which is the shape we detect and cannot yet parse |

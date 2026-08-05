@@ -9,6 +9,11 @@ on:
 
 env:
   UV_VERSION: "0.12.1"
+  # Seconds one analysis run may take on any benchmark target. Declared once,
+  # here, because the number is a claim about the tool rather than about a
+  # particular repository, and a per-target budget would let the slowest one
+  # quietly set its own.
+  RUN_BUDGET_SECONDS: "10"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -189,6 +194,21 @@ jobs:
           uv run python scripts/graph_coverage.py target \
             --name ${{ matrix.target.name }} \
             --expect benchmarks/graph/${{ matrix.target.name }}.json
+
+      # Risk 8 described this step as existing for the whole of Phase 2 while
+      # nothing here timed anything. The budget binds every target equally,
+      # because a ceiling the slowest case may exceed is not a ceiling, and it
+      # is checked on the same clone the precision gate just used.
+      #
+      # Performance is the one property that decays without anyone making a
+      # mistake: each new rule walks the same trees, so the cost grows a little
+      # at a time and no single commit looks like the one that broke it.
+      - name: timing gate
+        run: |
+          uv run python scripts/timing_gate.py target \
+            --name ${{ matrix.target.name }} \
+            --budget ${{ env.RUN_BUDGET_SECONDS }} \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       - name: upload report
         if: always()
