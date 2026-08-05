@@ -228,7 +228,59 @@ def _mapping_edits(node: ast.ClassDef) -> dict[int, dict[str, str]]:
     return edits
 
 
-def _register_calls(tree: ast.Module) -> Iterator[ast.Call]:
+@dataclass(frozen=True)
+class ModuleScan:
+    """Everything in one module that the route graph might care about.
+
+    Three separate readers used to walk each module's full AST independently --
+    router bindings, ``register()`` calls, and urlconf entries -- which on
+    pretix meant 4.9 million ``ast.walk`` steps and roughly three quarters of a
+    whole run. They are collected in one pass instead.
+
+    The buckets are deliberately coarser than any single reader needs, because
+    a walk is the expensive part and a type test is not. Each reader still
+    applies its own precise filter, so what any of them accepts is unchanged;
+    only the number of times the tree is traversed is different.
+    """
+
+    assigns: tuple[ast.Assign, ...]
+    """Assignments whose value is a call -- every candidate router binding."""
+
+    calls: tuple[ast.Call, ...]
+    """Calls with at least two positional arguments.
+
+    A superset of both call-shaped readers: a router registration is
+    ``register(prefix, viewset)`` and a urlconf entry is ``path(route, view)``,
+    so neither can have fewer.
+    """
+
+    @classmethod
+    def of(cls, tree: ast.Module) -> ModuleScan:
+        assigns: list[ast.Assign] = []
+        calls: list[ast.Call] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if len(node.args) >= 2:
+                    calls.append(node)
+            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                assigns.append(node)
+        return cls(tuple(assigns), tuple(calls))
+
+
+EMPTY_SCAN = ModuleScan((), ())
+
+
+def scan_project(ctx: ProjectContext) -> dict[Path, ModuleScan]:
+    """One scan per module, built once and shared by every reader below."""
+    scans: dict[Path, ModuleScan] = {}
+    for path in ctx.python_files:
+        tree = ctx.parse(path)
+        if tree is not None:
+            scans[path] = ModuleScan.of(tree)
+    return scans
+
+
+def _register_calls(scan: ModuleScan) -> Iterator[ast.Call]:
     """``x.register("prefix", ViewSet)`` calls, and nothing that merely looks
     like one.
 
@@ -238,9 +290,7 @@ def _register_calls(tree: ast.Module) -> Iterator[ast.Call]:
     separates them exactly: a router prefix is a URL fragment and an admin
     registration's first argument is a model class.
     """
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or len(node.args) < 2:
-            continue
+    for node in scan.calls:
         func = node.func
         if not isinstance(func, ast.Attribute) or func.attr != "register":
             continue
@@ -252,7 +302,7 @@ def _register_calls(tree: ast.Module) -> Iterator[ast.Call]:
 
 
 def _router_variables(
-    tree: ast.Module, module: str, index: ClassIndex, known: frozenset[str]
+    scan: ModuleScan, module: str, index: ClassIndex, known: frozenset[str]
 ) -> dict[str, str]:
     """Names bound to a router instance in one module, by router class.
 
@@ -260,9 +310,8 @@ def _router_variables(
     projects opens.
     """
     found: dict[str, str] = {}
-    for stmt in ast.walk(tree):
-        if not isinstance(stmt, ast.Assign) or not isinstance(stmt.value, ast.Call):
-            continue
+    for stmt in scan.assigns:
+        assert isinstance(stmt.value, ast.Call)
         called = dotted_name(stmt.value.func)
         if called is None:
             continue
@@ -276,7 +325,7 @@ def _router_variables(
 
 
 def router_variables(
-    ctx: ProjectContext, index: ClassIndex, known: frozenset[str]
+    scans: dict[Path, ModuleScan], index: ClassIndex, known: frozenset[str]
 ) -> dict[str, dict[str, str]]:
     """Every router instance in the project, by the module that built it.
 
@@ -287,14 +336,17 @@ def router_variables(
     in the file it is looking at would call nine plugin viewsets -- including
     two ``ModelViewSet``s -- unroutable, and therefore exempt from every
     authorization rule.
+
+    This has to finish for the whole project before any registration is
+    resolved, which is why the scan is shared rather than the pass merged: one
+    walk per module, read twice.
     """
     found: dict[str, dict[str, str]] = {}
-    for path in ctx.python_files:
-        tree = ctx.parse(path)
-        if tree is None:
+    for path, scan in scans.items():
+        if not scan.assigns:
             continue
         module = package_dotted(path)
-        variables = _router_variables(tree, module, index, known)
+        variables = _router_variables(scan, module, index, known)
         if variables:
             found[module] = variables
     return found
@@ -321,21 +373,20 @@ def _basename(call: ast.Call) -> str | None:
 
 
 def registrations_in(
-    ctx: ProjectContext,
+    scan: ModuleScan,
     path: Path,
     index: ClassIndex,
     surface: ApiSurface,
     routers: dict[str, dict[str, str]] | None = None,
 ) -> Iterator[Registration]:
     """Router registrations in one module, with the viewset resolved."""
-    tree = ctx.parse(path)
-    if tree is None:
+    if not scan.calls:
         return
     module = package_dotted(path)
     routers = routers if routers is not None else {}
     local = routers.get(module, {})
 
-    for call in _register_calls(tree):
+    for call in _register_calls(scan):
         func = call.func
         assert isinstance(func, ast.Attribute)
         receiver = dotted_name(func.value)
@@ -429,21 +480,18 @@ def _as_view_target(node: ast.expr) -> tuple[str | None, dict[str, str]]:
 
 
 def endpoints_in(
-    ctx: ProjectContext, path: Path, index: ClassIndex, surface: ApiSurface
+    scan: ModuleScan, path: Path, index: ClassIndex, surface: ApiSurface
 ) -> Iterator[Endpoint]:
     """Endpoints from plain urlconf entries in one module.
 
     Covers the two shapes a router never produces: an ``APIView`` or generic
     routed by ``as_view()``, and an ``@api_view`` function routed by name.
     """
-    tree = ctx.parse(path)
-    if tree is None:
+    if not scan.calls:
         return
     module = package_dotted(path)
 
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or len(node.args) < 2:
-            continue
+    for node in scan.calls:
         func = node.func
         name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
         if name not in ROUTERS:
@@ -478,19 +526,20 @@ def build_route_graph(
     """Join every view to the requests that reach it."""
     index = index if index is not None else ClassIndex(ctx)
     graph = RouteGraph()
+    scans = scan_project(ctx)
     mappings = router_mappings(index)
-    routers = router_variables(ctx, index, frozenset(mappings))
+    routers = router_variables(scans, index, frozenset(mappings))
     unresolved: list[str] = []
 
-    for path in ctx.python_files:
-        for registration in registrations_in(ctx, path, index, surface, routers):
+    for path, scan in scans.items():
+        for registration in registrations_in(scan, path, index, surface, routers):
             graph.registrations.append(registration)
             if registration.view is None:
                 unresolved.append(registration.view_ref)
                 continue
             view = surface.views[registration.view]
             graph.endpoints.extend(endpoints_for(registration, view, mappings))
-        graph.endpoints.extend(endpoints_in(ctx, path, index, surface))
+        graph.endpoints.extend(endpoints_in(scan, path, index, surface))
 
     graph.unresolved_views = tuple(sorted(set(unresolved)))
     return graph
