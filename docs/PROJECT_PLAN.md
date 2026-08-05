@@ -2757,7 +2757,43 @@ We therefore build the dataflow foundation first, and we default this family to
 
 ### Step 3.1 — Dataflow foundation
 
-- **3.1.1** — Scope model: module, class, function, comprehension, with proper name shadowing.
+- **3.1.1** — Scope model: module, class, function, comprehension, with proper name shadowing. **Done.**
+
+  `djaudit.dataflow.scopes` builds the scope tree for a module and answers
+  "what is this name?". Four Python rules are handled explicitly because each
+  one, got wrong, is a false positive generator rather than a technicality:
+
+  - **Class bodies are not enclosing scopes.** A method reading `queryset`
+    does *not* see `queryset = Model.objects.all()` in its class body — that
+    is a `NameError`, not an attribute read. A resolver that walks parents
+    blindly reports an N+1 against a queryset the method never touches.
+  - **A name assigned anywhere in a function is local to all of it**, not
+    only after the assignment.
+  - **Comprehensions scope their target but evaluate the first iterable
+    outside**, which matters because comprehensions are where a large share
+    of real N+1s live.
+  - **A walrus inside a comprehension binds outside it** (PEP 572).
+
+  `global` and `nonlocal` are resolved by filing the binding where the name
+  actually lives, once, at the point it is recorded. That is what stops
+  `resolve()` and `resolve_scope()` from answering related questions with
+  unrelated logic — the first version had exactly that split.
+
+  **Validated on the three benchmark corpora, not just on its own fixtures:**
+  3,091 files, 36,913 scopes, 178,535 bindings, **zero crashes**, and **zero
+  comprehension-target leaks**. Name resolution inside functions reaches 99.6%
+  on healthchecks and pretix. NetBox sits at 90.5% for a known and correct
+  reason: 316 of its 1,213 files use `from x import *`, and we deliberately
+  bind nothing for a star import rather than guess.
+
+  **The limit is measured rather than asserted.** Every one of the 441 `for`
+  loops over a queryset-shaped expression across the three targets has its
+  target bound correctly via `own_all()`. But `resolve()`, which returns the
+  last binding of a name, picks the right one for only 80.6% of them on
+  pretix — about one loop variable in five is rebound later in the same scope.
+  A rule built on `resolve()` alone would reason about the wrong value one
+  time in five. That number is the case for 3.1.2, and it is recorded in the
+  module docstring so nobody builds on `resolve()` believing it is enough.
 - **3.1.2** — Definition–use chains within a function body.
 - **3.1.3** — QuerySet value tracking: recognise a queryset origin (`Model.objects...`, a related manager, a custom manager) and follow it through assignment.
 - **3.1.4** — Method chain analysis: accumulate `filter`, `exclude`, `select_related`, `prefetch_related`, `only`, `defer`, `annotate`, `values`, and slicing across a chain.
