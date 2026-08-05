@@ -58,6 +58,7 @@ be wrong.
 from __future__ import annotations
 
 import ast
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -178,8 +179,15 @@ class QuerysetValue:
 
     @property
     def terminal(self) -> bool:
-        """The chain ends in something that is no longer a queryset."""
-        return bool(self.chain) and self.chain[-1].name in TERMINAL
+        """The chain has left queryset-land and cannot come back.
+
+        Any terminal step counts, not just the last one. ``get()`` returns an
+        instance and ``count()`` returns an integer; nothing written after
+        either is a queryset, so checking only ``chain[-1]`` answers ``False``
+        for ``Book.objects.get(pk=1).pk`` -- an integer confidently reported as
+        a ``Book`` queryset.
+        """
+        return any(step.name in TERMINAL for step in self.chain)
 
     @property
     def methods(self) -> tuple[str, ...]:
@@ -258,6 +266,23 @@ SELF_ROOTS = frozenset({"self", "cls", "super"})
 #: ordinary object, and treating them alike claims thousands of expressions on
 #: the benchmark targets that have no rows behind them at all.
 QUERYSET_PROVIDERS = frozenset({"get_queryset", "get_query_set", "filter_queryset"})
+
+
+def _past_terminal(chain: Sequence[Step]) -> bool:
+    """Whether anything is written after a step that ends the queryset.
+
+    ``Book.objects.get(pk=1).pk`` is an integer and ``qs[0].site`` is a related
+    instance. Both keep a model label attached to a value that is not a
+    queryset at all, which is the precise shape of a confident wrong answer:
+    a loop over one would be reported as a loop over rows.
+
+    An *unknown* method is not treated this way. ``Book.objects.for_user(u)``
+    and ``qs.filter_available()`` are custom manager and queryset methods and
+    are genuinely querysets -- 2,433 of them on NetBox alone -- so the rule
+    here is specifically about leaving via a known exit, not about arriving
+    somewhere unrecognised.
+    """
+    return any(step.name in TERMINAL for step in chain[:-1])
 
 
 class QuerysetTracker:
@@ -344,6 +369,8 @@ class QuerysetTracker:
             if manager.name in {"_default_manager", "_base_manager"}
             else Origin.MANAGER
         )
+        if _past_terminal(chain):
+            return None
         return QuerysetValue(node, origin, model=label, manager=manager.name, chain=tuple(chain))
 
     def _resolve_name(self, node: ast.Name) -> QuerysetValue | None:
@@ -375,12 +402,15 @@ class QuerysetTracker:
     ) -> QuerysetValue | None:
         if not all(a.name in CHAINING | TERMINAL for a in attrs):
             return None
+        combined = (*base.chain, *attrs)
+        if _past_terminal(combined):
+            return None
         return QuerysetValue(
             node,
             base.origin,
             model=base.model,
             manager=base.manager,
-            chain=(*base.chain, *attrs),
+            chain=combined,
             via=base.via,
         )
 

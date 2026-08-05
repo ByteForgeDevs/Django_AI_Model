@@ -270,3 +270,38 @@ class TestRobustness:
         value = only(found)
         assert value.model == "shop.Book"
         assert value.methods == ()
+
+
+class TestLeavingQuerysetLand:
+    """Steps written after a terminal method. `Book.objects.get(pk=1).pk` is an
+    integer; reporting it as a Book queryset is how a model label gets attached
+    to a value that has none. Found by 3.1.5 needing the answer, measured at
+    515 occurrences on NetBox and 319 on pretix before the fix."""
+
+    @pytest.mark.parametrize(
+        "source,expected",
+        [
+            ("x = Book.objects.get(pk=1).pk", ("get",)),
+            ("x = Book.objects.first().title", ("first",)),
+            ("x = Book.objects.all()[0].site", ("all", "__index__")),
+            ("x = Book.objects.count().bit_length()", ("count",)),
+        ],
+    )
+    def test_nothing_is_tracked_past_the_terminal_step(self, source, expected):
+        """The largest prefix that is still a queryset is what gets reported,
+        and the trailing attribute access is not folded into its chain."""
+        root = build_scopes(ast.parse(source))
+        found = track(root, def_use(root), graph_with("shop.Book"))
+        assert [v.methods for v in found.values()] == [expected], source
+        assert all(v.terminal for v in found.values())
+
+    def test_terminal_is_true_for_any_terminal_step_not_just_the_last(self):
+        root = build_scopes(ast.parse("x = Book.objects.get(pk=1)"))
+        found = track(root, def_use(root), graph_with("shop.Book"))
+        assert all(v.terminal for v in found.values())
+
+    def test_a_custom_manager_method_is_still_a_queryset(self):
+        root = build_scopes(ast.parse("x = Book.objects.for_user(u)"))
+        found = track(root, def_use(root), graph_with("shop.Book"))
+        assert [v.model for v in found.values()] == ["shop.Book"]
+        assert not next(iter(found.values())).terminal

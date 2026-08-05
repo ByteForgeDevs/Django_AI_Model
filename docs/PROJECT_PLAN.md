@@ -2957,7 +2957,90 @@ We therefore build the dataflow foundation first, and we default this family to
   sentinel → 1, prefix coverage → 1, sentinel honoured in `covers()` → 1.
   Every gate fails on the defect it exists to catch, and the file was verified
   byte-identical after restoring.
-- **3.1.5** — Loop model: `for`, comprehensions, and nested loops, recording which variable binds the iteration element.
+- **3.1.5** — Loop model: `for`, comprehensions, and nested loops, recording which variable binds the iteration element. **Done.**
+  `dataflow/loops.py`. 3.1.3 says a name holds a queryset over a model; 3.1.4
+  says what that queryset already fetched. This closes the gap to `DJP-001`:
+  *when the loop runs, which variable is a row, and a row of what?*
+  `book.author` costs a query only if `book` is a `Book` row, and nothing
+  before this substep had looked at a loop at all.
+
+  *Measured on the three corpora, zero crashes:*
+
+  | target | loops | `for` | comprehension | rows of a known model | written inline | **found only via indirection** | nested | wrapped |
+  |---|---|---|---|---|---|---|---|---|
+  | healthchecks | 263 | 194 | 69 | 31 | 19 | 12 (39%) | 12 | 13 |
+  | netbox | 2,099 | 1,235 | 864 | 135 | 64 | **71 (53%)** | 237 | 61 |
+  | pretix | 3,753 | 2,067 | 1,686 | 179 | 129 | 50 (28%) | 781 | 229 |
+
+  **The indirection column is the case for this substep.** On NetBox, more
+  than half the loops we can name a model for are *not* written as `for x in
+  Model.objects...` at the loop. They arrive through an assignment, through
+  `list(...)`, or through both. A matcher keyed on the literal spelling finds
+  64 of 135 and reports the rest as clean.
+
+  *Recall was checked against a ground truth built independently of the loop
+  model* — every `for`/comprehension whose iterable roots at a model name and
+  whose first attribute is a real manager on that model — and is **100.0% on
+  all three targets**, 19/19, 64/64, 129/129, with no unexplained gaps.
+
+  Getting that ground truth right took two corrections, both of which were the
+  *metric* being wrong rather than the analyser. The first pass scored 76.6% on
+  pretix; every single shortfall was a `values_list()` loop, where the rows are
+  tuples and naming a model would be the error. The second pass still showed
+  misses, all of them `Model.PRICE_MODES`, `Model.FEE_TYPES` and
+  `Model._meta.fields` — class constants and field metadata, model-shaped but
+  not rows. Requiring the chain to start at an actual manager removed the last
+  of them. **Nothing was adjusted to make a number look better; the analyser is
+  unchanged between 76.6% and 100%.**
+
+  *Wrappers are the substance here.* `list`, `tuple`, `set`, `frozenset`,
+  `sorted`, `reversed` and `iter` all iterate the same rows, as do
+  `.iterator()` and `.aiterator()`. Unwrapping composes with assignment, so
+  `rows = list(qs)` then `for book in rows` resolves, and with itself, so
+  `reversed(sorted(list(qs)))` does too.
+
+  *Tuple targets are where a careless reader invents a model.* `enumerate`
+  puts the row at index 1 and an integer at index 0 — 4 / 64 / 103 counters
+  across the targets that a positional guess would have called rows. `zip`
+  attributes each position to its own iterable. A bare `for a, b in qs` over
+  an instance queryset cannot mean what it says, since a model instance does
+  not unpack, so neither name is given the model.
+
+  *A Django trap that is not the one it looks like.* `prefetch_related(...)
+  .iterator()` reads like a dropped prefetch, and before Django 4.1 it was.
+  Since 4.1 it **raises `ValueError`** unless `chunk_size` is given, and
+  `aiterator()` never raises because its `chunk_size` defaults to 2000. Both
+  facts were read out of `django/db/models/query.py` rather than assumed. So
+  it is a crash, not an N+1, and it is recorded as its own observation. The
+  plausible guess would have filed it under the wrong rule with the wrong
+  remediation.
+
+  *A precision bug in 3.1.3, found because 3.1.5 needed the answer.*
+  `QuerysetValue.terminal` checked only the last step, so
+  `Book.objects.get(pk=1).pk` — an integer — was reported as a `Book`
+  queryset, as was `qs[0].site`. On the corpora that was **515 chains on
+  NetBox and 319 on pretix** carrying a model label on a value that is not a
+  queryset at all. `terminal` now holds if *any* step is terminal, and
+  tracking stops at the last step that is still a queryset. Deliberately not
+  extended to unknown methods: `Book.objects.for_user(u)` and
+  `qs.filter_available()` are custom manager and queryset methods and are
+  genuinely querysets — 2,433 of them on NetBox — so the rule is about
+  leaving through a known exit, not about arriving somewhere unrecognised.
+
+  *Risk 13 control:* with the model graph emptied, the loop count is unchanged
+  — loops exist regardless — and **rows-of-a-known-model falls to 0 on all
+  three targets**. No model claim survives the removal of the graph it comes
+  from.
+
+  *Risk 12 proof, including one guard that failed it.* Five behaviours were
+  reverted in turn: nested-scope skipping → 2 failures, terminal chains → 2,
+  `enumerate`'s counter → 1, `values()` rows → 3. The fifth, suppressing
+  comprehension scopes, produced **zero failures** — it is dead code, because
+  a comprehension node has no `body` and the generic path already returns
+  nothing. The invariant is really held by the fallback declining to walk the
+  whole subtree, confirmed by reinstating that walk and watching 6 tests fail.
+  The guard was kept as defence in depth and its docstring now says which of
+  the two is load-bearing, rather than implying the guard is.
 - **3.1.6** — Cross-function propagation limited to one hop within a module, with an explicit budget. Deliberately not whole-program — unbounded interprocedural analysis on a large repository is slow and produces confident nonsense.
 
 ### Step 3.2 — N+1 detection
