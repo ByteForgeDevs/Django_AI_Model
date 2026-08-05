@@ -371,7 +371,21 @@ def manager_may_order(model: ModelNode) -> bool:
 
 @register
 class UnorderedPaginatedModel(ApiRule):
-    """DJD-003 -- page two contains what page one already showed."""
+    """DJD-003 -- page two contains what page one already showed.
+
+    The one rule in this module that is not a `ModelRule`, which is worth
+    stating because it looks like an oversight and is not. `DJD` rules are
+    named for where the fix goes, not for where the defect is found, and this
+    defect is only visible from the endpoint: an unordered model is entirely
+    correct until something paginates it. So the rule iterates endpoints like
+    every `DJA` rule and reports a model like every `DJD` rule, and its finding
+    points at the `Meta` that needs an `ordering`.
+
+    Nothing else depends on the base class. Rule selection reads
+    `meta.family`, and the API surface is built lazily on the context, so a
+    `--family DJD` run still resolves the routes this needs -- checked, because
+    the assumption is not obvious from the code.
+    """
 
     meta = RuleMeta(
         id="DJD-003",

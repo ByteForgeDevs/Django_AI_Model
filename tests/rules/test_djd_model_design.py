@@ -541,3 +541,42 @@ class NoteViewSet(viewsets.ModelViewSet):
         found = paginated(make_project, BARE)
         blob = " ".join(e.content for e in found[0].evidence)
         assert "Meta.ordering" in blob and "order_by" in blob
+
+
+class TestFamilySelection:
+    """DJD-003 extends `ApiRule` while its neighbours extend `ModelRule`.
+
+    A deliberate exception: `DJD` names where the fix goes, and this defect is
+    fixed on the model but only visible from the endpoint. It reads as an
+    oversight though, and an oversight would be worth catching -- so the thing
+    that would break if it were one is pinned here rather than assumed.
+
+    What would break is a `--family DJD` run: if the API surface were built by
+    the `DJA` rules rather than lazily on the context, filtering them out would
+    take this rule's input with them and it would report nothing, silently, on
+    exactly the runs a user narrows to the family they care about.
+    """
+
+    def test_a_djd_only_run_still_reports_it(self, make_project) -> None:
+        from djaudit import engine
+        from djaudit.models import Family
+
+        ctx = api_project(make_project, BARE)
+
+        result = engine.run(ctx.root, families={Family.DJD})
+
+        assert "DJD-003" in {f.rule_id for f in result.findings}
+        assert result.rule_errors == {}
+
+    def test_it_reports_the_same_thing_an_unfiltered_run_does(self, make_project) -> None:
+        from djaudit import engine
+        from djaudit.models import Family
+
+        ctx = api_project(make_project, BARE)
+
+        narrowed = engine.run(ctx.root, families={Family.DJD})
+        everything = engine.run(ctx.root)
+        unfiltered = [f.fingerprint for f in everything.findings if f.rule_id == "DJD-003"]
+
+        assert unfiltered, "the unfiltered run reported nothing, so this compares two empties"
+        assert [f.fingerprint for f in narrowed.findings] == unfiltered

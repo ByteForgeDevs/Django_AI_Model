@@ -45,10 +45,12 @@ jobs:
       - name: mypy
         run: uv run mypy
 
-      # The plan states its own counts. They were wrong the first time they
-      # were written by hand, and a plan that miscounts itself is one nobody
-      # checks against.
-      - name: project plan is self-consistent
+      # The plan states its own counts and its own progress. The counts were
+      # wrong the first time they were written by hand; the progress was wrong
+      # for the whole of Phase 2, because this step used to compare the plan
+      # only with itself and passed on a phase marked "Not started" whose
+      # eighteen rules were registered and running. It reads the registry now.
+      - name: project plan matches the registry
         run: uv run python scripts/check_plan.py
 
       # A verdict is worth the reasoning behind it, and nothing in the tool can

@@ -26,11 +26,19 @@ def _append(path: Path, markdown: str) -> None:
 
 def benchmark_summary(report: BenchmarkReport) -> str:
     verdict = "✅ pass" if report.ok else "❌ fail"
+    headline = (
+        f"{verdict} · **{report.python_files}** Python files · "
+        f"**{report.reported}** reported · precision **{report.precision_display}**"
+    )
+    if report.incomplete:
+        # The numbers still get printed, because hiding them would leave a
+        # reader wondering what they were. They get a warning attached, because
+        # a precision figure over an undiscovered project measures nothing.
+        headline += "  \n⚠️ **the analysis did not complete — these numbers describe nothing**"
     lines = [
         f"## Precision — {report.target}",
         "",
-        f"{verdict} · **{report.python_files}** Python files · "
-        f"**{report.reported}** reported · precision **{report.precision_display}**",
+        headline,
         "",
     ]
 
@@ -51,6 +59,10 @@ def benchmark_summary(report: BenchmarkReport) -> str:
         lines.append("")
 
     sections: list[tuple[str, list[str]]] = [
+        (
+            f"Analysis incomplete ({len(report.incomplete)})",
+            [f"- `{d.code}` — {d.message}" for d in report.incomplete],
+        ),
         (
             f"Untriaged ({len(report.untriaged)})",
             [
@@ -94,6 +106,8 @@ def benchmark_summary(report: BenchmarkReport) -> str:
 
 def evaluation_summary(report: EvalReport) -> str:
     verdict = "✅ pass" if report.passed else "❌ fail"
+    if report.incomplete or report.rule_errors:
+        verdict += "  \n⚠️ **the analysis did not complete — these numbers describe nothing**"
     lines = [
         "## Recall — planted defects",
         "",

@@ -7,8 +7,18 @@ would crash on a user's repository too. They cannot measure recall -- we have no
 way to know what they contain that we missed. That is what the planted-defect
 fixtures are for.
 
-The gate fails on three distinct conditions, each catching a different way the
+The gate fails on five distinct conditions, each catching a different way the
 tool can quietly get worse:
+
+``incomplete``
+    A blocking diagnostic during discovery, meaning whole rule families never
+    ran. This one is different in kind from the rest: it does not describe a
+    finding that changed, it describes a benchmark that did not happen. A run
+    that discovers nothing reports nothing, and nothing scores as 100%
+    precision with zero untriaged -- a perfect result produced by not looking.
+    ``djaudit run`` has refused to exit 0 on this since Phase 1; the scoring
+    commands did not, which made the exit code depend on which command you
+    happened to use.
 
 ``untriaged``
     A finding nobody has judged. Either a new rule fired or an existing one
@@ -31,6 +41,9 @@ tool can quietly get worse:
     these files argues from that citation. Since benchmark targets are pinned
     by SHA, a disagreement is never innocent drift: either the pin moved
     without a re-read, or the entry was wrong when it was written.
+
+A crashed rule fails the gate too, for the same reason as ``incomplete``: its
+silence is indistinguishable from a clean result.
 """
 
 from __future__ import annotations
@@ -40,6 +53,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from djaudit import engine
+from djaudit.context import Diagnostic
 from djaudit.engine import RunResult
 from djaudit.models import Confidence, Finding, Severity
 from djaudit.triage import Triage, TriageEntry, Verdict
@@ -96,6 +110,7 @@ class BenchmarkReport:
     target: str
     python_files: int
     reported: int
+    incomplete: list[Diagnostic] = field(default_factory=list)
     untriaged: list[Finding] = field(default_factory=list)
     regressed: list[TriageEntry] = field(default_factory=list)
     resolved: list[TriageEntry] = field(default_factory=list)
@@ -128,7 +143,8 @@ class BenchmarkReport:
     @property
     def ok(self) -> bool:
         return not (
-            self.untriaged
+            self.incomplete
+            or self.untriaged
             or self.regressed
             or self.misfiled
             or self.over_budget
@@ -136,6 +152,14 @@ class BenchmarkReport:
         )
 
     def summary(self) -> str:
+        # Precision leads only when the run was complete. Otherwise the number
+        # describes a scan that never looked at the project, and putting it
+        # first invites somebody to read the headline and stop there.
+        if self.incomplete:
+            return (
+                f"{self.target}: analysis incomplete — {len(self.incomplete)} blocking "
+                f"diagnostic(s); this run scored nothing it actually examined"
+            )
         return (
             f"{self.target}: {self.python_files} files · {self.reported} reported · "
             f"precision {self.precision_display} · {len(self.untriaged)} untriaged · "
@@ -195,6 +219,7 @@ def compare(result: RunResult, triage: Triage) -> BenchmarkReport:
         target=triage.target,
         python_files=len(result.context.python_files),
         reported=len(result.findings),
+        incomplete=[d for d in result.context.diagnostics if d.blocking],
         untriaged=untriaged,
         regressed=sorted(regressed, key=lambda e: (e.file, e.line, e.rule_id)),
         resolved=sorted(resolved, key=lambda e: (e.file, e.line, e.rule_id)),

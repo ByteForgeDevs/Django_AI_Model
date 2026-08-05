@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from djaudit.benchmark import compare
-from djaudit.context import ProjectContext
+from djaudit.context import Diagnostic, ProjectContext
 from djaudit.engine import RunResult
 from djaudit.models import Finding
 from djaudit.triage import Triage, TriageEntry, Verdict
@@ -18,9 +18,10 @@ def make_result(
     findings: list[Finding],
     tmp_path: Path,
     rule_errors: dict[str, str] | None = None,
+    diagnostics: tuple[Diagnostic, ...] = (),
 ) -> RunResult:
     return RunResult(
-        context=ProjectContext(root=tmp_path),
+        context=ProjectContext(root=tmp_path, diagnostics=diagnostics),
         findings=findings,
         rule_errors=rule_errors or {},
     )
@@ -151,6 +152,74 @@ class TestCrashes:
 
         assert report.rule_errors == {"DJS-001": "boom"}
         assert report.ok is False
+
+
+class TestIncompleteAnalysis:
+    """A benchmark that never discovered the project has not measured anything.
+
+    This is the failure the gate was blindest to. Discovery fails, no rule
+    runs, no finding is produced -- and every other signal here reads as
+    perfect: precision 100%, zero untriaged, zero regressed. ``djaudit run``
+    has refused to exit 0 on a blocking diagnostic since Phase 1, but
+    ``benchmark`` scored it and passed, so whether CI went green depended on
+    which command the workflow happened to call.
+    """
+
+    def blocking(self) -> Diagnostic:
+        return Diagnostic(
+            code="no-settings",
+            message="no settings module found",
+            detail="nothing to analyse",
+            blocking=True,
+        )
+
+    def test_a_blocking_diagnostic_fails_the_gate(self, tmp_path: Path) -> None:
+        report = compare(
+            make_result([], tmp_path, diagnostics=(self.blocking(),)),
+            Triage(target="t"),
+        )
+
+        assert report.ok is False
+        assert [d.code for d in report.incomplete] == ["no-settings"]
+
+    def test_it_fails_even_though_every_other_signal_is_clean(self, tmp_path: Path) -> None:
+        # The exact shape of the bug: each individual number says "perfect".
+        report = compare(
+            make_result([], tmp_path, diagnostics=(self.blocking(),)),
+            Triage(target="t"),
+        )
+
+        assert report.untriaged == []
+        assert report.regressed == []
+        assert report.misfiled == []
+        assert report.rule_errors == {}
+        assert report.precision == 1.0
+        assert report.ok is False
+
+    def test_the_summary_leads_with_the_failure_not_the_score(self, tmp_path: Path) -> None:
+        # "precision 100.0%" as the first thing a reader sees is the whole
+        # problem, so it does not get to be the first thing a reader sees.
+        report = compare(
+            make_result([], tmp_path, diagnostics=(self.blocking(),)),
+            Triage(target="t"),
+        )
+
+        assert "analysis incomplete" in report.summary()
+        assert "precision" not in report.summary()
+
+    def test_a_non_blocking_diagnostic_is_not_a_failure(self, tmp_path: Path) -> None:
+        # Non-blocking means the analysis was narrowed, not prevented. Failing
+        # on those would make the gate unusable on any real repository.
+        noted = Diagnostic(
+            code="unresolved-setting",
+            message="DEBUG comes from an env var",
+            detail="escalate via the live tier",
+            blocking=False,
+        )
+        report = compare(make_result([], tmp_path, diagnostics=(noted,)), Triage(target="t"))
+
+        assert report.incomplete == []
+        assert report.ok is True
 
 
 class TestMisfiled:
