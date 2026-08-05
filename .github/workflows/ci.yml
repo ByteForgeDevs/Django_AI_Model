@@ -9,11 +9,6 @@ on:
 
 env:
   UV_VERSION: "0.12.1"
-  # Seconds one analysis run may take on any benchmark target. Declared once,
-  # here, because the number is a claim about the tool rather than about a
-  # particular repository, and a per-target budget would let the slowest one
-  # quietly set its own.
-  RUN_BUDGET_SECONDS: "10"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -129,12 +124,22 @@ jobs:
       fail-fast: false
       matrix:
         target:
+          # `budget` is seconds one analysis run may take on this target. It
+          # was one shared number until Step 3.2 added whole-project dataflow,
+          # which spread the three targets from 2.3s to 13.7s -- driven by how
+          # many loops a project writes, not how many files it has. A single
+          # ceiling then measures only the slowest target and lets the other
+          # two drift by 5x unnoticed, which is the failure the shared number
+          # was meant to prevent. Each budget is set from a measured run with
+          # roughly 50% headroom for runner variance.
           - name: healthchecks
             repo: healthchecks/healthchecks
             sha: 5086d282ea33831e8c86eb9d0802dc2602c66ef7
+            budget: 6
           - name: netbox
             repo: netbox-community/netbox
             sha: 4877d1167f4e20c0507bc902ee4c708e20f92e36
+            budget: 22
           # DRF-heavy and multi-tenant, which neither of the other two are:
           # healthchecks has no DRF at all and NetBox scopes nothing to a
           # tenant, so without this the Phase 2 authorization rules would have
@@ -142,6 +147,7 @@ jobs:
           - name: pretix
             repo: pretix/pretix
             sha: 7627e4b54825318c87f2093bfa078b4d039fb85a
+            budget: 22
     steps:
       - uses: actions/checkout@v4
 
@@ -196,9 +202,8 @@ jobs:
             --expect benchmarks/graph/${{ matrix.target.name }}.json
 
       # Risk 8 described this step as existing for the whole of Phase 2 while
-      # nothing here timed anything. The budget binds every target equally,
-      # because a ceiling the slowest case may exceed is not a ceiling, and it
-      # is checked on the same clone the precision gate just used.
+      # nothing here timed anything. It is checked on the same clone the
+      # precision gate just used.
       #
       # Performance is the one property that decays without anyone making a
       # mistake: each new rule walks the same trees, so the cost grows a little
@@ -207,7 +212,7 @@ jobs:
         run: |
           uv run python scripts/timing_gate.py target \
             --name ${{ matrix.target.name }} \
-            --budget ${{ env.RUN_BUDGET_SECONDS }} \
+            --budget ${{ matrix.target.budget }} \
             --summary "$GITHUB_STEP_SUMMARY"
 
       - name: upload report

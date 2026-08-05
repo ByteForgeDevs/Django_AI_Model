@@ -17,66 +17,6 @@
       "note": "TokenProvisionView at users/api/views.py:56. The reading is exactly right: permission_classes = [] and the route is POST, so an anonymous caller can reach it. It is also deliberate, and its own docstring says so -- \"Non-authenticated REST API endpoint via which a user may create a Token\". This is the credential-exchange endpoint: the caller POSTs a username and password, TokenProvisionSerializer validates them, and a Token comes back. Every token-authenticated API needs exactly one door like this, and it cannot be behind the authentication it exists to grant. Recorded as accepted rather than a false positive because the finding's claim is true and worth a reviewer's five seconds -- an endpoint that opens itself to anonymous POST should have to justify itself once, and this one does. The credential check happens inside the serializer, which DJA-003 states plainly that it cannot see."
     },
     {
-      "fingerprint": "745b70a3b644900f",
-      "rule_id": "DJS-006",
-      "verdict": "accepted_risk",
-      "file": "netbox/netbox/settings.py",
-      "line": 205,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-02",
-      "note": "SECURE_SSL_REDIRECT at settings.py:205. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason. NetBox additionally documents running behind nginx or Apache, which is the usual place for this redirect."
-    },
-    {
-      "fingerprint": "2ddc67e5415029ff",
-      "rule_id": "DJS-007",
-      "verdict": "accepted_risk",
-      "file": "netbox/netbox/settings.py",
-      "line": 204,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-02",
-      "note": "Correct, and quiet on purpose. NetBox exposes SECURE_HSTS_SECONDS at settings.py:204 as a documented operator knob defaulting to 0, alongside SECURE_HSTS_INCLUDE_SUBDOMAINS and SECURE_HSTS_PRELOAD, so enabling it is a deliberate operator decision. HSTS is the one security header whose absence from the Django settings is weak evidence: nginx, a load balancer and every CDN can send Strict-Transport-Security, it is extremely common to set it there, and none of that is visible from inside the repository. The rule reports this at low/tentative for exactly that reason, which is why it does not appear in a default run. Recorded as accepted rather than a false positive because the statement is true -- Django is not sending the header -- and because a project that assumes the proxy is doing it and is wrong has no way to find out except by being attacked."
-    },
-    {
-      "fingerprint": "60882482a7c33223",
-      "rule_id": "DJS-009",
-      "verdict": "accepted_risk",
-      "file": "netbox/netbox/settings.py",
-      "line": 219,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-02",
-      "note": "SESSION_COOKIE_SECURE at settings.py:219. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason."
-    },
-    {
-      "fingerprint": "a1ef84b11c682b77",
-      "rule_id": "DJS-010",
-      "verdict": "accepted_risk",
-      "file": "netbox/netbox/settings.py",
-      "line": 100,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-02",
-      "note": "CSRF_COOKIE_SECURE at settings.py:100. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason."
-    },
-    {
-      "fingerprint": "47a5c85aea75a78f",
-      "rule_id": "DJS-012",
-      "verdict": "accepted_risk",
-      "file": "netbox/netbox/settings.py",
-      "line": 601,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-02",
-      "note": "Correct, well-formed, and exactly what the rule is designed to say quietly rather than loudly. netbox/netbox/settings.py:601 is the textbook ('HTTP_X_FORWARDED_PROTO', 'https'), which is the right configuration for the nginx or Apache deployment NetBox documents, and the line immediately below it sets USE_X_FORWARDED_HOST = True for the same reason. There is no misspelling and no alternative NetBox could sensibly choose. What the finding records is the invariant this creates -- that every route to the application must pass through a proxy which overwrites the header -- and that invariant is a deployment property we cannot see from the repository, which is why the rule caps itself at low/tentative and stays out of a default run. Accepted rather than a false positive because the statement is true and worth one review; it is the kind of finding a reader is meant to confirm once and then suppress."
-    },
-    {
-      "fingerprint": "fbf3831f58a6089b",
-      "rule_id": "DJS-025",
-      "verdict": "accepted_risk",
-      "file": "base_requirements.txt",
-      "line": 15,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-03",
-      "note": "django-debug-toolbar in base_requirements.txt:15, pinned through to requirements.txt:4. NetBox handles this about as well as it can be handled with a single distribution: settings.py:472 lists debug_toolbar in INSTALLED_APPS and settings.py:511 removes it again under `if not DEBUG and 'collectstatic' not in sys.argv`, so the app is not installed on a normal production run. That is precisely why DJS-024 stays silent here and why this rule speaks instead: the package is still on the machine, and what keeps the toolbar off is the value of DEBUG rather than the absence of the code. NetBox is a self-hosted product whose operators are told to enable DEBUG when troubleshooting -- shipping the toolbar so that it works when they do is a deliberate product decision, not an oversight, and splitting the image in two to avoid it would cost their users more than it saves. Accepted rather than false positive because the statement is true and the exposure is real: an operator who leaves DEBUG on after an incident gets a SQL panel, and NetBox's own threat model would rather they knew that. The rule is low severity for exactly this reason -- it is a fact about the deployment, not an accusation."
-    },
-    {
       "fingerprint": "2a90d8d66199b623",
       "rule_id": "DJA-010",
       "verdict": "accepted_risk",
@@ -157,26 +97,6 @@
       "note": "True reading, same argument as the groups field above. The effective permission list is the most direct answer to 'which account should I target', but a user-administration API cannot withhold it from the administrators using it. Accepted as designed."
     },
     {
-      "fingerprint": "2b5d4e88c6d04541",
-      "rule_id": "DJA-011",
-      "verdict": "accepted_risk",
-      "file": "netbox/users/api/serializers_/tokens.py",
-      "line": 23,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading, and NetBox knows it. TokenSerializer.user is writable on create -- get_fields() only makes it read-only when self.instance is not None -- so the request body chooses whose token this becomes, which is account takeover if nothing stops it. Something does: validate() calls user_may_grant_token(request.user, token_user) and raises PermissionDenied otherwise, with a comment explaining why has_perm(obj=None) was not good enough. This is exactly the mitigation the rule's first limitation says it cannot see. Accepted as designed, and the most instructive entry in this file: the defect and the fix look identical in the field list."
-    },
-    {
-      "fingerprint": "f6c766f9d96b4990",
-      "rule_id": "DJA-011",
-      "verdict": "accepted_risk",
-      "file": "netbox/extras/api/serializers_/journaling.py",
-      "line": 22,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading. created_by is PrimaryKeyRelatedField(queryset=User.objects.all(), default=CurrentUserDefault()), so it defaults to the caller but still accepts any user id, and get_fields() locks it only on update. A caller with extras.add_journalentry can therefore attribute a journal entry to a colleague. The CurrentUserDefault and the update-time lock are both deliberate, so this is a considered design allowing administrative attribution rather than an oversight. Accepted. Worth noting that CurrentUserDefault is not a protection -- HiddenField(default=CurrentUserDefault()) would be, and the rule is silent on that spelling."
-    },
-    {
       "fingerprint": "cdb1961fef652b6d",
       "rule_id": "DJA-011",
       "verdict": "accepted_risk",
@@ -195,6 +115,16 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "True reading, and no guard found. BookmarkViewSet sets queryset = Bookmark.objects.all() with no get_queryset override, and BookmarkSerializer declares user = UserSerializer(nested=True) with no read_only, no validate() and no perform_create. A caller holding extras.add_bookmark can POST a bookmark owned by another user. The impact is low -- unwanted rows in someone else's bookmark list -- but nothing in the code suggests the assignment was considered, which is what separates this from the Token and JournalEntry entries above."
+    },
+    {
+      "fingerprint": "f6c766f9d96b4990",
+      "rule_id": "DJA-011",
+      "verdict": "accepted_risk",
+      "file": "netbox/extras/api/serializers_/journaling.py",
+      "line": 22,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading. created_by is PrimaryKeyRelatedField(queryset=User.objects.all(), default=CurrentUserDefault()), so it defaults to the caller but still accepts any user id, and get_fields() locks it only on update. A caller with extras.add_journalentry can therefore attribute a journal entry to a colleague. The CurrentUserDefault and the update-time lock are both deliberate, so this is a considered design allowing administrative attribution rather than an oversight. Accepted. Worth noting that CurrentUserDefault is not a protection -- HiddenField(default=CurrentUserDefault()) would be, and the rule is silent on that spelling."
     },
     {
       "fingerprint": "08022c5dca4246c9",
@@ -237,6 +167,16 @@
       "note": "True reading, same shape as SavedFilterSerializer. TableConfig.user is writable with no check, so a caller with extras.add_tableconfig can create a table configuration owned by someone else and change what that user sees in their table columns."
     },
     {
+      "fingerprint": "2b5d4e88c6d04541",
+      "rule_id": "DJA-011",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/tokens.py",
+      "line": 23,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "True reading, and NetBox knows it. TokenSerializer.user is writable on create -- get_fields() only makes it read-only when self.instance is not None -- so the request body chooses whose token this becomes, which is account takeover if nothing stops it. Something does: validate() calls user_may_grant_token(request.user, token_user) and raises PermissionDenied otherwise, with a comment explaining why has_perm(obj=None) was not good enough. This is exactly the mitigation the rule's first limitation says it cannot see. Accepted as designed, and the most instructive entry in this file: the defect and the fix look identical in the field list."
+    },
+    {
       "fingerprint": "610886f9574d777e",
       "rule_id": "DJA-014",
       "verdict": "true_positive",
@@ -265,6 +205,156 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "TokenProvisionView takes a username and password over an anonymous POST and returns an API token. NetBox sets no DEFAULT_THROTTLE_CLASSES, so nothing limits how fast it can be asked. DJA-003 already reports that this endpoint is anonymous and that is deliberate -- its docstring says so -- but being unthrottled is a separate decision and not one the code records anywhere. An unauthenticated endpoint that answers 'is this password correct' at network speed is the definition of a credential-stuffing target."
+    },
+    {
+      "fingerprint": "2965abdf69949411",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/models/cables.py",
+      "line": 1001,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `local_cable_terminations` is a CableTermination queryset with no select_related, and the loop reads `lct.cable` to build a Q filter. One query per termination on a path-tracing routine that runs on cable save, which is exactly where NetBox feels it."
+    },
+    {
+      "fingerprint": "6c609735c950eddb",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/models/cables.py",
+      "line": 1099,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `all([ct._provider_network for ct in circuit_terminations])` traverses a forward FK on every row of an unselected queryset. Reported tentative rather than firm because the queryset is `CircuitTermination.objects.filter(qs)` where `qs` is a Q object passed positionally, which the chain reader cannot narrate; the traversal itself is not in doubt."
+    },
+    {
+      "fingerprint": "e210cf85ecf32dbb",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/models/cables.py",
+      "line": 1103,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source, and it is the same queryset as :1099 iterated a second time four lines later. Genuine by mechanism. NetBox re-iterates `circuit_terminations` four times in this block, which is a separate defect -- repeated evaluation of one queryset -- that this family should report in its own right rather than folding into the N+1 count."
+    },
+    {
+      "fingerprint": "8b9ceb94384386d1",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/models/cables.py",
+      "line": 1107,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. Third traversal of the same unselected CircuitTermination queryset, this time `ct.cable`. Tentative for the same positional-Q reason as :1099. Kept as a distinct finding because it names a different relation, and `select_related` would need both `_provider_network` and `cable` to silence the block."
+    },
+    {
+      "fingerprint": "58f24e9d0bba1008",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/models/cables.py",
+      "line": 1114,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. Fourth pass over `circuit_terminations`, reading `ct.cable` in an `any(...)`. Reported once per path rather than once per read, so this is not a duplicate of :1107 -- it is a separate loop over the same rows."
+    },
+    {
+      "fingerprint": "8b1caf5af5475940",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/models/devices.py",
+      "line": 314,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `Device.objects.filter(device_type=self, position__isnull=False)` with `d.rack.get_available_units(...)` in the body. NetBox's own comment two lines above admits the cost: \"This validation will impose a very high performance penalty when there are many instances to check\". The rule found the thing the authors already knew about, from the source alone."
+    },
+    {
+      "fingerprint": "d699e7986bb8730c",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/tests/test_views.py",
+      "line": 4578,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source and true by mechanism: a VirtualDeviceContext queryset with no select_related, reading `vdc.device` per row in an assertEqual. It is test code, so the production cost is nil and nobody should act on it. Recorded true_positive rather than false_positive because the claim is accurate; whether test files deserve DJP findings is a scoping question for the rule, not a verdict on this one."
+    },
+    {
+      "fingerprint": "dbb115c93389b59e",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/netbox/search/backends.py",
+      "line": 187,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `[r for r in results if r.object_type == object_type]` compares a forward FK object per row of a CachedValue queryset, which loads the related ContentType row each time; `r.object_type_id == object_type.pk` answers the same question for free. High severity because the comprehension is nested inside the loop over object types above it. Tentative confidence because `results` arrives as a parameter-fed chain the reader cannot fully narrate. The `prefetch_related_objects` call on the next line is unrelated -- it prefetches `object__*`, not `object_type`."
+    },
+    {
+      "fingerprint": "bac8a36dcc286cac",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/virtualization/tests/test_views.py",
+      "line": 494,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. A VirtualMachine queryset with `vm.device` read per row inside a bulk-edit assertion. True by mechanism, test code, no production cost -- the same scoping question as the two other test-file findings rather than a wrong claim."
+    },
+    {
+      "fingerprint": "745b70a3b644900f",
+      "rule_id": "DJS-006",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 205,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-02",
+      "note": "SECURE_SSL_REDIRECT at settings.py:205. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason. NetBox additionally documents running behind nginx or Apache, which is the usual place for this redirect."
+    },
+    {
+      "fingerprint": "2ddc67e5415029ff",
+      "rule_id": "DJS-007",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 204,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-02",
+      "note": "Correct, and quiet on purpose. NetBox exposes SECURE_HSTS_SECONDS at settings.py:204 as a documented operator knob defaulting to 0, alongside SECURE_HSTS_INCLUDE_SUBDOMAINS and SECURE_HSTS_PRELOAD, so enabling it is a deliberate operator decision. HSTS is the one security header whose absence from the Django settings is weak evidence: nginx, a load balancer and every CDN can send Strict-Transport-Security, it is extremely common to set it there, and none of that is visible from inside the repository. The rule reports this at low/tentative for exactly that reason, which is why it does not appear in a default run. Recorded as accepted rather than a false positive because the statement is true -- Django is not sending the header -- and because a project that assumes the proxy is doing it and is wrong has no way to find out except by being attacked."
+    },
+    {
+      "fingerprint": "60882482a7c33223",
+      "rule_id": "DJS-009",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 219,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-02",
+      "note": "SESSION_COOKIE_SECURE at settings.py:219. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason."
+    },
+    {
+      "fingerprint": "a1ef84b11c682b77",
+      "rule_id": "DJS-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 100,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-02",
+      "note": "CSRF_COOKIE_SECURE at settings.py:100. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason."
+    },
+    {
+      "fingerprint": "47a5c85aea75a78f",
+      "rule_id": "DJS-012",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 601,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-02",
+      "note": "Correct, well-formed, and exactly what the rule is designed to say quietly rather than loudly. netbox/netbox/settings.py:601 is the textbook ('HTTP_X_FORWARDED_PROTO', 'https'), which is the right configuration for the nginx or Apache deployment NetBox documents, and the line immediately below it sets USE_X_FORWARDED_HOST = True for the same reason. There is no misspelling and no alternative NetBox could sensibly choose. What the finding records is the invariant this creates -- that every route to the application must pass through a proxy which overwrites the header -- and that invariant is a deployment property we cannot see from the repository, which is why the rule caps itself at low/tentative and stays out of a default run. Accepted rather than a false positive because the statement is true and worth one review; it is the kind of finding a reader is meant to confirm once and then suppress."
+    },
+    {
+      "fingerprint": "fbf3831f58a6089b",
+      "rule_id": "DJS-025",
+      "verdict": "accepted_risk",
+      "file": "base_requirements.txt",
+      "line": 15,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "django-debug-toolbar in base_requirements.txt:15, pinned through to requirements.txt:4. NetBox handles this about as well as it can be handled with a single distribution: settings.py:472 lists debug_toolbar in INSTALLED_APPS and settings.py:511 removes it again under `if not DEBUG and 'collectstatic' not in sys.argv`, so the app is not installed on a normal production run. That is precisely why DJS-024 stays silent here and why this rule speaks instead: the package is still on the machine, and what keeps the toolbar off is the value of DEBUG rather than the absence of the code. NetBox is a self-hosted product whose operators are told to enable DEBUG when troubleshooting -- shipping the toolbar so that it works when they do is a deliberate product decision, not an oversight, and splitting the image in two to avoid it would cost their users more than it saves. Accepted rather than false positive because the statement is true and the exposure is real: an operator who leaves DEBUG on after an incident gets a SQL panel, and NetBox's own threat model would rather they knew that. The rule is low severity for exactly this reason -- it is a fact about the deployment, not an accusation."
     }
   ]
 }

@@ -99,6 +99,29 @@ BLURBS: dict[Family, Blurb] = {
             "how many rows actually hold the value it is describing."
         ),
     ),
+    Family.DJP: Blurb(
+        heading="performance and ORM efficiency",
+        summary=(
+            "{count} rules on the queries a Django project makes without meaning to. The ORM\n"
+            "makes the expensive thing and the cheap thing look identical: `book.author.name`\n"
+            "is an attribute access whether the author arrived with the book or costs its own\n"
+            "round trip, and the source gives no indication which. Every rule here reports a\n"
+            "*query count*, not a slow query -- a slow query shows up in monitoring with its\n"
+            "SQL attached, while a thousand fast ones show up as a view that got slower for\n"
+            "no visible reason."
+        ),
+        scope=(
+            "Every rule here is **static**, and each one needs two things to agree: the model\n"
+            "graph, to know that an attribute crosses a relation rather than reading a column\n"
+            "already in the row, and local dataflow, to know that the name being read is a row\n"
+            "of a queryset and which model that queryset holds. Where either is unavailable\n"
+            "the rule stays silent rather than guessing -- with the model graph emptied, this\n"
+            "family reports nothing at all on any of the three benchmark projects. The\n"
+            "analysis is confined to a single function, so a queryset built in one function\n"
+            "and iterated in another is not followed: what is reported here is a floor and\n"
+            "never a total."
+        ),
+    ),
 }
 
 HEADER = """<!--

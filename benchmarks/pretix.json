@@ -17,46 +17,6 @@
       "note": "InitializeView at api/views/device.py:145. True as read: authentication_classes = () and permission_classes = (), routed for POST. It is pretix's device enrolment endpoint, the point at which a physical point-of-sale device trades a one-time initialization token for a long-lived API token, so it necessarily precedes authentication. The credential is checked in the handler -- Device.objects.get(initialization_token=...) raising ValidationError on an unknown token, with further refusals for tokens already used or revoked -- which is the hand-written check DJA-003 lists as invisible to it. Accepted rather than false positive for the same reason as NetBox's token provisioning: the statement is correct, and an anonymous POST endpoint earning one line of review is the rule working, not misfiring."
     },
     {
-      "fingerprint": "4b54da691ba4ae06",
-      "rule_id": "DJS-006",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/settings.py",
-      "line": 1,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "SECURE_SSL_REDIRECT is never assigned anywhere in src/pretix, so Django itself does not redirect plain HTTP. That is deliberate rather than an oversight: pretix expects TLS to be terminated in front of it, and the reference deployment in deployment/docker/nginx.conf listens on port 80 only and reverse-proxies to gunicorn over a unix socket, which means the Django process legitimately never sees a TLS connection to redirect from. The statement the rule makes is true and the redirect really is absent from this repository; where it happens is the operator's, not the developer's, decision. Recorded as accepted rather than a false positive for the same reason as the NetBox entries: whether the target chooses to handle something elsewhere says nothing about whether we were right to point at it."
-    },
-    {
-      "fingerprint": "6a0747bd68e402a5",
-      "rule_id": "DJS-007",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/settings.py",
-      "line": 1,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "SECURE_HSTS_SECONDS is never assigned, so Django sends no Strict-Transport-Security header. Same layering as DJS-006: pretix does not terminate TLS, and an HSTS header emitted by an application that is only ever reached over plaintext from its own reverse proxy would be both useless and, if the proxy ever forwarded it unchanged for a subdomain, actively harmful. The shipped nginx config does not set the header either, so a site following the reference deployment sends no HSTS at all -- which is a genuine gap, but one that belongs to the TLS terminator the operator supplies rather than to this codebase. Accepted rather than true_positive because there is no line in this repository whose change would fix it."
-    },
-    {
-      "fingerprint": "f51cad9a17a0f0d0",
-      "rule_id": "DJS-012",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/settings.py",
-      "line": 242,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https') at settings.py:242 sits inside `if config.getboolean('pretix', 'trust_x_forwarded_proto', fallback=False):` at line 241, so it is off unless an operator opts in through a config file that is not part of this repository, and the option is named for exactly the trust it establishes. The rule's point stands regardless of the guard -- once enabled, any client that can reach gunicorn directly can assert HTTPS by sending the header, so the proxy must overwrite rather than append it -- which is why this is reported at low/tentative and stays out of a default run. Accepted: the risk is real, opt-in, and named."
-    },
-    {
-      "fingerprint": "cee9e042f437a195",
-      "rule_id": "DJS-013",
-      "verdict": "true_positive",
-      "file": "src/pretix/settings.py",
-      "line": 255,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "ALLOWED_HOSTS = ['*'] at settings.py:255 is unconditional. pretix needs to answer on organizer- and event-specific custom domains, so it cannot enumerate hosts ahead of time, and it resolves them itself in pretix.multidomain.middlewares.MultiDomainMiddleware. But that middleware does not reject an unrecognised host: on KnownDomain.DoesNotExist it sets mode='system' (middlewares.py:101-104) and serves the main site, so Django's host validation is disabled and nothing replaces it. deployment/docker/nginx.conf:89 forwards `Host $http_host` verbatim, so the header arrives unfiltered. That leaves the documented consequence intact -- absolute URLs, including password-reset links, are built from an attacker-supplied Host, and cache keys derived from it can be poisoned. Genuinely mitigable by pinning SITE_URL's host plus the KnownDomain set, so this is a real finding rather than an accepted trade-off."
-    },
-    {
       "fingerprint": "a7625177c741ec2e",
       "rule_id": "DJA-010",
       "verdict": "accepted_risk",
@@ -147,16 +107,6 @@
       "note": "True reading, same shape on the create path. OrderCreateSerializer.positions nests OrderPositionCreateSerializer, whose field list includes secret, so a create response returns the newly generated ticket secrets. This is how a caller learns the secrets for tickets it just created, which is the point of the endpoint. Accepted as designed."
     },
     {
-      "fingerprint": "8f90890443c296e8",
-      "rule_id": "DJA-015",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/api/views/device.py",
-      "line": 145,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "InitializeView sets authentication_classes = () and permission_classes = (), and pretix sets no DEFAULT_THROTTLE_CLASSES, so the reading is right: an anonymous caller can POST to device/initialize as fast as it answers. It looks up Device.objects.get(initialization_token=...) and returns a device API token, so it is a credential exchange, which the rule did not claim -- nothing in the name, module or URL says so, and it was reported at MEDIUM/tentative on the strength of being an unauthenticated write alone. Accepted because the initialization token is generated with high entropy, which makes guessing impractical rather than merely slow; the endpoint is still an unauthenticated write with no rate limit."
-    },
-    {
       "fingerprint": "6340e2eaaeb948a9",
       "rule_id": "DJA-014",
       "verdict": "accepted_risk",
@@ -187,64 +137,14 @@
       "note": "GiftCardFilter.Meta.fields lists 'secret'. GiftCard.secret carries verbose_name 'Gift card code' -- it is the code a customer types in, and looking a card up by it is how a redemption endpoint works. Genuinely bearer credential material, since holding the code is enough to spend the balance, but the lookup is exact and listing gift cards needs organizer API credentials, so a caller cannot read a code they do not already have."
     },
     {
-      "fingerprint": "144c4de2eb7319b6",
-      "rule_id": "DJD-002",
-      "verdict": "true_positive",
-      "file": "src/pretix/base/models/invoices.py",
-      "line": 143,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "Invoice declares fifteen nullable string columns -- invoice_from_name and the rest of the two address blocks -- with no blank=True and no default. Migration 0100_auto_20181023_2300 added them with AddField(..., null=True) and no backfill, so every invoice written before October 2018 holds NULL and every one after holds a string or ''. The cost is visible in the model itself: address_invoice_to reads ((self.invoice_to_zipcode or '') + ' ' + (self.invoice_to_city or '') + ' ' + (state_name or '')).strip() and then filters the assembled parts with `if p and p.strip()`, which is the defensive read Django's documentation warns the pattern will force. True positive."
-    },
-    {
-      "fingerprint": "59ba44e82cbed522",
-      "rule_id": "DJD-002",
+      "fingerprint": "8f90890443c296e8",
+      "rule_id": "DJA-015",
       "verdict": "accepted_risk",
-      "file": "src/pretix/base/models/seating.py",
-      "line": 178,
+      "file": "src/pretix/api/views/device.py",
+      "line": 145,
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
-      "note": "Seat.row_label and Seat.seat_label are nullable with no blank=True. The seating-plan importer at seating.py:125 sets row_label = None explicitly and only assigns when `if r.get('row_label')` is truthy, so NULL is the deliberate spelling of absent while a JSON plan supplying an empty string would store ''. The dual representation is real and the labels are display-only, so a query that misses one population changes a rendered label rather than a total. Accepted."
-    },
-    {
-      "fingerprint": "f8dd87a2e6bca5ad",
-      "rule_id": "DJD-002",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/plugins/banktransfer/models.py",
-      "line": 82,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "BankTransaction.currency is nullable with no blank=True. Migration 0009_banktransaction_currency adds it and runs a set_currency data migration that backfills from the related event, which is exactly the remediation this rule recommends -- but the rows whose event lookup fails keep NULL and the column stays nullable, so new writes can still produce one. The finding is correct and the residue is small. Accepted."
-    },
-    {
-      "fingerprint": "fb5c58545525900a",
-      "rule_id": "DJD-002",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/plugins/banktransfer/models.py",
-      "line": 45,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "BankImportJob.currency, the same nullable currency column as BankTransaction and added by the same series of migrations. An import job is a short-lived record of one upload, so the NULL population ages out rather than accumulating. Correct as stated, accepted."
-    },
-    {
-      "fingerprint": "6cb130f365bafa1c",
-      "rule_id": "DJD-002",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/plugins/banktransfer/models.py",
-      "line": 118,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "RefundExport.currency, third of the banktransfer plugin's nullable currency columns. Same judgement as the other two: the statement is true, the column has both spellings of empty, and the plugin reads it through code that already tolerates the absence. Accepted."
-    },
-    {
-      "fingerprint": "6c9bac354f9e2141",
-      "rule_id": "DJD-002",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/base/models/mail.py",
-      "line": 141,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "OutgoingMail.body_html is a nullable TextField with no blank=True. Here the two values arguably mean different things -- a message with no HTML alternative part at all, versus one carrying an empty part -- and that is a distinction MIME genuinely makes. This is the case the rule's limitation about deliberate absence describes. Accepted."
+      "note": "InitializeView sets authentication_classes = () and permission_classes = (), and pretix sets no DEFAULT_THROTTLE_CLASSES, so the reading is right: an anonymous caller can POST to device/initialize as fast as it answers. It looks up Device.objects.get(initialization_token=...) and returns a device API token, so it is a credential exchange, which the rule did not claim -- nothing in the name, module or URL says so, and it was reported at MEDIUM/tentative on the strength of being an unauthenticated write alone. Accepted because the initialization token is generated with high entropy, which makes guessing impractical rather than merely slow; the endpoint is still an unauthenticated write with no rate limit."
     },
     {
       "fingerprint": "930da2a607c3b984",
@@ -257,6 +157,16 @@
       "note": "Device.security_profile is nullable with no blank=True. Devices enrolled before profiles existed hold NULL, and pretix resolves the profile through a lookup that treats a missing entry as the permissive default, so both spellings already funnel to one branch. Correct as stated, accepted."
     },
     {
+      "fingerprint": "144c4de2eb7319b6",
+      "rule_id": "DJD-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/invoices.py",
+      "line": 143,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Invoice declares fifteen nullable string columns -- invoice_from_name and the rest of the two address blocks -- with no blank=True and no default. Migration 0100_auto_20181023_2300 added them with AddField(..., null=True) and no backfill, so every invoice written before October 2018 holds NULL and every one after holds a string or ''. The cost is visible in the model itself: address_invoice_to reads ((self.invoice_to_zipcode or '') + ' ' + (self.invoice_to_city or '') + ' ' + (state_name or '')).strip() and then filters the assembled parts with `if p and p.strip()`, which is the defensive read Django's documentation warns the pattern will force. True positive."
+    },
+    {
       "fingerprint": "aea1ca3dae8b444d",
       "rule_id": "DJD-002",
       "verdict": "accepted_risk",
@@ -265,6 +175,286 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "ItemCategory declares two nullable cross-selling columns with no blank=True. Both are recent additions to a long-lived model, so the NULL population is every category created before the feature shipped. Reading them through a truthiness check makes the two spellings equivalent in practice. Correct as stated, accepted."
+    },
+    {
+      "fingerprint": "6c9bac354f9e2141",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/base/models/mail.py",
+      "line": 141,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "OutgoingMail.body_html is a nullable TextField with no blank=True. Here the two values arguably mean different things -- a message with no HTML alternative part at all, versus one carrying an empty part -- and that is a distinction MIME genuinely makes. This is the case the rule's limitation about deliberate absence describes. Accepted."
+    },
+    {
+      "fingerprint": "59ba44e82cbed522",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/base/models/seating.py",
+      "line": 178,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Seat.row_label and Seat.seat_label are nullable with no blank=True. The seating-plan importer at seating.py:125 sets row_label = None explicitly and only assigns when `if r.get('row_label')` is truthy, so NULL is the deliberate spelling of absent while a JSON plan supplying an empty string would store ''. The dual representation is real and the labels are display-only, so a query that misses one population changes a rendered label rather than a total. Accepted."
+    },
+    {
+      "fingerprint": "fb5c58545525900a",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/plugins/banktransfer/models.py",
+      "line": 45,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "BankImportJob.currency, the same nullable currency column as BankTransaction and added by the same series of migrations. An import job is a short-lived record of one upload, so the NULL population ages out rather than accumulating. Correct as stated, accepted."
+    },
+    {
+      "fingerprint": "f8dd87a2e6bca5ad",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/plugins/banktransfer/models.py",
+      "line": 82,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "BankTransaction.currency is nullable with no blank=True. Migration 0009_banktransaction_currency adds it and runs a set_currency data migration that backfills from the related event, which is exactly the remediation this rule recommends -- but the rows whose event lookup fails keep NULL and the column stays nullable, so new writes can still produce one. The finding is correct and the residue is small. Accepted."
+    },
+    {
+      "fingerprint": "6cb130f365bafa1c",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/plugins/banktransfer/models.py",
+      "line": 118,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "RefundExport.currency, third of the banktransfer plugin's nullable currency columns. Same judgement as the other two: the statement is true, the column has both spellings of empty, and the plugin reads it through code that already tolerates the absence. Accepted."
+    },
+    {
+      "fingerprint": "47b137a8f51f4873",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/event.py",
+      "line": 613,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. A dict comprehension over `SubEventItem.objects.filter(subevent=subevent)` keyed by `item.item`, which is a forward FK the queryset never selected. Runs inside a serializer update, so the query count scales with the number of price overrides on the sub-event."
+    },
+    {
+      "fingerprint": "be60b0deb9b669cf",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/event.py",
+      "line": 622,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. The same shape nine lines later over SubEventItemVariation, keyed by `item.variation`. Both are comprehensions rather than for statements, which is the compact form of this bug and the reason the rule reads a comprehension's result expression as part of the loop body."
+    },
+    {
+      "fingerprint": "3bf4a994e9592180",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0204_orderposition_backfill_is_bundled.py",
+      "line": 27,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. A data migration iterating ItemBundle and reading `ib.base_item` inside a filter. Migrations are where an N+1 hurts most: it runs once, on production data, holding a transaction, and nobody watches its query count until the deploy stalls."
+    },
+    {
+      "fingerprint": "9081e76eff24ce4f",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0204_orderposition_backfill_is_bundled.py",
+      "line": 28,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `ib.bundled_item` on the next line of the same migration loop, a second unselected forward FK on the same row. Reported separately because it is a different relation and needs its own entry in select_related."
+    },
+    {
+      "fingerprint": "730bad4f16413e27",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0204_orderposition_backfill_is_bundled.py",
+      "line": 29,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `ib.bundled_variation`, the third relation traversed on each ItemBundle row in this migration. Three findings on three consecutive lines is the rule behaving correctly: one query per relation per row, and `select_related` needs all three names."
+    },
+    {
+      "fingerprint": "784e46a242efcf55",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/media.py",
+      "line": 70,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. A generator expression inside `any(...)` reading `ks.organizer` on each MediumKeySet. Tentative because the queryset reaches the loop through a `set(...)` around a values_list chain, so the reader cannot state confidently what was selected -- the right confidence for evidence it cannot fully narrate."
+    },
+    {
+      "fingerprint": "d0d74e0f12b9cea8",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/notifications.py",
+      "line": 72,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source, and a good example of the cheapest possible fix. `if logentry.user:` loads the whole related User row purely to test for null, when `logentry.user_id` answers the same question from a column already in hand. The rule does not suggest that fix, but it points at the line where it applies."
+    },
+    {
+      "fingerprint": "0629b68e36e789ac",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/notifications.py",
+      "line": 77,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `(ns.user, ns.method): ns.enabled` in a dict comprehension over an unselected NotificationSetting queryset. Reported high severity because the comprehension sits inside an outer loop over log entries, so the query count is a product rather than a sum."
+    },
+    {
+      "fingerprint": "d4a69b3593665d4b",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/notifications.py",
+      "line": 85,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. The second notification-settings comprehension, the global one, with the same `ns.user` traversal as :77. Distinct loop, distinct queryset, distinct finding."
+    },
+    {
+      "fingerprint": "ea27ed941d71512d",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/shredder.py",
+      "line": 300,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. An OrderPosition queryset with `op.order.code` read per row while building shredder output. Data-export code walks the whole order table by design, so this is the row count of the event, not a handful."
+    },
+    {
+      "fingerprint": "0a5411604d428e92",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/shredder.py",
+      "line": 432,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. Same `op.order.code` traversal in a different shredder. Tentative because the queryset chain includes a call the reader could not fully narrate; the relation hop is unambiguous."
+    },
+    {
+      "fingerprint": "393aea8f8dbfbe88",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/shredder.py",
+      "line": 512,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `ia.order.code` on an InvoiceAddress queryset with no select_related, again inside an export loop over every invoice address for the event."
+    },
+    {
+      "fingerprint": "ca505079319871db",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/plugins/ticketoutputpdf/signals.py",
+      "line": 87,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `tli.layout` on a TicketLayoutItem queryset in a signal handler. Signal handlers are the worst place to hide a per-row query because the cost lands on whatever unrelated operation fired the signal."
+    },
+    {
+      "fingerprint": "d076d9dd7c7c7f3b",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/tests/presale/test_cart.py",
+      "line": 820,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. True by mechanism -- a CartPosition queryset with `obj.item` read per row -- but it is a test, so no production cost. Same reasoning as the NetBox test-file finding: accurate claim, low value, and the question of whether DJP should read test files is a scoping decision rather than a verdict here."
+    },
+    {
+      "fingerprint": "18120e5beb2c5ecb",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/tests/presale/test_cart.py",
+      "line": 821,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `obj.variation` on the same test loop, a second unselected relation. Test code, accurate claim, no production impact."
+    },
+    {
+      "fingerprint": "af2a74ec5335de7d",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/tests/presale/test_cart.py",
+      "line": 837,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `obj.item` in a second test loop seventeen lines below. Test code, accurate claim, no production impact."
+    },
+    {
+      "fingerprint": "9da3df0eb617a6c1",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/tests/presale/test_cart.py",
+      "line": 2222,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `cp.voucher` on a CartPosition queryset in a test assertion. Test code, accurate claim, no production impact."
+    },
+    {
+      "fingerprint": "66317f336cbe7e12",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/tests/presale/test_cart.py",
+      "line": 2236,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `cp.voucher` on a CartPosition queryset in a neighbouring voucher test, a distinct loop over a distinct queryset rather than a duplicate of :2222. Test code, accurate claim, no production impact."
+    },
+    {
+      "fingerprint": "b20059dacce9275a",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/tests/presale/test_cart.py",
+      "line": 2266,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. Third `cp.voucher` traversal in this module, in a third test with its own CartPosition queryset. Test code, accurate claim, no production impact."
+    },
+    {
+      "fingerprint": "4b54da691ba4ae06",
+      "rule_id": "DJS-006",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/settings.py",
+      "line": 1,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "SECURE_SSL_REDIRECT is never assigned anywhere in src/pretix, so Django itself does not redirect plain HTTP. That is deliberate rather than an oversight: pretix expects TLS to be terminated in front of it, and the reference deployment in deployment/docker/nginx.conf listens on port 80 only and reverse-proxies to gunicorn over a unix socket, which means the Django process legitimately never sees a TLS connection to redirect from. The statement the rule makes is true and the redirect really is absent from this repository; where it happens is the operator's, not the developer's, decision. Recorded as accepted rather than a false positive for the same reason as the NetBox entries: whether the target chooses to handle something elsewhere says nothing about whether we were right to point at it."
+    },
+    {
+      "fingerprint": "6a0747bd68e402a5",
+      "rule_id": "DJS-007",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/settings.py",
+      "line": 1,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "SECURE_HSTS_SECONDS is never assigned, so Django sends no Strict-Transport-Security header. Same layering as DJS-006: pretix does not terminate TLS, and an HSTS header emitted by an application that is only ever reached over plaintext from its own reverse proxy would be both useless and, if the proxy ever forwarded it unchanged for a subdomain, actively harmful. The shipped nginx config does not set the header either, so a site following the reference deployment sends no HSTS at all -- which is a genuine gap, but one that belongs to the TLS terminator the operator supplies rather than to this codebase. Accepted rather than true_positive because there is no line in this repository whose change would fix it."
+    },
+    {
+      "fingerprint": "f51cad9a17a0f0d0",
+      "rule_id": "DJS-012",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/settings.py",
+      "line": 242,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https') at settings.py:242 sits inside `if config.getboolean('pretix', 'trust_x_forwarded_proto', fallback=False):` at line 241, so it is off unless an operator opts in through a config file that is not part of this repository, and the option is named for exactly the trust it establishes. The rule's point stands regardless of the guard -- once enabled, any client that can reach gunicorn directly can assert HTTPS by sending the header, so the proxy must overwrite rather than append it -- which is why this is reported at low/tentative and stays out of a default run. Accepted: the risk is real, opt-in, and named."
+    },
+    {
+      "fingerprint": "cee9e042f437a195",
+      "rule_id": "DJS-013",
+      "verdict": "true_positive",
+      "file": "src/pretix/settings.py",
+      "line": 255,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "ALLOWED_HOSTS = ['*'] at settings.py:255 is unconditional. pretix needs to answer on organizer- and event-specific custom domains, so it cannot enumerate hosts ahead of time, and it resolves them itself in pretix.multidomain.middlewares.MultiDomainMiddleware. But that middleware does not reject an unrecognised host: on KnownDomain.DoesNotExist it sets mode='system' (middlewares.py:101-104) and serves the main site, so Django's host validation is disabled and nothing replaces it. deployment/docker/nginx.conf:89 forwards `Host $http_host` verbatim, so the header arrives unfiltered. That leaves the documented consequence intact -- absolute URLs, including password-reset links, are built from an attacker-supplied Host, and cache keys derived from it can be poisoned. Genuinely mitigable by pinning SITE_URL's host plus the KnownDomain set, so this is a real finding rather than an accepted trade-off."
     }
   ]
 }

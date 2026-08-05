@@ -163,6 +163,15 @@ class Scope:
     bindings: dict[str, list[Binding]] = field(default_factory=dict)
     declared_global: set[str] = field(default_factory=set)
     declared_nonlocal: set[str] = field(default_factory=set)
+    has_loop: bool = False
+    """Whether a loop is written directly in this scope.
+
+    Recorded while the scope tree is built, because the builder already visits
+    every ``for`` and every comprehension with exactly the scope that owns it.
+    Answering the question here costs a flag; answering it afterwards costs a
+    second full walk of every tree, which measured slower than the def-use
+    work the flag exists to skip.
+    """
 
     def add(self, binding: Binding) -> None:
         home = self._home_for(binding.name)
@@ -316,6 +325,7 @@ class _Builder:
                 self.expression(scope, stmt.value)
                 self.target(scope, stmt.target, BindingKind.AUGMENTED, stmt.value)
             case ast.For() | ast.AsyncFor():
+                scope.has_loop = True
                 self.expression(scope, stmt.iter)
                 self.target(scope, stmt.target, BindingKind.FOR_TARGET, stmt.iter)
                 self.statements(scope, stmt.body)
@@ -465,6 +475,9 @@ class _Builder:
         Only the *first* generator's iterable is evaluated in the enclosing
         scope. Every later one sees the names the earlier generators bound.
         """
+        # A comprehension is owned by the scope it is *written in*, matching
+        # how `find_loops` attributes one, not by the scope it creates.
+        scope.has_loop = True
         inner = scope.child(ScopeKind.COMPREHENSION, node, "<comprehension>")
         for index, generator in enumerate(generators):
             outer = scope if index == 0 else inner

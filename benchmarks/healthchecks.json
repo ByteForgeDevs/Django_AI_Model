@@ -7,14 +7,44 @@
   "max_false_positive_rate": 0.1,
   "findings": [
     {
-      "fingerprint": "9f80d4e589623281",
-      "rule_id": "DJS-003",
-      "verdict": "accepted_risk",
-      "file": "hc/settings.py",
-      "line": 68,
-      "note": "Real and deliberate. hc/settings.py:68 is `SECRET_KEY = envsecret(\"SECRET_KEY\", \"---\")`, so an instance deployed without the SECRET_KEY environment variable signs its sessions with three hyphens. That is not a key an attacker has to steal -- healthchecks publishes it, as `Default: ---`, in its own configuration documentation, so anyone can forge a session for any user on such an instance without ever seeing the source. Healthchecks also documents that the value 'should be set to a unique, unpredictable value', which makes this a knowing convenience for local development rather than an oversight. Firm rather than certain because a real deployment normally does supply the variable.",
-      "reviewed": "2026-08-02",
-      "reviewer": "Zambagarrah"
+      "fingerprint": "e875fb9e04429f72",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "hc/accounts/management/commands/pruneusers.py",
+      "line": 44,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `pq` is a Profile queryset built over three reassignments (order_by, filter, exclude) and never given select_related, and the loop reads `profile.user.email` then calls `profile.user.delete()` on every row. One query per inactive profile. Worth checking that the rule did not credit the `exclude(user__last_login__gt=...)` on line 41 as fetching the user: filtering through a relation joins for the WHERE clause but selects no columns from it, and the rule correctly treats it as not covering the traversal."
+    },
+    {
+      "fingerprint": "fca011ab0056c75e",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "hc/accounts/management/commands/senddeletionscheduled.py",
+      "line": 50,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. The loop iterates `Channel.objects.filter(project__owner_id=profile.user_id)` and reads `channel.project` to build a dummy Check. The filter traverses `project` but selects nothing from it, so the attribute read is a real round trip per channel. A `select_related('project')` on line 46 removes the whole set."
+    },
+    {
+      "fingerprint": "e415ef6ed16c3f63",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "hc/accounts/management/commands/senddeletionscheduled.py",
+      "line": 75,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `q` is a Profile queryset with order_by and filter applied and no select_related; the loop reads `profile.user.email` at line 75 and passes `profile.user` to `self.members()` two lines later. This is a management command that walks every profile with a scheduled deletion, so the row count grows with the user table."
+    },
+    {
+      "fingerprint": "4060595668303f67",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "hc/accounts/management/commands/sendflappingnotices.py",
+      "line": 33,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source, and the real defect is worse than the finding says. The Check queryset is narrowed by `only(\"name\")` upstream, so `check.project` costs a query to load the project *and* the deferred `project_id` column is not there either. DJP-001 reports the relation traversal, which is the part it can prove; the deferred-column half belongs to a later rule in this family."
     },
     {
       "fingerprint": "204f74697636c950",
@@ -27,22 +57,12 @@
       "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "4eca41d92b1884e1",
-      "rule_id": "DJS-009",
-      "verdict": "true_positive",
+      "fingerprint": "9f80d4e589623281",
+      "rule_id": "DJS-003",
+      "verdict": "accepted_risk",
       "file": "hc/settings.py",
-      "line": 1,
-      "note": "A genuine gap, not a configuration choice. Healthchecks never assigns SESSION_COOKIE_SECURE and, unlike DEBUG or SECRET_KEY, offers no environment variable for it either, so there is no supported way for an operator to turn it on short of patching settings.py. The project clearly expects a TLS-terminating proxy -- it reads SECURE_PROXY_SSL_HEADER from the environment at line 78 -- but a proxy does not set this flag, and without it a browser that touches the plain-HTTP URL even once transmits the session cookie in clear text on the wire. Firm rather than certain only because we cannot see the deployment; the absence of the setting itself is not in doubt.",
-      "reviewed": "2026-08-02",
-      "reviewer": "Zambagarrah"
-    },
-    {
-      "fingerprint": "ab3fdeee85888849",
-      "rule_id": "DJS-010",
-      "verdict": "true_positive",
-      "file": "hc/settings.py",
-      "line": 1,
-      "note": "Same gap as DJS-009 and same absence of any knob: CSRF_COOKIE_SECURE is never assigned and cannot be set from the environment. Medium rather than high because reading a CSRF token is a step towards forging a request rather than an immediate account takeover, but the fix is one line and there is no argument on the other side.",
+      "line": 68,
+      "note": "Real and deliberate. hc/settings.py:68 is `SECRET_KEY = envsecret(\"SECRET_KEY\", \"---\")`, so an instance deployed without the SECRET_KEY environment variable signs its sessions with three hyphens. That is not a key an attacker has to steal -- healthchecks publishes it, as `Default: ---`, in its own configuration documentation, so anyone can forge a session for any user on such an instance without ever seeing the source. Healthchecks also documents that the value 'should be set to a unique, unpredictable value', which makes this a knowing convenience for local development rather than an oversight. Firm rather than certain because a real deployment normally does supply the variable.",
       "reviewed": "2026-08-02",
       "reviewer": "Zambagarrah"
     },
@@ -63,6 +83,26 @@
       "file": "hc/settings.py",
       "line": 1,
       "note": "Correct, and quiet on purpose. Healthchecks mentions HSTS nowhere at all -- not in settings, not in its nginx or Docker configuration, not in its documentation. HSTS is the one security header whose absence from the Django settings is weak evidence: nginx, a load balancer and every CDN can send Strict-Transport-Security, it is extremely common to set it there, and none of that is visible from inside the repository. The rule reports this at low/tentative for exactly that reason, which is why it does not appear in a default run. Recorded as accepted rather than a false positive because the statement is true -- Django is not sending the header -- and because a project that assumes the proxy is doing it and is wrong has no way to find out except by being attacked.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "4eca41d92b1884e1",
+      "rule_id": "DJS-009",
+      "verdict": "true_positive",
+      "file": "hc/settings.py",
+      "line": 1,
+      "note": "A genuine gap, not a configuration choice. Healthchecks never assigns SESSION_COOKIE_SECURE and, unlike DEBUG or SECRET_KEY, offers no environment variable for it either, so there is no supported way for an operator to turn it on short of patching settings.py. The project clearly expects a TLS-terminating proxy -- it reads SECURE_PROXY_SSL_HEADER from the environment at line 78 -- but a proxy does not set this flag, and without it a browser that touches the plain-HTTP URL even once transmits the session cookie in clear text on the wire. Firm rather than certain only because we cannot see the deployment; the absence of the setting itself is not in doubt.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "ab3fdeee85888849",
+      "rule_id": "DJS-010",
+      "verdict": "true_positive",
+      "file": "hc/settings.py",
+      "line": 1,
+      "note": "Same gap as DJS-009 and same absence of any knob: CSRF_COOKIE_SECURE is never assigned and cannot be set from the environment. Medium rather than high because reading a CSRF token is a step towards forging a request rather than an immediate account takeover, but the fix is one line and there is no argument on the other side.",
       "reviewed": "2026-08-02",
       "reviewer": "Zambagarrah"
     },

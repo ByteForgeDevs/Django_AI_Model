@@ -3125,7 +3125,60 @@ We therefore build the dataflow foundation first, and we default this family to
 
 ### Step 3.2 — N+1 detection
 
-- **3.2.1** — `DJP-001` forward relation accessed on a loop variable whose queryset lacks `select_related` for that path.
+- **3.2.1** — `DJP-001` forward relation accessed on a loop variable whose
+  queryset lacks `select_related` for that path. **Done.** 4 / 9 / 19 findings
+  on healthchecks / netbox / pretix, **every one verified against source as a
+  true positive — a 0% false-positive rate on all three**, and all 32 recorded
+  in `benchmarks/` with a reviewer note apiece. `src/djaudit/rules/performance.py`,
+  23 tests.
+
+  The rule's whole difficulty is telling three identical-looking attribute
+  reads apart: `b.author` crosses a relation and costs a query, `b.title` reads
+  a column already in the row, and `b.author_id` reads the foreign key's own
+  integer column and costs nothing. Only the model graph can separate them.
+  It reports a *path* rather than a read — `b.author.publisher` is one query,
+  however many times it appears — and only the longest chain at each site, so
+  `b.author.name` is not also charged as `b.author`. Forward relations only:
+  a `ManyToManyField` cannot be joined into one row and belongs to `DJP-002`.
+
+  *Risk 12:* five guards removed one at a time, all five load-bearing —
+  dropping the forward-only restriction → 1 failure; letting `select_related`
+  stop silencing → 3; reporting the same path twice → 1; crediting a rebound
+  loop element → 1; charging sub-chains as separate queries → 2. No dead guard
+  this time, unlike 3.1.5 and 3.1.6.
+
+  *Risk 13:* with the model graph emptied, findings fall 4 / 9 / 19 → **0 / 0 /
+  0**. This is the first detector in the project whose control reaches zero on
+  every target — 3.1.4 and 3.1.6 both left `Origin.SELF` survivors, which
+  cannot arise here because a survivor needs a model name to traverse from.
+  Kept as a test rather than a one-off script.
+
+  *What the corpus taught, beyond the count.* Two findings are worth more than
+  their severity suggests and two are worth less. `sendflappingnotices` is
+  worse than reported: the queryset is narrowed by `only("name")`, so
+  `check.project` costs a query *and* the deferred `project_id` is missing too
+  — the second half needs `DJP-009`. NetBox's `cables.py` iterates one
+  queryset four times in nine lines, which is a distinct defect this rule
+  cannot name and Step 3.3 should. Against that, 4 of the 32 are in test files:
+  true by mechanism, worthless in practice, and an argument for scoping rather
+  than for a different verdict. And `pretix`'s `if logentry.user:` loads an
+  entire related row to test for null when `logentry.user_id` is already in
+  hand — the cheapest fix in the whole corpus.
+
+  *Cost, and the budget it broke.* The rule needs a loop inventory over the
+  whole project, which took the slowest target from ~4 s to 15.6 s and failed
+  the 10 s timing gate 3.1 had been passing. Two fixes, both measured: a file
+  is skipped before parsing unless its text contains `for` (sound — every loop
+  form in Python is written with that keyword; it skips 45% / 26% / 58% of
+  files and the loop count is unchanged at 263 / 2099 / 3753), and
+  `scope_has_loop` became a flag recorded by `build_scopes` as it goes instead
+  of a second full walk, verified to agree with `find_loops` on all 33,357
+  scopes with **zero misses**. Together: 15.6 → 13.1 s (netbox), 15.2 → 13.7 s
+  (pretix). Staged, the remainder is `parse` 5.2 s, `build_scopes` 2.9 s,
+  `def_use` 0.9 s, `find_loops` 0.4 s — **parsing is over half of it and there
+  is no faster parser in the standard library**, so this is close to the floor
+  for whole-project dataflow in CPython. The budget was raised rather than the
+  measurement massaged; see 3.6.3.
 - **3.2.2** — `DJP-002` reverse relation or many-to-many accessed in a loop without `prefetch_related`.
 - **3.2.3** — `DJP-003` relation traversal inside a `SerializerMethodField` or serializer property, where the queryset is defined in the view — the most common real-world N+1 and the one existing tools miss.
 - **3.2.4** — `DJP-004` query executed inside a loop body (`.get`, `.filter().first()`, `.count`, `.exists`).
@@ -3201,6 +3254,19 @@ We therefore build the dataflow foundation first, and we default this family to
   The saving is structural, so correctness tests cannot protect it — a reader
   that walks again returns exactly the right answer, only slower. Both new
   gates were therefore run against the defect they exist to catch, per risk 12.
+
+  *Revised in 3.2.1, and the single shared budget did not survive it.* Adding
+  whole-project dataflow spread the three targets from 2.3 s to 13.7 s, and the
+  spread tracks how many loops a project writes rather than how many files it
+  has — healthchecks has 653 files and 263 loops, netbox 1,213 files and 2,099.
+  One ceiling then measures only the slowest target while the other two are
+  free to drift by 5x, which is the exact failure the shared number was
+  introduced to prevent, so `budget` moved onto each matrix entry: 6 s for
+  healthchecks, 22 s for netbox and pretix, each set from a measured run with
+  roughly 50% headroom for runner variance. The number went up because the tool
+  now does more, and that is recorded here rather than smoothed away — but per
+  risk 14 these are local timings on a loaded box and CI decides the real
+  position.
 
   **What the gate found on its first CI run — including a defect in itself.**
   It reported healthchecks 0.90/1.09/1.39s, NetBox 7.08/11.07/12.99s, pretix
@@ -3484,7 +3550,7 @@ conversation.
 | 5 | Django 6.0 vs 5.2 behavioural drift | Medium | Medium | Version-aware rule gating from the detected version |
 | 6 | Live tier executes hostile code | Low | Critical | Opt-in, sandboxed, timed out, no inherited secrets, explicit consent message |
 | 7 | Model graph wrong on unusual patterns | Medium | Medium | Checked against each target's own migrations by `scripts/graph_coverage.py`; every gap must be attributed or the build fails |
-| 8 | Analysis too slow on large repositories | Medium | Medium | **Mitigated in Phase 3.** `scripts/timing_gate.py` runs on every benchmark target in CI and fails the build over a 10 s budget declared once, in `RUN_BUDGET_SECONDS`, so the slowest target binds it rather than a chosen one. It takes the best of three runs because runner noise is one-sided, collecting between samples so they do not measure each other, and refuses to time a run that emitted a blocking diagnostic or crashed a rule — an incomplete run is fast for the worst possible reason. Substep 3.6.3's single-pass fix took the slowest target from 8.4 s to 6.3 s, and suppressing generation-2 collection for the span of a run removed a further 19–22% |
+| 8 | Analysis too slow on large repositories | Medium | Medium | **Mitigated in Phase 3.** `scripts/timing_gate.py` runs on every benchmark target in CI and fails the build over a per-target budget carried on each CI matrix entry — 6 s for healthchecks, 22 s for netbox and pretix. It was one shared number until Step 3.2's whole-project dataflow spread the targets from 2.3 s to 13.7 s along how many loops each project writes rather than how large it is, at which point a single ceiling measured only the slowest and let the other two drift by 5x. It takes the best of three runs because runner noise is one-sided, collecting between samples so they do not measure each other, and refuses to time a run that emitted a blocking diagnostic or crashed a rule — an incomplete run is fast for the worst possible reason. Substep 3.6.3's single-pass fix took the slowest target from 8.4 s to 6.3 s, and suppressing generation-2 collection for the span of a run removed a further 19–22% |
 | 9 | LLM layer erodes determinism | Medium | High | Model may never create or suppress a finding; all output labelled |
 | 10 | Benchmark repositories drift | Low | Low | Pinned by commit SHA; updated deliberately |
 | 11 | A project djaudit cannot read scores as a clean one | Medium | High | Discovery emits a blocking diagnostic rather than returning quietly, and `run`, `eval` and `benchmark` all refuse to exit 0 on one. Pinned by tests using a class-configured project, which is the shape we detect and cannot yet parse |
@@ -3501,7 +3567,7 @@ conversation.
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
 | 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | **Complete** (PR #3) — `DJA-001`…`DJA-015`, `DJD-001`…`DJD-003`, 100% precision on three real targets |
-| 3 | Performance and injection | 6 | 35 | Not started |
+| 3 | Performance and injection | 6 | 35 | In progress |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
 | 5 | Portability and external adapters | 4 | 20 | Not started |
 | 6 | LLM layer | 5 | 17 | Not started |
@@ -3510,9 +3576,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **45 rules are
+document specifies, and most of it is still only specified: **46 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, and none introduced after them.
+2, plus the first of Phase 3's.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against
@@ -3526,7 +3592,7 @@ same commit.
 benchmark targets and checked against each target's own migrations by
 `scripts/graph_coverage.py`, which reads `AddField`/`CreateModel` operations as
 an independent oracle — Healthchecks resolves completely, NetBox and pretix
-leave only attributed gaps. 45 rules ship behind 1,634 tests. Six planted-defect
+leave only attributed gaps. 46 rules ship behind 2,039 tests. Six planted-defect
 fixtures score 100% precision and 100% recall over 56 expected findings, with 97
 `must_not_report` assertions pinning the near misses. The three real targets
 report 62 findings, every one triaged with a file and line that the benchmark

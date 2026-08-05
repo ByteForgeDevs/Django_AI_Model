@@ -12,6 +12,7 @@ from djaudit.models import Location
 
 if TYPE_CHECKING:
     from djaudit.api.discovery import ApiSurface
+    from djaudit.dataflow.inventory import LoopSite
     from djaudit.graph.nodes import ModelGraph
 
 MAX_SNIPPET_LENGTH = 240
@@ -97,9 +98,11 @@ class ProjectContext:
     """Whether the target's virtualenv is available for live-tier rules."""
 
     _trees: dict[Path, ast.Module | None] = field(default_factory=dict, repr=False)
+    _source: dict[Path, str | None] = field(default_factory=dict, repr=False)
     _lines: dict[Path, list[str]] = field(default_factory=dict, repr=False)
     _model_graph: ModelGraph | None = field(default=None, repr=False)
     _api_surface: ApiSurface | None = field(default=None, repr=False)
+    _loops: tuple[LoopSite, ...] | None = field(default=None, repr=False)
     _modules: dict[str, Path] | None = field(default=None, repr=False)
     parse_errors: dict[Path, str] = field(default_factory=dict, repr=False)
 
@@ -133,6 +136,19 @@ class ProjectContext:
 
             self._api_surface = build_api_surface(self, self.model_graph)
         return self._api_surface
+
+    @property
+    def loops(self) -> tuple[LoopSite, ...]:
+        """Every loop in the project, resolved once and shared by all `DJP` rules.
+
+        Lazy for the same reason the model graph is, and more so: a run that
+        asks only about settings never builds a def-use chain at all.
+        """
+        if self._loops is None:
+            from djaudit.dataflow.inventory import build_loop_inventory  # noqa: PLC0415
+
+            self._loops = build_loop_inventory(self)
+        return self._loops
 
     def module_path(self, dotted: str) -> Path | None:
         """The file a dotted module name refers to, or ``None`` if it is not ours.
@@ -170,6 +186,23 @@ class ProjectContext:
         except ValueError:
             return path.as_posix()
 
+    def source(self, path: Path) -> str | None:
+        """File text, read once and shared by parsing, snippets and pre-checks.
+
+        Reading was previously done separately by :meth:`parse` and
+        :meth:`lines`, so any rule that needed both paid for two reads of every
+        file it touched. One cache also lets a caller ask a cheap textual
+        question -- "could this file contain a loop at all" -- without paying
+        for a parse to find out.
+        """
+        if path not in self._source:
+            try:
+                self._source[path] = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                self.parse_errors[path] = str(exc)
+                self._source[path] = None
+        return self._source[path]
+
     def parse(self, path: Path) -> ast.Module | None:
         """Parse a file, caching the tree. Returns ``None`` on syntax errors.
 
@@ -178,22 +211,21 @@ class ProjectContext:
         """
         if path in self._trees:
             return self._trees[path]
-        tree: ast.Module | None
-        try:
-            source = path.read_text(encoding="utf-8")
-            tree = ast.parse(source, filename=str(path))
-        except (SyntaxError, UnicodeDecodeError, OSError, ValueError) as exc:
-            self.parse_errors[path] = str(exc)
-            tree = None
+        tree: ast.Module | None = None
+        source = self.source(path)
+        if source is not None:
+            try:
+                tree = ast.parse(source, filename=str(path))
+            except (SyntaxError, ValueError) as exc:
+                self.parse_errors[path] = str(exc)
+                tree = None
         self._trees[path] = tree
         return tree
 
     def lines(self, path: Path) -> list[str]:
         if path not in self._lines:
-            try:
-                self._lines[path] = path.read_text(encoding="utf-8").splitlines()
-            except (OSError, UnicodeDecodeError):
-                self._lines[path] = []
+            source = self.source(path)
+            self._lines[path] = source.splitlines() if source is not None else []
         return self._lines[path]
 
     def snippet(self, path: Path, line: int, end_line: int | None = None) -> str:

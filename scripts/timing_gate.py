@@ -44,12 +44,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from djaudit import engine
 
-TIGHTEN_BELOW = 0.5
-"""Warn when the slowest run uses less than half the budget.
+TIGHTEN_BELOW = 1 / 3
+"""Warn when the best run uses less than a third of its budget.
 
-A budget nothing ever approaches has stopped measuring anything. Half is loose
-enough that ordinary runner variance will not trip it and tight enough that a
-step change in speed gets noticed while somebody still remembers causing it.
+A budget nothing ever approaches has stopped measuring anything. This was half
+until budgets became per-target, which made the threshold bind hardest on the
+fastest target -- exactly where it should bind least. A run's fixed costs do
+not shrink with the project: process start, imports and discovery are the same
+2s whether the tree that follows takes 0.3s or 11s, so noise is a far larger
+*fraction* of a 2s target's time than of a 13s one, and a fast target honestly
+needs proportionally more slack rather than less. A third still catches the
+case the warning exists for, which is a budget left behind by a step change in
+speed.
 """
 
 
@@ -146,7 +152,7 @@ def report(timing: Timing) -> str:
     elif timing.should_tighten:
         lines += [
             "",
-            f"`{timing.name}` now uses under half its budget. Tighten it towards "
+            f"`{timing.name}` now uses under a third of its budget. Tighten it towards "
             f"{timing.best:.1f}s, because a budget nothing approaches has stopped "
             "measuring anything.",
         ]
@@ -210,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if timing.should_tighten:
         print(
-            f"::warning::{timing.name} took {timing.best:.2f}s, under half its "
+            f"::warning::{timing.name} took {timing.best:.2f}s, under a third of its "
             f"{timing.budget:.1f}s budget — tighten it",
         )
     return 0

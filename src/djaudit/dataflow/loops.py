@@ -147,6 +147,13 @@ class Loop:
     """``prefetch_related()`` followed by ``iterator()`` with no
     ``chunk_size``: a ``ValueError`` at runtime on Django >= 4.1."""
 
+    per_iteration: tuple[ast.expr, ...] = ()
+    """Expressions a comprehension evaluates once per row -- its result parts
+    and its own filters. A `for` statement carries these in :attr:`body`
+    instead; a comprehension has no statements, and a rule that only read
+    `body` would be blind to `[b.author.name for b in books]`, which is the
+    single most compact way to write an N+1."""
+
     @property
     def anchor(self) -> ast.expr | ast.stmt:
         """A node that carries a source position.
@@ -324,7 +331,7 @@ class _Finder:
     def loop(self, node: ast.For | ast.AsyncFor, depth: int) -> None:
         self.comprehensions(node.iter, depth)
         kind = LoopKind.FOR if isinstance(node, ast.For) else LoopKind.ASYNC_FOR
-        self.found.append(self._build(node, kind, node.target, node.iter, depth))
+        self.found.append(self._build(node, kind, depth))
         self.visit(node.body, depth + 1)
         self.visit(node.orelse, depth)
 
@@ -337,15 +344,15 @@ class _Finder:
         if isinstance(node, NESTED_SCOPES):
             return
         if isinstance(node, COMPREHENSIONS):
+            parts = tuple(_result_parts(node))
             for offset, gen in enumerate(node.generators):
                 self.comprehensions(gen.iter, depth + offset)
                 self.found.append(
                     self._build(
                         gen,
                         LoopKind.COMPREHENSION,
-                        gen.target,
-                        gen.iter,
                         depth + offset,
+                        (*parts, *gen.ifs),
                     )
                 )
                 for test in gen.ifs:
@@ -362,10 +369,12 @@ class _Finder:
         self,
         node: ast.For | ast.AsyncFor | ast.comprehension,
         kind: LoopKind,
-        target: ast.expr,
-        iterable: ast.expr,
         depth: int,
+        per_iteration: tuple[ast.expr, ...] = (),
     ) -> Loop:
+        # Both loop kinds carry these on the node, and passing them separately
+        # only creates a way for them to disagree with it.
+        target, iterable = node.target, node.iter
         shape = _shape(iterable)
         if shape is not None:
             targets, wrappers, value = self._structured(target, *shape)
@@ -383,6 +392,7 @@ class _Finder:
             wrappers=wrappers,
             unbounded_rows=spec is None or not spec.sliced,
             prefetch_conflict=_prefetch_conflict(value, iterable),
+            per_iteration=per_iteration,
         )
 
     def _flat(self, target: ast.expr, value: QuerysetValue | None) -> tuple[Target, ...]:
@@ -457,6 +467,19 @@ def _expressions(node: ast.stmt) -> Iterator[ast.expr]:
     for child in ast.iter_child_nodes(node):
         if isinstance(child, ast.expr):
             yield child
+
+
+def scope_has_loop(scope: Scope) -> bool:
+    """Whether ``find_loops`` could return anything for this scope.
+
+    A cheap pre-check so a caller can skip building def-use chains for the many
+    scopes -- over 90% of them on a real project -- that contain no loop at
+    all. The answer is recorded by :func:`build_scopes` as it goes, so asking
+    is free; a test asserts it agrees with ``find_loops`` on every scope of
+    three real projects, because a pre-filter that is merely *nearly* right
+    silently deletes findings rather than failing.
+    """
+    return scope.has_loop
 
 
 def find_loops(
