@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJP` — performance and ORM efficiency
 
-3 rules on the queries a Django project makes without meaning to. The ORM
+4 rules on the queries a Django project makes without meaning to. The ORM
 makes the expensive thing and the cheap thing look identical: `book.author.name`
 is an attribute access whether the author arrived with the book or costs its own
 round trip, and the source gives no indication which. Every rule here reports a
@@ -52,6 +52,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJP-001`](#djp-001--forward-relation-followed-in-a-loop-without-select_related) | Forward relation followed in a loop without select_related | medium | firm |
 | [`DJP-002`](#djp-002--reverse-or-many-to-many-relation-evaluated-in-a-loop-without-prefetch_related) | Reverse or many-to-many relation evaluated in a loop without prefetch_related | medium | firm |
 | [`DJP-003`](#djp-003--serializer-method-walks-a-relation-the-views-queryset-did-not-fetch) | Serializer method walks a relation the view's queryset did not fetch | high | firm |
+| [`DJP-004`](#djp-004--query-executed-inside-a-loop) | Query executed inside a loop | high | firm |
 
 ---
 
@@ -119,3 +120,26 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://www.django-rest-framework.org/api-guide/fields/#serializermethodfield>
 - <https://docs.djangoproject.com/en/stable/topics/db/optimization/#retrieve-everything-at-once-if-you-know-you-will-need-it>
+
+---
+
+### DJP-004 — Query executed inside a loop
+
+**Severity** high · **Confidence** firm · **Tier** static
+
+**What it means.** A query written inside a loop body runs once per iteration. Unlike a missing `select_related`, no argument on the outer queryset can fix it: the loop is not following a relation, it is starting a new query whose parameters change each time round. The cost is invisible in development, where the loop runs over five rows, and the same code issues fifty thousand round trips against production data. Round trip latency dominates -- each query may be sub-millisecond in the database and still take the request minutes in aggregate.
+
+**How to fix it.** Fetch the whole set once before the loop and index it in memory: `by_id = Author.objects.in_bulk(ids)`, then read `by_id[row.author_id]` inside. Where the loop reads a relation of the row, `select_related` or `prefetch_related` on the queryset that produced the rows is the shorter fix. Where the query does not depend on the iteration at all, hoist it above the loop.
+
+**What this rule cannot see.**
+
+- A lazy chain is not reported. `Book.objects.filter(...)` built in a loop and never evaluated there costs nothing, and the round trip belongs to whatever consumes it.
+- Writes are left to DJP-007, whose remediation -- `bulk_create`, `bulk_update`, a single `update()` -- is not a drop-in replacement and deserves its own message.
+- A related-manager read is left to DJP-002 and a forward-relation read to DJP-001, which can name the fetch that fixes them. This rule reports only queries that start over at the manager.
+- A query rooted at `self.get_queryset()` or at a name we cannot resolve is not reported, because the finding could not say which model to fetch instead.
+- Loop bounds are not considered. A loop over three constants issues three queries, which is reported in the same terms as a loop over a table.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/topics/db/optimization/#retrieve-everything-at-once-if-you-know-you-will-need-it>
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#in-bulk>

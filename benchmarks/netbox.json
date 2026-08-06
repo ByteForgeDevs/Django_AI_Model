@@ -297,6 +297,336 @@
       "note": "Verified against source. A VirtualMachine queryset with `vm.device` read per row inside a bulk-edit assertion. True by mechanism, test code, no production cost -- the same scoping question as the two other test-file findings rather than a wrong claim."
     },
     {
+      "fingerprint": "69a7db935ca4b526",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_custom_validation.py",
+      "line": 143,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "`for provider in Provider.objects.all():` at line 142 with `len(provider.asns.all())` at 143. `asns` is a forward ManyToManyField on circuits.Provider, so the far side is many rows and no join can flatten it -- `select_related` is not an option here, only `prefetch_related('asns')`. The queryset is a bare `.all()` with no prefetch, so this is one extra SELECT per provider. Test code, so the runtime cost is a slow suite rather than a slow request, but the detection is exactly right and the fix is one chained call."
+    },
+    {
+      "fingerprint": "39500fbbb00f2aa5",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_custom_validation.py",
+      "line": 155,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "`for provider in Provider.objects.all():` at line 154 with `provider.asns.exists()` at 155. `.exists()` is genuinely fixed by prefetching and this is worth stating because it is not obvious: the related manager's `get_queryset()` returns the entry in `_prefetched_objects_cache` when one exists, and `QuerySet.exists()` short-circuits to `bool(self._result_cache)` whenever the cache is populated. So `prefetch_related('asns')` removes this query rather than merely adding one. Without it, one SELECT per provider."
+    },
+    {
+      "fingerprint": "de29c809fb2d61fc",
+      "rule_id": "DJP-003",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/api/serializers_/cables.py",
+      "line": 123,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-06",
+      "note": "`CabledObjectSerializer.get_link_peers_type` at line 119 opens with `if not obj.cable:`, and `CircuitTerminationSerializer` inherits it. `circuits.CircuitTermination.cable` is a ForeignKey, and `CircuitTerminationViewSet.queryset` is a bare `CircuitTermination.objects.all()` (circuits/api/views.py:54) that fetches it by neither `select_related` nor `prefetch_related`. One query per terminated circuit on every list page. The serializer also declares `cable = CableSerializer(nested=True)`, so the same row is wanted twice over; the fix is one `select_related('cable')` on the view."
+    },
+    {
+      "fingerprint": "63215967ab52290f",
+      "rule_id": "DJP-003",
+      "verdict": "accepted_risk",
+      "file": "netbox/dcim/api/serializers_/cables.py",
+      "line": 123,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-06",
+      "note": "Same inherited `get_link_peers_type` reading `obj.cable`, but reached through `InterfaceViewSet`, whose queryset calls `prefetch_related(GenericPrefetch('cable__terminations__termination', [...]))`. djaudit cannot read a `GenericPrefetch` argument, so it records `unreadable={'prefetch_related'}` and reports this tentative rather than firm. That downgrade is the correct verdict and the finding is very likely already fixed: `scripts/prefetch_cache_probe.py` measures `prefetch_related('vm__site')` at 3 queries against a 5-query baseline, so a prefetch through a forward foreign key does populate it. Kept as accepted_risk rather than deleted because the tentative tier is exactly where an unanswerable coverage question belongs."
+    },
+    {
+      "fingerprint": "c82dbe3ea7e96b27",
+      "rule_id": "DJP-003",
+      "verdict": "true_positive",
+      "file": "netbox/extras/api/serializers_/scripts.py",
+      "line": 150,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-06",
+      "note": "`ScriptSerializer.get_display` at line 149 returns `f'{obj.name} ({obj.module})'`, and `extras.Script.module` is a ForeignKey to `ScriptModule` (extras/models/scripts.py:33). `ScriptViewSet.queryset` is a bare `Script.objects.all()` (extras/api/views.py:316) with no `select_related('module')` anywhere in the chain, so listing N scripts loads N module rows one at a time. The getter is declared on the serializer itself here but `display` is inherited, which is the shape the rule is built for: the declaration, the traversal and the queryset are in three different places and none of them shows a loop."
+    },
+    {
+      "fingerprint": "f1f383bb7a9ce78e",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/core/tests/test_models.py",
+      "line": 293,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "A `Notification.objects.filter(...).count()` asserted inside a loop over three job statuses. Three queries where one grouped count would do. Correct detection, demoted by the tests scope, and the loop is over a literal tuple so the cost is fixed and small."
+    },
+    {
+      "fingerprint": "cf45ca92c360bed5",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/core/tests/test_models.py",
+      "line": 321,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "Same per-status count assertion, this time over the two failure statuses, in the `NOTIFICATION_ON_FAILURE` case. Two queries. Correct and demoted for the same reason as the sibling findings in this file; recorded so the family's behaviour on repeated shapes stays visible."
+    },
+    {
+      "fingerprint": "75e3dd343a024241",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/core/tests/test_models.py",
+      "line": 343,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "Third instance of the per-status count in this test class, covering `NOTIFICATION_NEVER`. The three findings in this file are distinct loops in distinct test methods rather than one loop counted three times, which is the property the `Step.call` keying is there to preserve."
+    },
+    {
+      "fingerprint": "740294ea8db3a707",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/tests/test_models.py",
+      "line": 1857,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`FrontPort.objects.get` is called once per front-port template while verifying a module bay installation, so the assertion loop issues one query per port. Demoted by the tests scope. Real, and the kind of loop that makes a model test suite slow once the fixture grows, but not a production path."
+    },
+    {
+      "fingerprint": "9a0c895330955856",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/tests/test_models.py",
+      "line": 1864,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The paired `PortMapping.objects.get` in the same loop body, doubling the per-iteration cost to two queries. Recorded separately because it is a second round trip rather than a re-read of the first. Test scope, so demoted; the detection itself is exact."
+    },
+    {
+      "fingerprint": "981a1ef575704733",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/utils.py",
+      "line": 130,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`create_interfaces` loops over the interface templates that declare a bridge and calls `Interface.objects.get(device=..., name=...)` for each, so instantiating a device type with fifty bridged interfaces costs fifty queries. The names are all derivable before the loop, so one `in_bulk`-style fetch keyed on name would replace the whole set. Firm and correct."
+    },
+    {
+      "fingerprint": "fba8824185f02225",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/utils.py",
+      "line": 136,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The second `Interface.objects.get` in the same loop resolves the bridge target, doubling the per-template cost to two queries. Same remediation as the first: both lookups are by `(device, name)` and every name is known before the loop starts, so a single prefetch into a dict would serve both. Counted separately because it is a distinct round trip, not an alias of the first."
+    },
+    {
+      "fingerprint": "2ed8530373f579aa",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_customfields.py",
+      "line": 1202,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`Site.objects.get(pk=response.data[i]['id'])` inside a loop over the API response rows, so a three-object bulk-create test issues three extra queries to re-read what it just posted. `in_bulk` on the returned ids would collapse them. Demoted by the tests scope; detection is exact."
+    },
+    {
+      "fingerprint": "274cd8143e968df8",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_customfields.py",
+      "line": 1282,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The same re-read-per-row pattern in the update variant of the custom-fields API test. Distinct loop, distinct method, same remediation. Recorded separately because the two findings are genuinely two loops, not one loop reported twice."
+    },
+    {
+      "fingerprint": "92522647c47ffa66",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_event_rules.py",
+      "line": 212,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`EventRule.objects.get(name='Event Rule 1')` is called inside a loop over queued jobs, and the argument does not depend on the loop variable at all -- the identical row is fetched on every iteration. This is the clearest possible case: hoisting the query above the loop is a pure win with no behavioural change. Test scope, so demoted, but the pattern is worth flagging anywhere."
+    },
+    {
+      "fingerprint": "fd85a3edcde6ade8",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_event_rules.py",
+      "line": 301,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "Same loop-invariant `EventRule.objects.get` in the object-updated test, fetching 'Event Rule 2' once per queued job. Identical remediation: bind it to a local above the loop. Correct detection."
+    },
+    {
+      "fingerprint": "e366d127226e50fb",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_event_rules.py",
+      "line": 362,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "Third loop-invariant `EventRule.objects.get`, this time for 'Event Rule 3' in the object-deleted test. All three were written the same way, which is the recurring-copy pattern that makes automated detection worth more than review here."
+    },
+    {
+      "fingerprint": "8a388fd48f4831c3",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/management/commands/rebuild_prefixes.py",
+      "line": 23,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`rebuild_prefixes` counts prefixes per VRF inside a loop over every VRF, purely to print a progress line. One `VRF.objects.annotate(Count('prefixes'))` would produce the same output in a single query. The loop body then calls `rebuild_prefixes(vrf.pk)`, which is the expensive part, so the count is not the dominant cost -- but it is still one avoidable round trip per VRF in a management command."
+    },
+    {
+      "fingerprint": "ee45e5c2be7e22a8",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 738,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`Prefix.objects.filter(...).exists()` asserted once per generated prefix inside `for i in range(3)`. Three existence queries where one `filter(prefix__in=[...])` and a count would do. Bounded and cheap, demoted by the tests scope, but a correct reading of the code."
+    },
+    {
+      "fingerprint": "e863b1a600f15434",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 759,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The IPv6 variant of the same assertion loop, four iterations, four existence queries. Same remediation. Recorded to keep the benchmark honest about how often this rule fires on assertion loops, which is the main thing the tests-scope demotion is calibrated against."
+    },
+    {
+      "fingerprint": "fab88a9441d36103",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 783,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "Eight existence queries, one per expected hex value, in the uppercase-hex prefix test. The list is a literal, so the query count is fixed at eight; a single `values_list('prefix', flat=True)` fetch compared against the expected set would replace the loop entirely."
+    },
+    {
+      "fingerprint": "a2b673de63af290a",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 2222,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`VLAN.objects.filter(group=..., vid=vid, name=...).exists()` once per expected VID, and the expected list can run to dozens of entries for a range pattern like '1,10-20,300-305'. This is the largest of the assertion loops in this file by query count. Correct, demoted by scope."
+    },
+    {
+      "fingerprint": "386ee0a887694fec",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 2286,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`VLANGroup.objects.get(name=group_name)` inside the case loop -- one query per parameterised case. Only two cases here, so the cost is trivial, but the shape is the same one that matters in production code and the rule cannot tell the difference from the loop alone."
+    },
+    {
+      "fingerprint": "57ef1913c4d95dbe",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 2287,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`VLAN.objects.count()` captured as `initial_count` at the top of each case iteration. Loop-invariant in intent but not in fact, since the preceding case creates VLANs -- so it genuinely must be re-read and the remediation is to track the expected count in Python instead. Correct detection."
+    },
+    {
+      "fingerprint": "7373785802e09734",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 2296,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The closing `VLAN.objects.count()` assertion in the same case loop, a second round trip per case. Distinct call from the `initial_count` read above it, so it is a separate finding rather than an alias, which is what keying on the call node is for."
+    },
+    {
+      "fingerprint": "377b6bca0ff37e42",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 2298,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The only depth-2 finding in NetBox: an existence query inside `for vid in expected_vids` which is itself inside `for pattern, expected_vids, group_name in cases`, so the total is the product of the two loop bounds. Escalated to critical by the nested-loop rule and then demoted by the tests scope, which is the interaction the two adjustments are meant to produce."
+    },
+    {
+      "fingerprint": "822c6113921fd82b",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 2315,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`VLAN.objects.count()` asserted once per invalid pattern, verifying nothing was created. Five iterations, five counts. The count is genuinely required each time to prove the invariant held, so the honest fix is fewer assertions rather than a hoisted query. Correct, low practical impact."
+    },
+    {
+      "fingerprint": "1c16b2066c581f92",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/netbox/authentication/__init__.py",
+      "line": 185,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "Remote authentication resolves each group name with its own `Group.objects.get(name=name)`, so a user carrying twenty group assertions costs twenty queries on every login. A single `Group.objects.in_bulk(remote_groups, field_name='name')` would answer all of them, with the `DoesNotExist` branch becoming a membership test on the returned mapping. Bounded by the identity provider's group count rather than by table size, but it runs on the login path."
+    },
+    {
+      "fingerprint": "89aaabca87c16d49",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/netbox/authentication/__init__.py",
+      "line": 274,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The same per-name `Group.objects.get` pattern in the second remote-auth backend, this time over `settings.REMOTE_AUTH_DEFAULT_GROUPS`. The list is configuration rather than user input, so it is usually short, but the query count still scales with it and the fix is the same single `in_bulk` call. Reported and correct; the practical severity depends on deployment configuration."
+    },
+    {
+      "fingerprint": "3da5a2c37f80664f",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/netbox/authentication/__init__.py",
+      "line": 396,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "Third occurrence of the same loop in the third remote-auth backend, again over `REMOTE_AUTH_DEFAULT_GROUPS`. That djaudit finds all three independently is the useful property here: the pattern was copied between backends, and a reviewer reading one file would have no reason to suspect the other two. Same remediation, same bound on cost."
+    },
+    {
+      "fingerprint": "6724221399ead0c3",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/users/tests/test_api.py",
+      "line": 457,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`Token.objects.get(pk=obj['id'])` per row of the API response, to validate each returned plaintext token. The ids are all known from `response.data`, so `in_bulk` would serve the loop in one query. Demoted by the tests scope; the detection is exact and the remediation is straightforward."
+    },
+    {
+      "fingerprint": "6a8e427b79d5fb7b",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/utilities/testing/base.py",
+      "line": 187,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`ObjectType.objects.get(pk=value)` inside `model_to_dict`'s field loop in NetBox's shared test utilities, so every content-type-valued field on every compared instance costs a query. This one is worth more than most test findings because the helper is called from a large share of the API test suite, so the multiplier is the whole suite rather than one method. `ObjectType` is also eminently cacheable. Still demoted by scope, since it is test-support code."
+    },
+    {
+      "fingerprint": "da8a779c148d48ea",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/utilities/testing/views.py",
+      "line": 1163,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`ObjectChange.objects.filter(...).order_by('-time').first()` per primary key while verifying bulk rename changelog entries, so the assertion costs one query per renamed object. One filtered query over `changed_object_id__in=pk_list` would return the whole set. Shared test utility, so it runs across many test classes; demoted by scope but genuinely worth fixing."
+    },
+    {
       "fingerprint": "745b70a3b644900f",
       "rule_id": "DJS-006",
       "verdict": "accepted_risk",
@@ -355,56 +685,6 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-03",
       "note": "django-debug-toolbar in base_requirements.txt:15, pinned through to requirements.txt:4. NetBox handles this about as well as it can be handled with a single distribution: settings.py:472 lists debug_toolbar in INSTALLED_APPS and settings.py:511 removes it again under `if not DEBUG and 'collectstatic' not in sys.argv`, so the app is not installed on a normal production run. That is precisely why DJS-024 stays silent here and why this rule speaks instead: the package is still on the machine, and what keeps the toolbar off is the value of DEBUG rather than the absence of the code. NetBox is a self-hosted product whose operators are told to enable DEBUG when troubleshooting -- shipping the toolbar so that it works when they do is a deliberate product decision, not an oversight, and splitting the image in two to avoid it would cost their users more than it saves. Accepted rather than false positive because the statement is true and the exposure is real: an operator who leaves DEBUG on after an incident gets a SQL panel, and NetBox's own threat model would rather they knew that. The rule is low severity for exactly this reason -- it is a fact about the deployment, not an accusation."
-    },
-    {
-      "fingerprint": "69a7db935ca4b526",
-      "rule_id": "DJP-002",
-      "verdict": "true_positive",
-      "file": "netbox/extras/tests/test_custom_validation.py",
-      "line": 143,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-03",
-      "note": "`for provider in Provider.objects.all():` at line 142 with `len(provider.asns.all())` at 143. `asns` is a forward ManyToManyField on circuits.Provider, so the far side is many rows and no join can flatten it -- `select_related` is not an option here, only `prefetch_related('asns')`. The queryset is a bare `.all()` with no prefetch, so this is one extra SELECT per provider. Test code, so the runtime cost is a slow suite rather than a slow request, but the detection is exactly right and the fix is one chained call."
-    },
-    {
-      "fingerprint": "39500fbbb00f2aa5",
-      "rule_id": "DJP-002",
-      "verdict": "true_positive",
-      "file": "netbox/extras/tests/test_custom_validation.py",
-      "line": 155,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-03",
-      "note": "`for provider in Provider.objects.all():` at line 154 with `provider.asns.exists()` at 155. `.exists()` is genuinely fixed by prefetching and this is worth stating because it is not obvious: the related manager's `get_queryset()` returns the entry in `_prefetched_objects_cache` when one exists, and `QuerySet.exists()` short-circuits to `bool(self._result_cache)` whenever the cache is populated. So `prefetch_related('asns')` removes this query rather than merely adding one. Without it, one SELECT per provider."
-    },
-    {
-      "fingerprint": "c82dbe3ea7e96b27",
-      "rule_id": "DJP-003",
-      "verdict": "true_positive",
-      "file": "netbox/extras/api/serializers_/scripts.py",
-      "line": 150,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-06",
-      "note": "`ScriptSerializer.get_display` at line 149 returns `f'{obj.name} ({obj.module})'`, and `extras.Script.module` is a ForeignKey to `ScriptModule` (extras/models/scripts.py:33). `ScriptViewSet.queryset` is a bare `Script.objects.all()` (extras/api/views.py:316) with no `select_related('module')` anywhere in the chain, so listing N scripts loads N module rows one at a time. The getter is declared on the serializer itself here but `display` is inherited, which is the shape the rule is built for: the declaration, the traversal and the queryset are in three different places and none of them shows a loop."
-    },
-    {
-      "fingerprint": "de29c809fb2d61fc",
-      "rule_id": "DJP-003",
-      "verdict": "true_positive",
-      "file": "netbox/dcim/api/serializers_/cables.py",
-      "line": 123,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-06",
-      "note": "`CabledObjectSerializer.get_link_peers_type` at line 119 opens with `if not obj.cable:`, and `CircuitTerminationSerializer` inherits it. `circuits.CircuitTermination.cable` is a ForeignKey, and `CircuitTerminationViewSet.queryset` is a bare `CircuitTermination.objects.all()` (circuits/api/views.py:54) that fetches it by neither `select_related` nor `prefetch_related`. One query per terminated circuit on every list page. The serializer also declares `cable = CableSerializer(nested=True)`, so the same row is wanted twice over; the fix is one `select_related('cable')` on the view."
-    },
-    {
-      "fingerprint": "63215967ab52290f",
-      "rule_id": "DJP-003",
-      "verdict": "accepted_risk",
-      "file": "netbox/dcim/api/serializers_/cables.py",
-      "line": 123,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-06",
-      "note": "Same inherited `get_link_peers_type` reading `obj.cable`, but reached through `InterfaceViewSet`, whose queryset calls `prefetch_related(GenericPrefetch('cable__terminations__termination', [...]))`. djaudit cannot read a `GenericPrefetch` argument, so it records `unreadable={'prefetch_related'}` and reports this tentative rather than firm. That downgrade is the correct verdict and the finding is very likely already fixed: `scripts/prefetch_cache_probe.py` measures `prefetch_related('vm__site')` at 3 queries against a 5-query baseline, so a prefetch through a forward foreign key does populate it. Kept as accepted_risk rather than deleted because the tentative tier is exactly where an unanswerable coverage question belongs."
     }
   ]
 }

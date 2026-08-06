@@ -3261,7 +3261,58 @@ We therefore build the dataflow foundation first, and we default this family to
   likely already fixed by the prefetch we cannot read. **0% false-positive
   rate** at `firm`. Thirteen guards, all shown load-bearing by defect
   injection. Empty-API control reports nothing. 29 rule tests.
-- **3.2.4** — `DJP-004` query executed inside a loop body (`.get`, `.filter().first()`, `.count`, `.exists`).
+- **3.2.4** — `DJP-004` query executed inside a loop body (`.get`,
+  `.filter().first()`, `.count`, `.exists`). **Done.** The rule's difficulty is
+  not finding queries in loops, it is deciding which of them are one round trip
+  per row. The first measurement returned **539** findings; the number was
+  wrong three separate ways and each correction is a rule about what a finding
+  *is*. Dataflow classifies every later read of a name bound to a result, so
+  one `get()` answered at three subsequent uses of the variable counted three
+  times — findings are now keyed on `Step.call`, the node where the round trip
+  is *written*, which is also the test that keeps a queryset built above the
+  loop and merely read inside it from being reported. Chunked bulk writes were
+  reported, which tells people to undo an optimisation: `for chunk in batched(...):
+  bulk_create(chunk)` is the recommended pattern, so `bulk_create`, `bulk_update`
+  and `in_bulk` are excluded outright. And writes were reported alongside reads
+  under one remediation, when `DJP-007` already owns "`.save()` in a loop where
+  `bulk_update` applies" — their fixes skip signals and can leave primary keys
+  unset, so merging them would give half the findings advice that silently
+  changes behaviour. **539 → 83.**
+
+  Two guards were then deleted for failing to earn their place. Defect
+  injection showed the `Origin.RELATED` branch unreachable, and the reason was
+  not a bug: all 83 findings have a manager origin, because a walk off a row
+  already in hand is DJP-001's or DJP-002's, which can name the
+  `select_related` or `prefetch_related` that fixes it. Verified by running
+  DJP-002 on the same fixture and watching it report what DJP-004 skips. The
+  tentative-confidence branch was unreachable for a structural reason:
+  `_from_manager` only builds a value after resolving the model, so a manager
+  origin always has a known model. Both removed rather than left as guards that
+  cannot be shown to work. **Ten defects, all load-bearing.**
+
+  *Measured:* healthchecks 5, NetBox 28, pretix 50 — **83 findings, 0 false
+  positives**, 81 true positives and 2 accepted risks, every one triaged
+  against source. The two accepted risks are the interesting ones: Healthchecks
+  re-checks existence before each prune *because* rows disappear during a long
+  operation, and pretix's `create_nfc_mf0aes_keyset` writes its query inside
+  `for i in range(20)` that returns on success, so it runs once. Both are
+  correct readings of code whose loop bounds and control flow the rule does not
+  model, which is now a stated limitation. 15 rule tests.
+
+  This substep also settled a scoping question that DJP-001, DJP-002 and
+  DJP-004 had each hit separately: 35 of these 83 are in test or migration
+  files. Answering it per rule would have produced three different answers, so
+  it is answered once in `src/djaudit/scope.py`, for every rule in every
+  family. Findings in `tests/`, `testing/` and `migrations/` are **reported and
+  demoted one severity rank**, with the scope recorded in
+  `properties["scope"]` so the demotion is auditable rather than a number that
+  quietly disagrees with the rule's declared severity. Suppressing them was
+  rejected — nobody audits what they were not shown, and a data migration
+  issuing one query per row is how a deploy times out — and so was leaving them
+  equal, because the first screen is the only screen most people read and on
+  NetBox it would have been test helpers. Classification is by whole path
+  segment, so `latest/` and `contest.py` stay production. Severity is not part
+  of the fingerprint, so no baseline or triage entry was invalidated.
 - **3.2.5** — Prefetch-awareness refinement: honour `Prefetch(...)` objects, nested lookups, and `to_attr`. *Done when:* the false-positive rate on NetBox is measured and documented.
 
 ### Step 3.3 — Query efficiency rules
@@ -3656,9 +3707,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **48 rules are
+document specifies, and most of it is still only specified: **49 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first three of Phase 3's.
+2, plus the first four of Phase 3's.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

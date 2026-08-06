@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from djaudit import fingerprint as fp
+from djaudit import scope
 from djaudit.baseline import Baseline
 from djaudit.context import ProjectContext
 from djaudit.discovery import build_context
@@ -127,7 +128,7 @@ def _audit(
         ):
             result.suppressed_inline += 1
             continue
-        kept.append(finding)
+        kept.append(scope.apply(finding))
 
     kept = fp.assign(kept)
 

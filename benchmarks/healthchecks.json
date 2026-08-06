@@ -47,6 +47,56 @@
       "note": "Verified against source, and the real defect is worse than the finding says. The Check queryset is narrowed by `only(\"name\")` upstream, so `check.project` costs a query to load the project *and* the deferred `project_id` column is not there either. DJP-001 reports the relation traversal, which is the part it can prove; the deferred-column half belongs to a later rule in this family."
     },
     {
+      "fingerprint": "63b67051b63cbb2d",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "hc/accounts/management/commands/sendinactivitynotices.py",
+      "line": 68,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`sendinactivitynotices` loops over every profile due a deletion notice and runs `pings.exists()` for each one, so a mailing to N users costs N existence queries on a table that is by far the largest in Healthchecks. The set is knowable up front: one `Ping.objects.filter(created__gt=YEAR_AGO)` grouped by owner would answer the whole loop in a single round trip. Real, and in a management command that runs against the full user table."
+    },
+    {
+      "fingerprint": "9bc5fc3cbc67dddf",
+      "rule_id": "DJP-004",
+      "verdict": "accepted_risk",
+      "file": "hc/api/management/commands/prunepingsslow.py",
+      "line": 26,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The query is genuinely one per iteration, but the four lines of comment directly above it explain why: pruning every check is a long operation, checks can be deleted while it runs, and re-reading existence immediately before each prune is how the command avoids `DoesNotExist`. Hoisting it would defeat the purpose, because the whole point is that the answer must be fresh at the moment of use. A correct detection of a deliberate design decision, so it is recorded rather than suppressed."
+    },
+    {
+      "fingerprint": "a7e4e0be5657b2a9",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "hc/api/migrations/0067_last_error_values.py",
+      "line": 17,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "Data migration 0067 walks every `Channel` and calls `Notification.objects.filter(channel=ch).latest()` inside the loop, which is one query per channel against a table that grows with every notification ever sent. Demoted to medium because the file is a migration: it runs once, and Django will not let you edit it after it has been applied, so the fix would have to be a second migration. Reported because a migration that issues one query per row is exactly how a deploy times out."
+    },
+    {
+      "fingerprint": "4fe5403287b25f81",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "hc/api/migrations/0082_fill_last_notify.py",
+      "line": 16,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "Migration 0082 has the same shape as 0067 -- `Notification.objects.filter(channel=channel).latest()` once per channel -- and the same reasoning applies. Both could be a single query annotating each channel with its most recent notification. Recorded at the demoted severity that the migrations scope assigns, since the cost is bounded by one execution rather than by request volume."
+    },
+    {
+      "fingerprint": "0acb848a2815cb1b",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "hc/integrations/webhook/tests/test_add.py",
+      "line": 118,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`Channel.objects.count()` is asserted inside a loop over a list of invalid URLs, so the test issues one count per case. True by mechanism and demoted to medium by the tests scope: the loop runs over a handful of literals against an empty test database, so the practical cost is a few milliseconds. Kept as a true positive because the detection is correct and test-suite runtime is a real complaint."
+    },
+    {
       "fingerprint": "204f74697636c950",
       "rule_id": "DJS-001",
       "verdict": "accepted_risk",
