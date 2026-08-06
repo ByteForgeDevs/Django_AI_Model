@@ -3214,7 +3214,53 @@ We therefore build the dataflow foundation first, and we default this family to
   which runs a query per multiple-choice question on every export. Seven
   guards, all shown load-bearing by defect injection (2/6/2/1/1/5/2 test
   failures). Empty-graph control reports nothing. 42 rule tests.
-- **3.2.3** — `DJP-003` relation traversal inside a `SerializerMethodField` or serializer property, where the queryset is defined in the view — the most common real-world N+1 and the one existing tools miss.
+- **3.2.3** — `DJP-003` relation traversal inside a `SerializerMethodField`,
+  where the queryset is defined in the view. **Done.** Every other rule in
+  this family starts from a `for`; this one has no loop to start from. DRF
+  supplies the repetition, the getter supplies the traversal, and the view
+  supplies the queryset that could have avoided it — three files, no `for`
+  anywhere, which is why it survives review. Making that reachable meant
+  refactoring `accesses`/`evaluations`/`reassigned` to take a plain tuple of
+  statements instead of a `LoopSite`, so a loop-less rule reuses the same
+  machinery. A view's branches are intersected, not unioned: a `get_queryset`
+  that adds `select_related` on one path and forgets it on another is still
+  reported.
+
+  Three defects were found by measuring rather than by testing, and each was
+  worth more than the rule's original yield. **The serializer was never
+  found.** `ClassIndex.resolve_name` returns the name as written, which for
+  NetBox's `from .circuits import *` re-export packages is the re-export
+  path, not the definition. `lookup` follows the star and its record carries
+  the canonical label. Keying on the written name linked 1 of NetBox's 137
+  serializer-bearing views. **The getter was never found.** 177 of NetBox's
+  187 reachable method fields declare the field on a base class and implement
+  `get_<field>` there too; searching only the subclass found ten. The rule now
+  walks `ClassIndex.ancestry` and reports at the file where the traversal is
+  written, which is usually not the file the view names. **An unreadable fetch
+  was read as no fetch.** `InterfaceViewSet` calls
+  `prefetch_related(GenericPrefetch("cable__terminations__termination", ...))`;
+  a prefetch *through* a forward foreign key does populate it — measured at 3
+  queries against a 5-query baseline — so treating the unreadable argument as
+  absent produced a firm false positive. `ChainSpec.unreadable` now downgrades
+  to tentative, which is what that field was added for. Both halves of that
+  measurement are a new section in `scripts/prefetch_cache_probe.py`, shown
+  failing on a false claim before being trusted.
+
+  A fourth came out of defect injection and was a design fault, not a test
+  gap: `getter` signalled "no such method" with `LookupError`, and `IndexError`
+  is a `LookupError` subclass, so an out-of-range argument list was being
+  caught by the caller's handler. A guard looked dead because a bug was
+  quietly producing its result. It returns `None` now. The rule also dropped a
+  `len(walk.steps) < len(parts)` condition DJP-001 does not have: a bare
+  `obj.author` with nothing after it is still one query per row, and the two
+  rules must not disagree about what a forward relation costs.
+
+  *Measured:* healthchecks 0 — it does not use DRF at all — pretix 0, which
+  its two total `SerializerMethodField`s make credible, and NetBox **3**: two
+  firm, both true positives against source, and one tentative that is very
+  likely already fixed by the prefetch we cannot read. **0% false-positive
+  rate** at `firm`. Thirteen guards, all shown load-bearing by defect
+  injection. Empty-API control reports nothing. 29 rule tests.
 - **3.2.4** — `DJP-004` query executed inside a loop body (`.get`, `.filter().first()`, `.count`, `.exists`).
 - **3.2.5** — Prefetch-awareness refinement: honour `Prefetch(...)` objects, nested lookups, and `to_attr`. *Done when:* the false-positive rate on NetBox is measured and documented.
 
@@ -3610,9 +3656,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **47 rules are
+document specifies, and most of it is still only specified: **48 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first two of Phase 3's.
+2, plus the first three of Phase 3's.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

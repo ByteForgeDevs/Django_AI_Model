@@ -375,6 +375,36 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-03",
       "note": "`for provider in Provider.objects.all():` at line 154 with `provider.asns.exists()` at 155. `.exists()` is genuinely fixed by prefetching and this is worth stating because it is not obvious: the related manager's `get_queryset()` returns the entry in `_prefetched_objects_cache` when one exists, and `QuerySet.exists()` short-circuits to `bool(self._result_cache)` whenever the cache is populated. So `prefetch_related('asns')` removes this query rather than merely adding one. Without it, one SELECT per provider."
+    },
+    {
+      "fingerprint": "c82dbe3ea7e96b27",
+      "rule_id": "DJP-003",
+      "verdict": "true_positive",
+      "file": "netbox/extras/api/serializers_/scripts.py",
+      "line": 150,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-06",
+      "note": "`ScriptSerializer.get_display` at line 149 returns `f'{obj.name} ({obj.module})'`, and `extras.Script.module` is a ForeignKey to `ScriptModule` (extras/models/scripts.py:33). `ScriptViewSet.queryset` is a bare `Script.objects.all()` (extras/api/views.py:316) with no `select_related('module')` anywhere in the chain, so listing N scripts loads N module rows one at a time. The getter is declared on the serializer itself here but `display` is inherited, which is the shape the rule is built for: the declaration, the traversal and the queryset are in three different places and none of them shows a loop."
+    },
+    {
+      "fingerprint": "de29c809fb2d61fc",
+      "rule_id": "DJP-003",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/api/serializers_/cables.py",
+      "line": 123,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-06",
+      "note": "`CabledObjectSerializer.get_link_peers_type` at line 119 opens with `if not obj.cable:`, and `CircuitTerminationSerializer` inherits it. `circuits.CircuitTermination.cable` is a ForeignKey, and `CircuitTerminationViewSet.queryset` is a bare `CircuitTermination.objects.all()` (circuits/api/views.py:54) that fetches it by neither `select_related` nor `prefetch_related`. One query per terminated circuit on every list page. The serializer also declares `cable = CableSerializer(nested=True)`, so the same row is wanted twice over; the fix is one `select_related('cable')` on the view."
+    },
+    {
+      "fingerprint": "63215967ab52290f",
+      "rule_id": "DJP-003",
+      "verdict": "accepted_risk",
+      "file": "netbox/dcim/api/serializers_/cables.py",
+      "line": 123,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-06",
+      "note": "Same inherited `get_link_peers_type` reading `obj.cable`, but reached through `InterfaceViewSet`, whose queryset calls `prefetch_related(GenericPrefetch('cable__terminations__termination', [...]))`. djaudit cannot read a `GenericPrefetch` argument, so it records `unreadable={'prefetch_related'}` and reports this tentative rather than firm. That downgrade is the correct verdict and the finding is very likely already fixed: `scripts/prefetch_cache_probe.py` measures `prefetch_related('vm__site')` at 3 queries against a 5-query baseline, so a prefetch through a forward foreign key does populate it. Kept as accepted_risk rather than deleted because the tentative tier is exactly where an unanswerable coverage question belongs."
     }
   ]
 }

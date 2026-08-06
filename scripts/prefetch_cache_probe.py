@@ -43,6 +43,14 @@ from django.db import models
 
 class VM(models.Model):
     name = models.CharField(max_length=10)
+    site = models.ForeignKey("Site", on_delete=models.CASCADE, null=True)
+
+    class Meta:
+        app_label = "probeapp"
+
+
+class Site(models.Model):
+    name = models.CharField(max_length=10)
 
     class Meta:
         app_label = "probeapp"
@@ -66,6 +74,7 @@ from django.test.utils import CaptureQueriesContext  # noqa: E402
 
 VM = _models.VM
 Iface = _models.Iface
+Site = _models.Site
 
 CASES: dict[str, Callable[[Any], object]] = {
     ".all()": lambda vm: list(vm.interfaces.all()),
@@ -82,6 +91,21 @@ CASES: dict[str, Callable[[Any], object]] = {
 
 EXPECTED_TO_HELP = {".all()", "len(.all())", ".count()", ".exists()"}
 
+FORWARD: dict[str, Callable[[], object]] = {
+    "no fetch": lambda: Iface.objects.all(),  # noqa: PLW0108  (parallel to the rest)
+    "select_related('vm')": lambda: Iface.objects.select_related("vm"),
+    "prefetch_related('vm')": lambda: Iface.objects.prefetch_related("vm"),
+    "prefetch_related('vm__site')": lambda: Iface.objects.prefetch_related("vm__site"),
+}
+"""Reading `obj.vm` -- a *forward* foreign key -- under each fetch form.
+
+`ChainSpec.covers` treats `select_related` and `prefetch_related` as
+interchangeable for a forward relation and honours a longer path as covering
+its prefix. Both halves of that are claims about Django, so both are measured:
+everything below `no fetch` must cost strictly fewer queries, including the
+`vm__site` case that never names `vm` on its own.
+"""
+
 
 def queries(fn: Callable[[Any], object], *, prefetch: bool) -> int:
     qs = VM.objects.prefetch_related("interfaces") if prefetch else VM.objects.all()
@@ -91,12 +115,21 @@ def queries(fn: Callable[[Any], object], *, prefetch: bool) -> int:
     return len(captured)
 
 
+def forward_queries(build: Callable[[], object]) -> int:
+    """Queries spent reading `obj.vm` across every row of `build()`."""
+    with CaptureQueriesContext(connection) as captured:
+        for row in build():  # type: ignore[attr-defined]
+            _ = row.vm
+    return len(captured)
+
+
 def main() -> int:
     with connection.schema_editor() as editor:
+        editor.create_model(Site)
         editor.create_model(VM)
         editor.create_model(Iface)
     for i in range(3):
-        vm = VM.objects.create(name=f"v{i}")
+        vm = VM.objects.create(name=f"v{i}", site=Site.objects.create(name=f"s{i}"))
         for _ in range(2):
             Iface.objects.create(vm=vm)
 
@@ -108,6 +141,16 @@ def main() -> int:
         helps = pre < plain
         print(f"{label:24} {plain:>6} {pre:>11}  {'HELPS' if helps else 'NO HELP'}")
         if helps != (label in EXPECTED_TO_HELP):
+            wrong.append(label)
+
+    print(f"\n{'forward FK: reading obj.vm':32} {'queries':>8}  verdict")
+    baseline = forward_queries(FORWARD["no fetch"])
+    for label, build in FORWARD.items():
+        spent = forward_queries(build)
+        covered = spent < baseline
+        verdict = "baseline" if label == "no fetch" else ("COVERS" if covered else "NO HELP")
+        print(f"{label:32} {spent:>8}  {verdict}")
+        if label != "no fetch" and not covered:
             wrong.append(label)
 
     if wrong:

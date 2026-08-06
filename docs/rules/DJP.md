@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJP` — performance and ORM efficiency
 
-2 rules on the queries a Django project makes without meaning to. The ORM
+3 rules on the queries a Django project makes without meaning to. The ORM
 makes the expensive thing and the cheap thing look identical: `book.author.name`
 is an attribute access whether the author arrived with the book or costs its own
 round trip, and the source gives no indication which. Every rule here reports a
@@ -51,6 +51,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 |---|---|---|---|
 | [`DJP-001`](#djp-001--forward-relation-followed-in-a-loop-without-select_related) | Forward relation followed in a loop without select_related | medium | firm |
 | [`DJP-002`](#djp-002--reverse-or-many-to-many-relation-evaluated-in-a-loop-without-prefetch_related) | Reverse or many-to-many relation evaluated in a loop without prefetch_related | medium | firm |
+| [`DJP-003`](#djp-003--serializer-method-walks-a-relation-the-views-queryset-did-not-fetch) | Serializer method walks a relation the view's queryset did not fetch | high | firm |
 
 ---
 
@@ -94,4 +95,27 @@ $ djaudit run . --min-severity info --min-confidence tentative
 **References**
 
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#prefetch-related>
+- <https://docs.djangoproject.com/en/stable/topics/db/optimization/#retrieve-everything-at-once-if-you-know-you-will-need-it>
+
+---
+
+### DJP-003 — Serializer method walks a relation the view's queryset did not fetch
+
+**Severity** high · **Confidence** firm · **Tier** static
+
+**What it means.** A `SerializerMethodField` getter runs once per row serialized, so a relation walked inside it costs one query per row of every list the serializer appears in. Nothing in the serializer says so: the getter is an ordinary-looking function with no loop in it, and the repetition lives in DRF rather than in the project's own code. That is why this one survives review, and why it is worth reporting statically -- it is invisible at the place it is written, and the fix belongs to a different file than the mistake.
+
+**How to fix it.** Fetch the relation on the view's queryset rather than in the getter: `select_related` for a forward foreign key or one-to-one, `prefetch_related` for a reverse relation or many-to-many. The serializer method itself does not change -- it simply stops being the thing that triggers a query. Where the getter needs filtered or ordered related rows, pass a `Prefetch` object so the narrowing happens inside that single query.
+
+**What this rule cannot see.**
+
+- Only `get_<field>` is matched. A `SerializerMethodField` given an explicit `method_name=` is not followed.
+- A serializer no view attaches is not reported. Without a queryset there is no answer to whether the relation was already fetched, and guessing would report every serializer in the project.
+- A serializer selected by a `get_serializer_class` override is not linked to that view, so a getter reached only that way is silent.
+- A nested serializer is judged against the outer view's queryset; the nesting is not itself treated as a fetch requirement.
+- A view whose queryset we cannot read downgrades the finding to tentative rather than silencing it, since the traversal is still per-row and only the coverage question is unanswered.
+
+**References**
+
+- <https://www.django-rest-framework.org/api-guide/fields/#serializermethodfield>
 - <https://docs.djangoproject.com/en/stable/topics/db/optimization/#retrieve-everything-at-once-if-you-know-you-will-need-it>

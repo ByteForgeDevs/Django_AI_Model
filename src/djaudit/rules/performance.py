@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 from djaudit.context import ProjectContext
 from djaudit.dataflow.chaining import ChainSpec
@@ -66,14 +67,36 @@ def attribute_path(node: ast.Attribute, root: str) -> list[str] | None:
 
 @dataclass(frozen=True)
 class Rows:
-    """A loop over rows of a known model, and what its queryset fetched."""
+    """Repeated access to rows of a known model, and what the queryset fetched.
 
-    site: LoopSite
+    The repetition is usually a loop, but it does not have to be: DRF calls a
+    serializer method once per row without any `for` appearing in the source,
+    which is why this carries the statements to search rather than the loop.
+    """
+
+    body: tuple[ast.AST, ...]
+    """The statements that run once per row."""
+
     model: str
     name: str
     """The variable each row is bound to."""
 
     spec: ChainSpec
+
+    path: Path
+    """The file the repeated access is written in."""
+
+    lineno: int
+    """Where the repetition starts, for the reader to find it."""
+
+    origin: str
+    """One line naming what repeats, e.g. `loop at line 12 over app.Model`."""
+
+    repeated: bool = False
+    """Whether this already runs many times over, which multiplies the cost."""
+
+    depth: int = 1
+    """How many nested repetitions deep this is."""
 
 
 @dataclass(frozen=True)
@@ -113,13 +136,13 @@ def traversal(graph: ModelGraph, model: str, parts: list[str]) -> Traversal:
     return Traversal(tuple(steps), tuple(edges))
 
 
-def reassigned(site: LoopSite, name: str) -> bool:
-    """Whether the loop body rebinds the element name.
+def reassigned(body: tuple[ast.AST, ...], name: str) -> bool:
+    """Whether ``body`` rebinds the name holding the row.
 
     `for b in books: b = b.parent` means the attribute read later is not on a
     row of the queryset at all, and the chain says nothing about it.
     """
-    for node in _per_iteration(site):
+    for node in body:
         for child in ast.walk(node):
             targets: list[ast.expr] = []
             if isinstance(child, ast.Assign):
@@ -138,15 +161,15 @@ def _per_iteration(site: LoopSite) -> tuple[ast.AST, ...]:
     return (*site.loop.body, *site.loop.per_iteration)
 
 
-def accesses(site: LoopSite, root: str) -> Iterator[tuple[ast.Attribute, list[str]]]:
-    """Attribute chains on the element, outermost first.
+def accesses(body: tuple[ast.AST, ...], root: str) -> Iterator[tuple[ast.Attribute, list[str]]]:
+    """Attribute chains on the row, outermost first.
 
     Only the longest chain at each site is yielded: `b.author.name` contains
     `b.author` as a sub-expression, and reporting both would charge one query
     twice.
     """
     seen: set[int] = set()
-    for node in _per_iteration(site):
+    for node in body:
         for child in ast.walk(node):
             if not isinstance(child, ast.Attribute) or id(child) in seen:
                 continue
@@ -172,9 +195,22 @@ class LoopRule(Rule):
             element = site.loop.element
             if model is None or element is None or element.spec is None:
                 continue
-            if reassigned(site, element.name):
+            if reassigned(_per_iteration(site), element.name):
                 continue
-            yield from self.inspect(ctx, Rows(site, model, element.name, element.spec))
+            yield from self.inspect(
+                ctx,
+                Rows(
+                    body=_per_iteration(site),
+                    model=model,
+                    name=element.name,
+                    spec=element.spec,
+                    path=site.path,
+                    lineno=site.lineno,
+                    origin=f"loop at line {site.lineno} over {model}",
+                    repeated=site.loop.nested,
+                    depth=site.loop.depth,
+                ),
+            )
 
     def inspect(self, ctx: ProjectContext, rows: Rows) -> Iterator[Finding]:
         raise NotImplementedError
@@ -230,7 +266,7 @@ class UnfetchedForwardRelation(LoopRule):
     def inspect(self, ctx: ProjectContext, rows: Rows) -> Iterator[Finding]:
         graph = ctx.model_graph
         reported: set[str] = set()
-        for node, parts in accesses(rows.site, rows.name):
+        for node, parts in accesses(rows.body, rows.name):
             walk = traversal(graph, rows.model, parts)
             if not walk or walk.path in reported or rows.spec.covers(walk.path):
                 continue
@@ -244,34 +280,30 @@ class UnfetchedForwardRelation(LoopRule):
         node: ast.Attribute,
         walk: Traversal,
     ) -> Finding:
-        site, spec, model, path = rows.site, rows.spec, rows.model, walk.path
+        spec, model, path = rows.spec, rows.model, walk.path
         hops = " -> ".join(f"{e.source}.{e.field_name} ({e.kind})" for e in walk.edges)
         written = ", ".join(sorted(spec.select_related)) or "nothing"
         return self.finding(
-            location=ctx.location(site.path, node),
+            location=ctx.location(rows.path, node),
             message=(
                 f"`{ast.unparse(node)}` follows `{path}` on each row of a "
                 f"`{model}` queryset that did not select it, costing one query "
                 f"per row."
             ),
             confidence=None if spec.confident else Confidence.TENTATIVE,
-            severity=Severity.HIGH if site.loop.nested else None,
+            severity=Severity.HIGH if rows.repeated else None,
             evidence=(
                 Evidence(
                     kind=EvidenceKind.AST,
-                    content=(
-                        f"loop at line {site.lineno} over {model}\n"
-                        f"select_related: {written}\n"
-                        f"relation walked: {hops}"
-                    ),
-                    source=f"{ctx.rel(site.path)}:{site.lineno}",
+                    content=(f"{rows.origin}\nselect_related: {written}\nrelation walked: {hops}"),
+                    source=f"{ctx.rel(rows.path)}:{rows.lineno}",
                 ),
             ),
             properties={
                 "model": model,
                 "path": path,
-                "depth": str(site.loop.depth),
-                "loop_line": str(site.lineno),
+                "depth": str(rows.depth),
+                "loop_line": str(rows.lineno),
             },
         )
 
@@ -336,7 +368,7 @@ most common form of this mistake in the corpora.
 """
 
 
-def evaluations(site: LoopSite) -> set[int]:
+def evaluations(body: tuple[ast.AST, ...]) -> set[int]:
     """Ids of attribute nodes whose rows a prefetch would actually serve.
 
     Three things have to be true before `prefetch_related` is the fix, and
@@ -360,7 +392,7 @@ def evaluations(site: LoopSite) -> set[int]:
     """
     read: list[ast.Attribute] = []
     discarded: set[int] = set()
-    for node in _per_iteration(site):
+    for node in body:
         for child in ast.walk(node):
             if not (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)):
                 continue
@@ -432,9 +464,9 @@ class UnprefetchedMultiValuedRelation(LoopRule):
 
     def inspect(self, ctx: ProjectContext, rows: Rows) -> Iterator[Finding]:
         graph = ctx.model_graph
-        called = evaluations(rows.site)
+        called = evaluations(rows.body)
         reported: set[str] = set()
-        for node, parts in accesses(rows.site, rows.name):
+        for node, parts in accesses(rows.body, rows.name):
             if id(node) not in called:
                 continue
             walk = traversal(graph, rows.model, parts)
@@ -459,33 +491,33 @@ class UnprefetchedMultiValuedRelation(LoopRule):
         walk: Traversal,
         hop: ManyHop,
     ) -> Finding:
-        site, spec, model = rows.site, rows.spec, rows.model
+        spec, model = rows.spec, rows.model
         path = "__".join([*walk.steps, hop.accessor])
         written = ", ".join(sorted(spec.prefetch_related)) or "nothing"
         return self.finding(
-            location=ctx.location(site.path, node),
+            location=ctx.location(rows.path, node),
             message=(
                 f"`{ast.unparse(node)}` reaches many rows through `{path}` on each "
                 f"row of a `{model}` queryset that did not prefetch it, costing one "
                 f"query per row."
             ),
             confidence=None if spec.confident else Confidence.TENTATIVE,
-            severity=Severity.HIGH if site.loop.nested else None,
+            severity=Severity.HIGH if rows.repeated else None,
             evidence=(
                 Evidence(
                     kind=EvidenceKind.AST,
                     content=(
-                        f"loop at line {site.lineno} over {model}\n"
+                        f"{rows.origin}\n"
                         f"prefetch_related: {written}\n"
                         f"relation reached: {hop.describe()}"
                     ),
-                    source=f"{ctx.rel(site.path)}:{site.lineno}",
+                    source=f"{ctx.rel(rows.path)}:{rows.lineno}",
                 ),
             ),
             properties={
                 "model": model,
                 "path": path,
-                "depth": str(site.loop.depth),
-                "loop_line": str(site.lineno),
+                "depth": str(rows.depth),
+                "loop_line": str(rows.lineno),
             },
         )
