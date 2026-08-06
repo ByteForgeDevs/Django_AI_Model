@@ -16,9 +16,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from djaudit.dataflow.chains import DefUse, def_use
+from djaudit.dataflow.chains import DefUse
 from djaudit.dataflow.loops import Loop, find_loops, scope_has_loop
-from djaudit.dataflow.scopes import Scope, build_scopes
+from djaudit.dataflow.scopes import Scope
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -63,10 +63,9 @@ def build_loop_inventory(ctx: ProjectContext) -> tuple[LoopSite, ...]:
             # nothing here could ever report on, which is roughly half of a
             # large project.
             continue
-        tree = ctx.parse(path)
-        if tree is None:
+        module = ctx.scopes(path)
+        if module is None:
             continue
-        module = build_scopes(tree)
         label: str | None = None
         for scope in module.walk():
             if not scope_has_loop(scope):
@@ -76,7 +75,7 @@ def build_loop_inventory(ctx: ProjectContext) -> tuple[LoopSite, ...]:
                 # resolving an app label walks the filesystem looking for the
                 # application root.
                 label = app_label_for(path, ctx)
-            chains = def_use(scope)
+            chains = ctx.def_use(scope)
             for loop in find_loops(scope, chains, graph, app_label=label):
                 found.append(LoopSite(path=path, scope=scope, loop=loop, chains=chains))
     return tuple(found)

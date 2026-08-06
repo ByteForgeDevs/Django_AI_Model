@@ -26,9 +26,6 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from djaudit.dataflow.chaining import ChainSpec, analyse
-from djaudit.dataflow.chains import def_use
-from djaudit.dataflow.querysets import track
-from djaudit.dataflow.scopes import build_scopes
 from djaudit.models import (
     Confidence,
     Evidence,
@@ -116,25 +113,21 @@ def guaranteed(specs: list[ChainSpec]) -> ChainSpec:
     )
 
 
-def specs_in(ctx: ProjectContext, path: Path, graph: ModelGraph) -> dict[int, ChainSpec]:
+def specs_in(ctx: ProjectContext, path: Path) -> dict[int, ChainSpec]:
     """Every queryset expression in one file, keyed by ``id(node)``.
 
     Built per file rather than per class because scoping and def-use are the
     expensive half and both are already per file. Only files defining a view
     that names a serializer ever reach here.
     """
-    from djaudit.graph.builder import app_label_for  # noqa: PLC0415  (cycle)
-
-    tree = ctx.parse(path)
-    if tree is None:
+    root = ctx.scopes(path)
+    if root is None:
         return {}
-    label = app_label_for(path, ctx)
-    out: dict[int, ChainSpec] = {}
-    for scope in build_scopes(tree).walk():
-        chains = def_use(scope)
-        for key, value in track(scope, chains, graph, app_label=label).items():
-            out[key] = analyse(value)
-    return out
+    return {
+        key: analyse(value)
+        for scope in root.walk()
+        for key, value in ctx.tracked(path, scope).items()
+    }
 
 
 def getter(
@@ -253,7 +246,7 @@ class SerializerMethodTraversal(Rule):
             if record is None:
                 continue
             if view.path not in cache:
-                cache[view.path] = specs_in(ctx, view.path, graph)
+                cache[view.path] = specs_in(ctx, view.path)
             found = cache[view.path]
             specs = [found[id(e)] for e in queryset_expressions(record.node) if id(e) in found]
             label = index.resolve_name(view.module, view.serializer_ref)

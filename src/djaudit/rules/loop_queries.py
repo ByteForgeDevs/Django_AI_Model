@@ -22,8 +22,7 @@ import ast
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, NamedTuple
 
-from djaudit.dataflow.chains import def_use
-from djaudit.dataflow.querysets import TERMINAL, Origin, QuerysetValue, Step, track
+from djaudit.dataflow.querysets import TERMINAL, Origin, QuerysetValue, Step
 from djaudit.models import (
     Confidence,
     Evidence,
@@ -222,14 +221,7 @@ class QueryInLoop(Rule):
 
     def queries(self, ctx: ProjectContext, site: LoopSite) -> dict[int, QuerysetValue]:
         """Every queryset expression in the loop's own scope."""
-        from djaudit.graph.builder import app_label_for  # noqa: PLC0415  (cycle)
-
-        return track(
-            site.scope,
-            def_use(site.scope),
-            ctx.model_graph,
-            app_label=app_label_for(site.path, ctx),
-        )
+        return ctx.tracked(site.path, site.scope)
 
     def report(self, ctx: ProjectContext, site: LoopSite, found: list[Query]) -> Iterator[Finding]:
         # Every reported value has a manager origin, and `_from_manager` only
