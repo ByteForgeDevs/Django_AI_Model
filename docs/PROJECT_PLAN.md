@@ -3315,6 +3315,56 @@ We therefore build the dataflow foundation first, and we default this family to
   of the fingerprint, so no baseline or triage entry was invalidated.
 - **3.2.5** — Prefetch-awareness refinement: honour `Prefetch(...)` objects, nested lookups, and `to_attr`. *Done when:* the false-positive rate on NetBox is measured and documented.
 
+  **Done.** `ChainSpec` already read a `Prefetch`'s lookup, and that turned out
+  to be the problem: three different Django behaviours all hide behind the same
+  lookup string, and reading it alone got two of them backwards. Each was
+  settled by running Django and counting queries — `scripts/prefetch_cache_probe.py`
+  now carries all three as CI gates, over three VMs with two interfaces each:
+
+  | form | reading | queries |
+  |---|---|---|
+  | `prefetch_related('interfaces')` | `.interfaces` | 2 |
+  | `Prefetch('interfaces', to_attr='recent')` | `.recent` | 2 |
+  | `Prefetch('interfaces', to_attr='recent')` | `.interfaces` | **5** |
+  | `prefetch_related('interfaces')` | `iface.site` | 8 |
+  | `Prefetch('interfaces', queryset=Iface.objects.select_related('site'))` | `iface.site` | **2** |
+  | `Prefetch('interfaces', queryset=Iface.objects.prefetch_related('site'))` | `iface.site` | **3** |
+
+  So `to_attr` moves the rows and leaves the related manager cold — keying on
+  the lookup would have called a real N+1 covered, the one direction a
+  performance rule must not err in — while a nested queryset fetches paths
+  *below* the lookup that were being reported as unfixed. `ChainSpec` gained a
+  `to_attr` field and `_nested_paths`, which joins each inner
+  `select_related`/`prefetch_related` argument onto the lookup. On the corpora
+  that yields 275 extra covered paths in pretix and 7 in NetBox.
+
+  The third fix was `GenericPrefetch`, which takes the same leading lookup and
+  was being read as unreadable. It has a measured consequence: NetBox's
+  `InterfaceViewSet` finding at `dcim/api/serializers_/cables.py:123` was
+  triaged `accepted_risk` on the explicit grounds that *"djaudit cannot read a
+  `GenericPrefetch`"*. It can now, `cable__terminations__termination` covers
+  `cable`, and the finding is gone rather than merely downgraded — so the
+  triage entry was deleted. Project-local subclasses are deliberately still not
+  matched: NetBox's `RestrictedPrefetch(lookup, user, action, queryset)` is used
+  18 times and reorders the positional arguments, so name-matching it would read
+  `user` as the inner queryset. Unmatched it reads as unreadable, which
+  downgrades rather than mis-states.
+
+  Two guards written for this substep were then shown dead by injection and
+  **removed rather than defended**: flattening a `GenericPrefetch` list, because
+  `ast.walk` already descends into an `ast.List`, and a redirect check inside
+  `_nested_paths`, because its only caller already declines to call it for a
+  `to_attr` prefetch. The remaining 11 defects are all caught. 20 new chaining
+  tests.
+
+  *Measured:* **NetBox DJP false-positive rate 0.0% over 41 reported findings**
+  (9 DJP-001, 2 DJP-002, 2 DJP-003, 28 DJP-004, all `true_positive`), down one
+  from 42 — the `GenericPrefetch` finding that is now correctly absent, and the
+  only `accepted_risk` the DJP family had on this corpus. Healthchecks 19
+  reported and pretix 102, both 100% precision, unchanged: no corpus finding
+  today depends on the nested-queryset paths, which prevent a false positive
+  that the three corpora do not currently contain.
+
 ### Step 3.3 — Query efficiency rules
 
 - **3.3.1** — `DJP-005` `len(queryset)` where `.count()` is intended.

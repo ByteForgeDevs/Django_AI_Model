@@ -69,21 +69,100 @@ def _prefetch_path(node: ast.expr) -> str | None:
     direct = _string(node)
     if direct is not None:
         return direct
-    if (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name | ast.Attribute)
-        and (node.func.id if isinstance(node.func, ast.Name) else node.func.attr) == "Prefetch"
-    ):
-        if node.args:
-            return _string(node.args[0])
-        for keyword in node.keywords:
-            if keyword.arg == "lookup":
-                return _string(keyword.value)
+    call = _prefetch_call(node)
+    if call is None:
+        return None
+    if call.args:
+        return _string(call.args[0])
+    for keyword in call.keywords:
+        if keyword.arg == "lookup":
+            return _string(keyword.value)
     return None
+
+
+def _prefetch_call(node: ast.expr) -> ast.Call | None:
+    """``node`` if it constructs a ``Prefetch`` or ``GenericPrefetch``.
+
+    ``GenericPrefetch`` takes the same leading ``lookup`` argument and is what
+    NetBox reaches for whenever the relation is generic, so excluding it meant
+    reading a real fetch as an unreadable one.
+
+    Project-local subclasses are deliberately not matched by name. NetBox's
+    ``RestrictedPrefetch(lookup, user, action='view', queryset=None)`` -- 18
+    call sites -- reorders the positional arguments, so matching it would read
+    ``user`` as the inner queryset. Left unmatched it reads as unreadable,
+    which downgrades a finding to tentative rather than mis-stating it.
+    """
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name | ast.Attribute):
+        return None
+    name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+    return node if name in {"Prefetch", "GenericPrefetch"} else None
+
+
+def _to_attr(node: ast.expr) -> tuple[bool, str | None]:
+    """Whether the node redirects its rows, and the attribute name if readable.
+
+    The two halves are separate because they answer different questions. Any
+    ``to_attr`` at all means the related manager stays unpopulated, so the
+    relation is not covered even when the name is computed; the name is only
+    needed to recognise reads of the new attribute.
+    """
+    call = _prefetch_call(node)
+    if call is None:
+        return False, None
+    for keyword in call.keywords:
+        if keyword.arg == "to_attr":
+            return True, _string(keyword.value)
+    return False, None
 
 
 def _is_none(node: ast.expr) -> bool:
     return isinstance(node, ast.Constant) and node.value is None
+
+
+def _inner_queryset(call: ast.Call) -> list[ast.expr]:
+    """The queryset expressions a ``Prefetch`` narrows its lookup with.
+
+    ``Prefetch(lookup, queryset=...)`` takes one and ``GenericPrefetch(lookup,
+    querysets=[...])`` takes a list, both positionally second. The list is not
+    unpacked because :func:`ast.walk` already descends into an ``ast.List``.
+    """
+    found: list[ast.expr] = []
+    if len(call.args) > 1:
+        found.append(call.args[1])
+    found.extend(k.value for k in call.keywords if k.arg in {"queryset", "querysets"})
+    return found
+
+
+def _nested_paths(node: ast.expr) -> list[str]:
+    """Paths a ``Prefetch``'s inner queryset fetches *below* its own lookup.
+
+    ``Prefetch("interfaces", queryset=Iface.objects.select_related("site"))``
+    fetches ``interfaces__site``, and reading the lookup alone would report an
+    N+1 the author has already fixed. Measured in
+    ``scripts/prefetch_cache_probe.py``: over three VMs with two interfaces
+    each, reading ``iface.site`` costs 8 queries under a plain prefetch, 2 with
+    a nested ``select_related`` and 3 with a nested ``prefetch_related``.
+
+    The inner expression is walked syntactically rather than tracked, because
+    what it is built from does not matter -- only which fetch calls appear on
+    it. Redirection is not checked here: :func:`_lookups` already declines to
+    call this for a ``to_attr`` prefetch, and a second check there proved
+    unreachable under injection.
+    """
+    call = _prefetch_call(node)
+    lookup = _prefetch_path(node)
+    if call is None or lookup is None:
+        return []
+    found: list[str] = []
+    for queryset in _inner_queryset(call):
+        for inner in ast.walk(queryset):
+            if not isinstance(inner, ast.Call) or not isinstance(inner.func, ast.Attribute):
+                continue
+            if inner.func.attr not in {"select_related", "prefetch_related"}:
+                continue
+            found.extend(f"{lookup}__{path}" for arg in inner.args if (path := _prefetch_path(arg)))
+    return found
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +192,17 @@ class ChainSpec:
     computed lookup. Recorded rather than ignored, because "we saw
     ``select_related(*paths)``" and "we saw no ``select_related``" must not
     look alike to a rule deciding whether to speak firmly."""
+
+    to_attr: frozenset[str] = frozenset()
+    """Attribute names a ``Prefetch(..., to_attr=...)`` redirected rows to.
+
+    These are *not* in :attr:`prefetch_related`, because Django does not
+    populate the ordinary related manager when ``to_attr`` is given. Measured
+    by ``scripts/prefetch_cache_probe.py``: over three rows, reading
+    ``obj.interfaces.all()`` under a plain prefetch costs 2 queries and under a
+    ``to_attr`` prefetch costs 5. Treating the two alike would call a real N+1
+    covered, which is the one mistake a performance rule cannot afford.
+    """
 
     def covers(self, path: str) -> bool:
         """Whether traversing ``path`` on a result row is already fetched.
@@ -164,18 +254,35 @@ class ChainSpec:
 
 
 def _lookups(step: Step) -> tuple[list[str], bool]:
-    """String arguments of a step, and whether any argument was unreadable."""
+    """String arguments of a step, and whether any argument was unreadable.
+
+    A ``Prefetch`` carrying ``to_attr`` is deliberately *not* returned as a
+    fetched path: its rows land on a new attribute and the relation itself
+    stays unfetched, so nothing below the relation is reached either and its
+    inner queryset is not read.
+    """
     found: list[str] = []
     unreadable = False
     for arg in step.args:
         path = _prefetch_path(arg)
+        redirected, name = _to_attr(arg)
         if path is None:
             unreadable = True
-        else:
+        elif not redirected:
             found.append(path)
+            found.extend(_nested_paths(arg))
+        elif name is None:
+            # We know the relation is not covered, which is the safe direction,
+            # but we cannot name the attribute that did receive the rows.
+            unreadable = True
     if any(k.arg is None for k in step.keywords):
         unreadable = True
     return found, unreadable
+
+
+def _redirects(step: Step) -> frozenset[str]:
+    """Attribute names this step's ``Prefetch`` arguments redirect rows to."""
+    return frozenset(name for arg in step.args if (name := _to_attr(arg)[1]) is not None)
 
 
 def analyse(value: QuerysetValue) -> ChainSpec:
@@ -225,11 +332,14 @@ def _apply_fetch(spec: ChainSpec, step: Step) -> ChainSpec:
     current = spec.select_related if name == "select_related" else spec.prefetch_related
 
     merged: frozenset[str]
+    redirected = spec.to_attr
     if any(_is_none(a) for a in step.args):
         # `select_related(None)` clears rather than adds. A reader that only
         # accumulates reports the exact opposite of what the code does.
         merged = frozenset()
         unreadable = spec.unreadable - {name}
+        if name != "select_related":
+            redirected = frozenset()
     elif name == "select_related" and not step.args and not step.keywords and step.called:
         merged = current | {ALL_FORWARD}
         unreadable = spec.unreadable
@@ -237,7 +347,8 @@ def _apply_fetch(spec: ChainSpec, step: Step) -> ChainSpec:
         paths, bad = _lookups(step)
         merged = current | frozenset(paths)
         unreadable = spec.unreadable | ({name} if bad else frozenset())
+        redirected = spec.to_attr | _redirects(step)
 
     if name == "select_related":
         return replace(spec, select_related=merged, unreadable=unreadable)
-    return replace(spec, prefetch_related=merged, unreadable=unreadable)
+    return replace(spec, prefetch_related=merged, unreadable=unreadable, to_attr=redirected)

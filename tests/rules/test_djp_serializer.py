@@ -554,16 +554,14 @@ class TestHowSureItIs:
         found = findings(make_project, METHOD_SERIALIZER, PLAIN_VIEW)
         assert found[0].confidence is Confidence.FIRM
 
-    def test_a_fetch_call_we_cannot_read_downgrades_rather_than_silences(
-        self, make_project
-    ) -> None:
+    def test_a_generic_prefetch_is_read_like_any_other(self, make_project) -> None:
         """NetBox's `InterfaceViewSet` in miniature.
 
-        `prefetch_related(GenericPrefetch("cable__terminations__termination", ...))`
-        names a path we cannot read, and a prefetch through a forward foreign key
-        does populate it -- measured at 3 queries against a 5-query baseline by
-        `scripts/prefetch_cache_probe.py`. Treating the unreadable argument as
-        "did not fetch" made that a firm false positive.
+        `GenericPrefetch` takes the same leading lookup as `Prefetch`, so
+        reading it is what turns this from a tentative finding into no finding:
+        `author__publisher` covers `author`, and a prefetch through a forward
+        foreign key does populate it -- measured at 3 queries against a 5-query
+        baseline by `scripts/prefetch_cache_probe.py`.
         """
         found = findings(
             make_project,
@@ -578,6 +576,32 @@ class TestHowSureItIs:
                 queryset = Book.objects.prefetch_related(
                     GenericPrefetch("author__publisher", [Book.objects.all()])
                 )
+                serializer_class = BookSerializer
+            """,
+        )
+        assert paths(found) == []
+
+    def test_a_fetch_call_we_cannot_read_downgrades_rather_than_silences(
+        self, make_project
+    ) -> None:
+        """A splatted argument list names paths we cannot enumerate.
+
+        Treating it as "did not fetch" would be a firm false positive, and
+        treating it as "fetched everything" would hide real ones, so the rule
+        speaks tentatively instead.
+        """
+        found = findings(
+            make_project,
+            METHOD_SERIALIZER,
+            """
+            from rest_framework import viewsets
+            from library.models import Book
+            from library.serializers import BookSerializer
+
+            PATHS = ["author"]
+
+            class BookViewSet(viewsets.ModelViewSet):
+                queryset = Book.objects.prefetch_related(*PATHS)
                 serializer_class = BookSerializer
             """,
         )

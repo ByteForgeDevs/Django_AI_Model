@@ -58,6 +58,7 @@ class Site(models.Model):
 
 class Iface(models.Model):
     vm = models.ForeignKey(VM, on_delete=models.CASCADE, related_name="interfaces")
+    site = models.ForeignKey("Site", on_delete=models.CASCADE, null=True)
 
     class Meta:
         app_label = "probeapp"
@@ -70,6 +71,7 @@ class Iface(models.Model):
 sys.modules["probeapp.models"] = _models
 
 from django.db import connection  # noqa: E402
+from django.db.models import Prefetch  # noqa: E402
 from django.test.utils import CaptureQueriesContext  # noqa: E402
 
 VM = _models.VM
@@ -115,6 +117,70 @@ def queries(fn: Callable[[Any], object], *, prefetch: bool) -> int:
     return len(captured)
 
 
+TO_ATTR: dict[str, tuple[Callable[[], object], Callable[[Any], object]]] = {
+    "plain prefetch, read .interfaces": (
+        lambda: VM.objects.prefetch_related("interfaces"),
+        lambda vm: list(vm.interfaces.all()),
+    ),
+    "to_attr prefetch, read .recent": (
+        lambda: VM.objects.prefetch_related(Prefetch("interfaces", to_attr="recent")),
+        lambda vm: list(vm.recent),
+    ),
+    "to_attr prefetch, read .interfaces": (
+        lambda: VM.objects.prefetch_related(Prefetch("interfaces", to_attr="recent")),
+        lambda vm: list(vm.interfaces.all()),
+    ),
+}
+"""What `to_attr` does and does not populate.
+
+`ChainSpec` keys prefetches by lookup, so `Prefetch("interfaces", to_attr=...)`
+and a plain `prefetch_related("interfaces")` look identical to it. Django does
+not treat them the same: `to_attr` puts the rows on a new attribute and leaves
+the ordinary related manager unprefetched. If that is right, the third case
+costs one query per row and a rule that reads the lookup alone would call a
+real N+1 covered. Measured rather than assumed.
+"""
+
+EXPECTED_SERVED = {"plain prefetch, read .interfaces", "to_attr prefetch, read .recent"}
+
+
+def to_attr_queries(build: Callable[[], object], read: Callable[[Any], object]) -> int:
+    with CaptureQueriesContext(connection) as captured:
+        for row in build():  # type: ignore[attr-defined]
+            read(row)
+    return len(captured)
+
+
+NESTED: dict[str, Callable[[], object]] = {
+    "prefetch_related('interfaces')": lambda: VM.objects.prefetch_related("interfaces"),
+    "Prefetch(queryset=select_related('site'))": lambda: VM.objects.prefetch_related(
+        Prefetch("interfaces", queryset=Iface.objects.select_related("site"))
+    ),
+    "Prefetch(queryset=prefetch_related('site'))": lambda: VM.objects.prefetch_related(
+        Prefetch("interfaces", queryset=Iface.objects.prefetch_related("site"))
+    ),
+    "prefetch_related('interfaces__site')": lambda: VM.objects.prefetch_related("interfaces__site"),
+}
+"""Whether a `Prefetch`'s inner queryset covers the path *below* the lookup.
+
+`ChainSpec` reads the lookup and drops the `queryset=` argument on the floor, so
+`Prefetch("interfaces", queryset=Iface.objects.select_related("site"))` records
+`interfaces` and nothing more -- and a loop reading `iface.site` is reported as
+an N+1 the author has in fact already fixed. Whether that is really a false
+positive is a claim about Django, so it is measured: every form below must beat
+the plain-prefetch baseline, which pays one query per interface.
+"""
+
+
+def nested_queries(build: Callable[[], object]) -> int:
+    """Queries spent reading `iface.site` for every interface of every VM."""
+    with CaptureQueriesContext(connection) as captured:
+        for vm in build():  # type: ignore[attr-defined]
+            for iface in vm.interfaces.all():
+                _ = iface.site
+    return len(captured)
+
+
 def forward_queries(build: Callable[[], object]) -> int:
     """Queries spent reading `obj.vm` across every row of `build()`."""
     with CaptureQueriesContext(connection) as captured:
@@ -131,7 +197,7 @@ def main() -> int:
     for i in range(3):
         vm = VM.objects.create(name=f"v{i}", site=Site.objects.create(name=f"s{i}"))
         for _ in range(2):
-            Iface.objects.create(vm=vm)
+            Iface.objects.create(vm=vm, site=vm.site)
 
     print(f"{'expression':24} {'plain':>6} {'prefetched':>11}  verdict")
     wrong = []
@@ -151,6 +217,29 @@ def main() -> int:
         verdict = "baseline" if label == "no fetch" else ("COVERS" if covered else "NO HELP")
         print(f"{label:32} {spent:>8}  {verdict}")
         if label != "no fetch" and not covered:
+            wrong.append(label)
+
+    print(f"\n{'to_attr: which read is served':38} {'queries':>8}  verdict")
+    rows = VM.objects.count()
+    for label, (build, read) in TO_ATTR.items():
+        spent = to_attr_queries(build, read)
+        served = spent <= 2
+        print(f"{label:38} {spent:>8}  {'SERVED' if served else f'{rows} EXTRA'}")
+        if served != (label in EXPECTED_SERVED):
+            wrong.append(label)
+
+    print(f"\n{'nested queryset: reading iface.site':44} {'queries':>8}  verdict")
+    base = nested_queries(NESTED["prefetch_related('interfaces')"])
+    for label, build in NESTED.items():
+        spent = nested_queries(build)
+        covered = spent < base
+        verdict = (
+            "baseline"
+            if spent == base and label.startswith("prefetch_related('i") and "__" not in label
+            else ("COVERS" if covered else "NO HELP")
+        )
+        print(f"{label:44} {spent:>8}  {verdict}")
+        if label != "prefetch_related('interfaces')" and not covered:
             wrong.append(label)
 
     if wrong:

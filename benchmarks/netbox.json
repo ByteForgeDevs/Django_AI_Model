@@ -327,16 +327,6 @@
       "note": "`CabledObjectSerializer.get_link_peers_type` at line 119 opens with `if not obj.cable:`, and `CircuitTerminationSerializer` inherits it. `circuits.CircuitTermination.cable` is a ForeignKey, and `CircuitTerminationViewSet.queryset` is a bare `CircuitTermination.objects.all()` (circuits/api/views.py:54) that fetches it by neither `select_related` nor `prefetch_related`. One query per terminated circuit on every list page. The serializer also declares `cable = CableSerializer(nested=True)`, so the same row is wanted twice over; the fix is one `select_related('cable')` on the view."
     },
     {
-      "fingerprint": "63215967ab52290f",
-      "rule_id": "DJP-003",
-      "verdict": "accepted_risk",
-      "file": "netbox/dcim/api/serializers_/cables.py",
-      "line": 123,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-06",
-      "note": "Same inherited `get_link_peers_type` reading `obj.cable`, but reached through `InterfaceViewSet`, whose queryset calls `prefetch_related(GenericPrefetch('cable__terminations__termination', [...]))`. djaudit cannot read a `GenericPrefetch` argument, so it records `unreadable={'prefetch_related'}` and reports this tentative rather than firm. That downgrade is the correct verdict and the finding is very likely already fixed: `scripts/prefetch_cache_probe.py` measures `prefetch_related('vm__site')` at 3 queries against a 5-query baseline, so a prefetch through a forward foreign key does populate it. Kept as accepted_risk rather than deleted because the tentative tier is exactly where an unanswerable coverage question belongs."
-    },
-    {
       "fingerprint": "c82dbe3ea7e96b27",
       "rule_id": "DJP-003",
       "verdict": "true_positive",
