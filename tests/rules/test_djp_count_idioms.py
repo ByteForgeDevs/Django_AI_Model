@@ -374,3 +374,253 @@ class TestExistsRefinement:
             """,
         )
         assert found[0].properties["suggested"] == ".count()"
+
+
+def exists_findings(make_project, code: str) -> list[Finding]:
+    return findings(make_project, code, rule_id="DJP-006")
+
+
+class TestCountForEmptiness:
+    """DJP-006 -- `.count()` asked a yes-or-no question.
+
+    Measured before it was written: across Healthchecks, NetBox and pretix
+    there are 83 `.count()` calls in an emptiness test, 82 of them
+    `assert Model.objects.count() == 0` in a test suite. So the shape of the
+    rule is set almost entirely by what it declines.
+    """
+
+    def test_greater_than_zero(self, make_project):
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def any_books():
+                return Book.objects.count() > 0
+            """,
+        )
+        assert len(found) == 1
+        assert "Book.objects.exists()" in found[0].message
+        assert found[0].confidence is Confidence.FIRM
+        assert found[0].properties["model"] == "library.Book"
+
+    def test_equal_to_zero_is_negated(self, make_project):
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def empty():
+                return Book.objects.count() == 0
+            """,
+        )
+        assert found[0].properties["suggested"] == "not Book.objects.exists()"
+
+    def test_used_as_a_condition(self, make_project):
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def warn():
+                if Book.objects.filter(title="x").count():
+                    return "some"
+                return "none"
+            """,
+        )
+        assert len(found) == 1
+        assert "Book.objects.filter(title='x').exists()" in found[0].message
+
+    def test_negated_with_not(self, make_project):
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def none_left():
+                return not Book.objects.count()
+            """,
+        )
+        assert found[0].properties["suggested"] == "not Book.objects.exists()"
+
+    def test_the_evidence_names_both_statements(self, make_project):
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def any_books():
+                return Book.objects.count() > 0
+            """,
+        )
+        content = found[0].evidence[0].content
+        assert "SELECT COUNT(*)" in content
+        assert "LIMIT 1" in content
+
+
+class TestCountForEmptinessDeclines:
+    def test_an_assertion_is_left_alone(self, make_project):
+        """The number is the failure message, and an assertion that a set is
+        empty is cheapest exactly when it passes -- there are no rows to count.
+
+        The non-assert case is here as the contrast: without it the module
+        could be silent for some other reason and this would pass regardless.
+        """
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def check():
+                assert Book.objects.count() == 0
+                return Book.objects.count() == 0
+            """,
+        )
+        assert [f.location.line for f in found] == [5]
+
+    def test_a_real_bound_needs_the_number(self, make_project):
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def many():
+                return Book.objects.count() > 5
+            """,
+        )
+        assert found == []
+
+    def test_a_count_that_is_returned_or_assigned(self, make_project):
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def total():
+                n = Book.objects.count()
+                return n, Book.objects.count()
+            """,
+        )
+        assert found == []
+
+    def test_count_with_an_argument_is_not_a_queryset(self, make_project):
+        """`str.count` and `list.count` both require an argument, which is what
+        keeps this rule away from every non-Django `.count(x)` in a project.
+
+        `report.books` is the case that makes the arity test load-bearing
+        rather than decorative: the receiver ends in a name the model graph
+        does declare as a relation, so every other guard passes and only the
+        argument says this is a list being searched, not rows being counted.
+
+        The real `Book.objects.count()` on the last line is not decoration
+        either. The rule skips any file whose text lacks `.count()`, so
+        without a genuine no-argument call here the module would never be
+        examined and this would pass no matter what the arity test did.
+        """
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def letters(word, report):
+                if word.count("a") > 0 or report.books.count(1) > 0:
+                    return 0
+                return Book.objects.count() > 0
+            """,
+        )
+        assert [f.location.line for f in found] == [6]
+
+    def test_a_chained_comparison(self, make_project):
+        """`.exists()` would answer only half of `count() == 0 == n`."""
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def agreed(n):
+                return Book.objects.count() == 0 == n
+            """,
+        )
+        assert found == []
+
+    def test_a_ternary_that_returns_the_number(self, make_project):
+        """A conditional expression is the one place a count can be a direct
+        child of an `if` node without being its test."""
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def total(flag):
+                return -1 if flag else Book.objects.count()
+            """,
+        )
+        assert found == []
+
+    def test_a_ternary_condition_is_still_reported(self, make_project):
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def label():
+                return "some" if Book.objects.count() else "none"
+            """,
+        )
+        assert len(found) == 1
+        assert found[0].properties["suggested"] == "Book.objects.exists()"
+
+    def test_an_unknown_receiver_is_left_alone(self, make_project):
+        """A no-argument `.count()` on something the tracker cannot resolve and
+        the model graph does not name could be any object at all."""
+        found = exists_findings(
+            make_project,
+            """
+            import itertools
+
+            def go(basket):
+                return itertools.count() and basket.widgets.count() > 0
+            """,
+        )
+        assert found == []
+
+    def test_a_relation_the_graph_names_is_reported_tentatively(self, make_project):
+        """`ctx['item'].bundled_with` is the real shape this exists for: a
+        receiver no tracker can type, ending in a name the project declares as
+        a relation. Tentative because it may already be prefetched, in which
+        case both forms read the cache -- measured at 2 queries each."""
+        found = exists_findings(
+            make_project,
+            """
+            def warn(ctx):
+                return ctx["author"].books.count() > 0
+            """,
+        )
+        assert len(found) == 1
+        assert found[0].confidence is Confidence.TENTATIVE
+        assert found[0].properties["model"] == ""
+
+    def test_the_last_operand_of_a_boolop_keeps_its_value(self, make_project):
+        """`x or qs.count()` returns the number; `qs.count() or x` discards it."""
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def fallback(x):
+                return x or Book.objects.count()
+            """,
+        )
+        assert found == []
+
+    def test_a_project_with_no_count_at_all(self, make_project):
+        found = exists_findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def titles():
+                return [b.title for b in Book.objects.all()]
+            """,
+        )
+        assert found == []

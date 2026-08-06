@@ -3465,7 +3465,73 @@ We therefore build the dataflow foundation first, and we default this family to
   17.6–19.0s purely because three benchmarks were sharing one command — the
   same trap that once made a pure machine-load fluctuation look like an
   11.4s→17.9s regression.
-- **3.3.2** — `DJP-006` `.count() > 0` where `.exists()` is intended.
+- **3.3.2** — `DJP-006` `.count() > 0` where `.exists()` is intended. **Done.**
+
+  The rule was designed backwards from a corpus measurement, because the naive
+  version of it is a noise machine. Before writing anything, `/tmp/empty2.py`
+  found every no-argument `.count()` in an emptiness context across all three
+  corpora: **83 calls in 3,091 files — 82 of them in test files, exactly one in
+  production code.** 81 of the 83 are `== 0`, not `> 0`. Reading the source
+  settled the shape: all 82 test cases are a bare `assert <qs>.count() == 0`.
+
+  So `assert` is excluded, and not for tidiness. Two measured reasons: the
+  number *is* the failure message — `assert 3 == 0` names how many rows leaked,
+  `assert not True` names nothing — and `count() == 0` is cheapest precisely
+  when the assertion passes, because there are no rows to count. The related
+  `self.assertEqual(qs.count(), 0)` needs no exclusion at all: the call is an
+  argument, which is never an emptiness context.
+
+  **A query-count gate would have found nothing here.** Both forms are exactly
+  one query, so the `EMPTINESS` section added to `scripts/prefetch_cache_probe.py`
+  asserts on the emitted **SQL**, not the count:
+
+  | expression | SQL Django emits |
+  |---|---|
+  | `.count() > 0` | `SELECT COUNT(*) AS "__count" FROM "probeapp_iface"` |
+  | `.exists()` | `SELECT 1 AS "a" FROM "probeapp_iface" LIMIT 1` |
+
+  The gate checks for the `LIMIT`, which is the entire difference: one form
+  scans the table to produce a number nobody reads, the other stops at the
+  first row.
+
+  **Why this rule includes related accessors when `DJP-005` refuses them.** The
+  test is domination. `.exists()` *weakly dominates* `.count() > 0`: measured on
+  a prefetched related set both cost 2 queries, and without a prefetch
+  `.exists()` is strictly cheaper — so the advice is never wrong, at worst
+  neutral. `.count()` does **not** dominate `len(qs)`: they tie under prefetch,
+  but wherever the rows are read afterwards `.count()` is strictly worse. Hence
+  `DJP-005` declines the case outright while `DJP-006` reports it at
+  `tentative`, since a prefetch it cannot see is the only way it is merely
+  redundant rather than an improvement.
+
+  Corpus result at `tentative`: healthchecks 0, netbox 0, pretix **1** —
+  `src/pretix/control/views/item.py:1683`, `ctx['item'].bundled_with.count() > 0`
+  in `get_context_data`. Verified by reading it: `ctx['item']` comes from
+  `get_object()` with no `prefetch_related`, and `bundled_with` is a
+  `related_name` on a `ForeignKey`. A real `SELECT COUNT(*)` where `LIMIT 1`
+  would do. Triaged `true_positive`.
+
+  Cost against the timing gate, measured one corpus per invocation: pretix
+  17.04–17.44s (from 16.04–16.98s), netbox 14.12–14.82s (from 13.71–14.38s),
+  healthchecks 2.29–2.53s. About +0.5s on the largest corpus, well inside the
+  20s budget — the file-level `".count()" not in source` skip is what keeps it
+  there, since the rule parses nothing in the majority of files.
+
+  Three lessons paid for here. First, **truncating a message hides the
+  payload**: the corpus run printed 110 characters and looked correct, while
+  the unit tests immediately caught that `ast.unparse(call.func)` had been
+  suggesting `Book.objects.count.exists()` — the receiver needed
+  `call.func.value`. Second, a test that asserts an exclusion must **assert the
+  contrast**: the `assert` test puts a reportable call on the next line and
+  pins the finding to that line, so it cannot pass just because the module went
+  silent. Third, **a cheap prefilter can make a guard look dead**: the arity
+  test survived injection because the file-level `".count()" not in source`
+  skip meant a module containing only `list.count(x)` was never parsed. The
+  guard was fine; the test needed a real no-argument `.count()` beside the
+  argument-taking one, which is exactly the mixed file the guard exists for.
+
+  Twenty-four defects are now injected into `count_idioms.py` — fifteen for
+  `DJP-005`, nine for `DJP-006` — and all twenty-four turn the suite red.
 - **3.3.3** — `DJP-007` `.save()` inside a loop where `bulk_update` or `bulk_create` applies.
 - **3.3.4** — `DJP-008` unbounded `.all()` materialised into a list.
 - **3.3.5** — `DJP-009` field accessed after being excluded by `.only()` or `.defer()`, causing a per-row refetch.
@@ -3854,9 +3920,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **50 rules are
+document specifies, and most of it is still only specified: **51 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first five of Phase 3's.
+2, plus the first six of Phase 3's.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

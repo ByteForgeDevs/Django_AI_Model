@@ -189,6 +189,68 @@ def forward_queries(build: Callable[[], object]) -> int:
     return len(captured)
 
 
+EMPTINESS: dict[str, Callable[[], object]] = {
+    ".count() > 0": lambda: Iface.objects.count() > 0,
+    ".exists()": Iface.objects.exists,
+}
+"""What an emptiness test actually costs, for `DJP-006`.
+
+Both forms spend exactly one query, so a rule that counted queries would find
+no difference and conclude there is nothing to report. The difference is in the
+SQL: `.exists()` adds `LIMIT 1` and stops at the first row, while `.count()`
+aggregates over every matching row. So this measures the *statement*, not the
+count, and the gate is the presence of `LIMIT` -- the only observable reason
+`DJP-006` exists.
+"""
+
+
+def emptiness_sql(fn: Callable[[], object]) -> str:
+    """The single statement an emptiness test emits."""
+    with CaptureQueriesContext(connection) as captured:
+        fn()
+    if len(captured) != 1:
+        return f"<{len(captured)} queries>"
+    return " ".join(captured[0]["sql"].split())
+
+
+def prefetched_emptiness(method: str) -> int:
+    """Queries spent asking whether a *prefetched* related set is empty.
+
+    `DJP-005` excludes related accessors because `len()` reads the prefetch
+    cache. The same question has to be asked of `DJP-006` before it can claim
+    `.count()` is worth replacing on one: if both forms are already free here,
+    the advice is neutral rather than useful.
+    """
+    qs = VM.objects.prefetch_related("interfaces")
+    with CaptureQueriesContext(connection) as captured:
+        for vm in qs:
+            _ = getattr(vm.interfaces, method)() > 0
+    return len(captured)
+
+
+def emptiness_report() -> list[str]:
+    """The `DJP-006` half: what an emptiness test costs, and what it emits."""
+    failures: list[str] = []
+    print(f"\n{'emptiness test':16} SQL")
+    limited = {}
+    for label, ask in EMPTINESS.items():
+        sql = emptiness_sql(ask)
+        limited[label] = "LIMIT" in sql.upper()
+        print(f"{label:16} {sql}")
+    if limited != {".count() > 0": False, ".exists()": True}:
+        failures.append("emptiness SQL")
+
+    print(f"\n{'prefetched .interfaces emptiness':38} {'queries':>8}  verdict")
+    for method in ("count", "exists"):
+        spent = prefetched_emptiness(method)
+        served = spent <= 2
+        label = f".{method}() on a prefetched set"
+        print(f"{label:38} {spent:>8}  {'SERVED' if served else 'EXTRA'}")
+        if not served:
+            failures.append(f"prefetched {method}")
+    return failures
+
+
 def main() -> int:
     with connection.schema_editor() as editor:
         editor.create_model(Site)
@@ -241,6 +303,8 @@ def main() -> int:
         print(f"{label:44} {spent:>8}  {verdict}")
         if label != "prefetch_related('interfaces')" and not covered:
             wrong.append(label)
+
+    wrong.extend(emptiness_report())
 
     if wrong:
         print(f"\nFAIL: Django no longer behaves as CACHE_READS assumes: {wrong}")

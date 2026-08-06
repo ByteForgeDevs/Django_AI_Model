@@ -1025,6 +1025,16 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "ALLOWED_HOSTS = ['*'] at settings.py:255 is unconditional. pretix needs to answer on organizer- and event-specific custom domains, so it cannot enumerate hosts ahead of time, and it resolves them itself in pretix.multidomain.middlewares.MultiDomainMiddleware. But that middleware does not reject an unrecognised host: on KnownDomain.DoesNotExist it sets mode='system' (middlewares.py:101-104) and serves the main site, so Django's host validation is disabled and nothing replaces it. deployment/docker/nginx.conf:89 forwards `Host $http_host` verbatim, so the header arrives unfiltered. That leaves the documented consequence intact -- absolute URLs, including password-reset links, are built from an attacker-supplied Host, and cache keys derived from it can be poisoned. Genuinely mitigable by pinning SITE_URL's host plus the KnownDomain set, so this is a real finding rather than an accepted trade-off."
+    },
+    {
+      "fingerprint": "1c36732ba3a42bfb",
+      "rule_id": "DJP-006",
+      "verdict": "true_positive",
+      "file": "src/pretix/control/views/item.py",
+      "line": 1683,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "ItemUpdate.get_context_data at control/views/item.py:1683 runs ctx['item'].bundled_with.count() > 0 to decide whether to show one advisory message. Read the surrounding code to confirm it: ctx['item'] comes from get_object(), which is a plain super().get_object(queryset) with no prefetch_related anywhere in the view, and bundled_with is the related_name of a ForeignKey on ItemBundle (base/models/items.py:1516), so the accessor is a real manager and the call is a real query. Django emits SELECT COUNT(*) with no bound where .exists() emits SELECT 1 ... LIMIT 1 -- both one query, but only one of them stops at the first row, which is measured by the EMPTINESS section of scripts/prefetch_cache_probe.py. Reported tentative rather than firm because the rule cannot type a subscript expression and so cannot rule out a prefetch it does not see; here there is none, and the fix is a one-word edit."
     }
   ]
 }

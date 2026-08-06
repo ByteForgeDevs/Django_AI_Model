@@ -1,17 +1,22 @@
-"""DJP-005 -- `len(queryset)` where only the number of rows is wanted.
+"""Counting idioms: `DJP-005` on `len(queryset)` and `DJP-006` on `.count()`.
 
-`len(qs)` is not a mistake in itself. It evaluates the queryset, populating its
-result cache, so code that counts the rows *and then reads them* is right to
-call it: one query for both beats `.count()` plus an iteration, which is two.
-The mistake is narrower -- counting rows nobody looks at. `SELECT *` over a
-million rows, every column deserialised into a model instance, so that the
-answer can be thrown away and an integer kept.
+Both rules are about asking the database for a number and paying more than the
+number is worth, and both are mostly about what they decline to report, because
+each idiom is correct more often than it is wrong.
 
-That narrowness is the whole rule. Reporting every `len(qs)` would be reporting
-a correct idiom most of the time, so this reports only the cases where the rows
-provably cannot be read again: the queryset written inline inside the `len()`,
-which no name holds, and the queryset held by a name that is loaded exactly
-once in its scope. Anything else is left alone.
+`len(qs)` evaluates the queryset, populating its result cache, so code that
+counts the rows *and then reads them* is right to call it: one query for both
+beats `.count()` plus an iteration, which is two. The mistake is narrower --
+counting rows nobody looks at. `SELECT *` over a million rows, every column
+deserialised into a model instance, so that the answer can be thrown away and
+an integer kept. So `DJP-005` reports only the cases where the rows provably
+cannot be read again: the queryset written inline inside the `len()`, which no
+name holds, and the queryset held by a name that is loaded exactly once in its
+scope.
+
+`.count()` is right whenever the number itself is wanted. `DJP-006` reports it
+only where the number is immediately thrown away for a yes-or-no answer, which
+`.exists()` gives with `LIMIT 1`.
 """
 
 from __future__ import annotations
@@ -33,11 +38,13 @@ from djaudit.models import (
     Tier,
 )
 from djaudit.registry import Rule, RuleMeta, register
+from djaudit.rules.performance import MULTI_VALUED_REVERSE
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from djaudit.context import ProjectContext
+    from djaudit.graph.nodes import ModelGraph
 
 FRESH = frozenset({Origin.MANAGER, Origin.DEFAULT_MANAGER})
 """Origins whose rows cannot already be in memory.
@@ -267,4 +274,257 @@ class LenOfQueryset(Rule):
                 "suggested": better,
                 "binding": name or "",
             },
+        )
+
+
+EMPTY = frozenset({("Eq", 0), ("LtE", 0), ("Lt", 1)})
+"""Comparisons that ask whether a count is zero."""
+
+NONEMPTY = frozenset({("Gt", 0), ("NotEq", 0), ("GtE", 1)})
+"""Comparisons that ask whether a count is non-zero."""
+
+
+class Emptiness(NamedTuple):
+    """A `.count()` whose value is discarded for a yes-or-no answer."""
+
+    call: ast.Call
+    holder: ast.expr
+    """The expression the count is buried in -- what the fix replaces."""
+
+    negated: bool
+    """The question is "is it empty", so the fix reads `not ....exists()`."""
+
+    model: str | None
+    """`None` when the receiver is a relation the graph names but cannot type."""
+
+
+def multi_valued_names(graph: ModelGraph) -> frozenset[str]:
+    """Every attribute name in the project that yields many related rows.
+
+    Both directions answer to one name. Forward is a relation the model
+    declares; reverse is the accessor Django adds to somebody else's target,
+    which is why it is read out of the incoming index. Collected across the
+    whole graph rather than per model because the receiver this is asked about
+    -- `ctx['item'].bundled_with` -- is an expression whose type is not
+    knowable, so the question is only ever "is this a relation name at all".
+    """
+    names = {
+        edge.accessor
+        for edges in graph.incoming.values()
+        for edge in edges
+        if edge.accessor and edge.kind in MULTI_VALUED_REVERSE
+    }
+    names.update(
+        edge.field_name for model in graph for edge in model.relations if edge.is_multi_valued
+    )
+    return frozenset(names)
+
+
+def asks_emptiness(parent: ast.AST, node: ast.expr) -> tuple[ast.expr, bool] | None:
+    """The expression testing `node` for emptiness, and whether it means empty.
+
+    Returns `None` when the count's value is used as a number -- compared
+    against a real bound, assigned, returned, formatted, or added to something
+    -- since all of those need the number that `.exists()` cannot give.
+    """
+    if isinstance(parent, ast.Compare) and len(parent.ops) == 1:
+        # A chained comparison is excluded because only part of it would be
+        # replaced: `qs.count() == 0 == n` also asserts `0 == n`, which
+        # `not qs.exists()` silently drops.
+        other = parent.comparators[0]
+        if isinstance(other, ast.Constant):
+            key = (type(parent.ops[0]).__name__, other.value)
+            if key in EMPTY:
+                return parent, True
+            if key in NONEMPTY:
+                return parent, False
+        return None
+    if isinstance(parent, ast.UnaryOp) and isinstance(parent.op, ast.Not):
+        return parent, True
+    if isinstance(parent, ast.If | ast.While | ast.IfExp) and parent.test is node:
+        return node, False
+    if isinstance(parent, ast.comprehension):
+        return (node, False) if any(test is node for test in parent.ifs) else None
+    if isinstance(parent, ast.BoolOp) and parent.values[-1] is not node:
+        # Only the last operand's *value* survives a `and`/`or`; the others are
+        # consumed as truth values, so `qs.count() and x` discards the number
+        # while `x and qs.count()` returns it.
+        return node, False
+    return None
+
+
+def is_count_call(node: ast.AST) -> TypeGuard[ast.Call]:
+    """Whether `node` is a no-argument `obj.count()`.
+
+    The arity matters for more than crash-safety: `str.count` and `list.count`
+    both *require* an argument, so demanding none of them is what keeps this
+    rule off every non-Django `.count(x)` in a project.
+    """
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "count"
+        and not node.args
+        and not node.keywords
+    )
+
+
+@register
+class CountForEmptiness(Rule):
+    """DJP-006 -- counting every row to find out whether there is one."""
+
+    meta = RuleMeta(
+        id="DJP-006",
+        title="`.count()` used only to test whether rows exist",
+        family=Family.DJP,
+        severity=Severity.LOW,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "`.count()` compiles to `SELECT COUNT(*)`, which the database "
+            "answers by visiting every row that matches the filter. "
+            "`.exists()` compiles to `SELECT 1 ... LIMIT 1`, which stops at "
+            "the first one. Both are a single query, so the cost does not show "
+            "up as a query count -- it shows up in the statement, and it grows "
+            "with the size of the table while the answer stays one bit. On a "
+            "filtered scan without a covering index the difference is the "
+            "whole table against one row."
+        ),
+        remediation=(
+            "Replace the comparison with `.exists()`, or `not ....exists()` "
+            "where the question is whether the set is empty. Keep `.count()` "
+            "wherever the number itself is used -- shown to a user, compared "
+            "against a real bound, or reported in an assertion failure."
+        ),
+        limitations=(
+            "A related accessor may already be prefetched, in which case both "
+            "forms read the prefetch cache and cost the same. That case is "
+            "reported at `tentative` rather than excluded, because `.exists()` "
+            "is measurably never worse than `.count()` here: equal under "
+            "`prefetch_related` and cheaper without it.",
+            "A `.count()` inside an `assert` is never reported. The number is "
+            "what the failure message shows, and an assertion that a set is "
+            "empty is cheapest exactly when it passes, since there are no rows "
+            "to count. This is why the rule is silent on test suites, which is "
+            "where the idiom overwhelmingly occurs.",
+            "A count bound to a name and only then compared is not reported; "
+            "the rule reads the expression the call is written in, not the "
+            "later uses of a variable.",
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/models/querysets/#exists",
+            "https://docs.djangoproject.com/en/stable/topics/db/optimization/#don-t-retrieve-things-you-don-t-need",
+        ),
+    )
+
+    def check(self, ctx: ProjectContext) -> Iterator[Finding]:
+        relations: frozenset[str] | None = None
+        for path in ctx.python_files:
+            source = ctx.source(path)
+            if source is None or ".count()" not in source:
+                # `.count()` written with no argument is the only shape this
+                # reports, and it cannot appear in a file whose text lacks it.
+                continue
+            tree = ctx.parse(path)
+            if tree is None:
+                continue
+            if relations is None:
+                relations = multi_valued_names(ctx.model_graph)
+            for found in self.emptiness_tests(ctx, path, tree, relations):
+                yield self.report(ctx, path, found)
+
+    def emptiness_tests(
+        self, ctx: ProjectContext, path: Path, tree: ast.Module, relations: frozenset[str]
+    ) -> Iterator[Emptiness]:
+        """Every `.count()` in the module whose number is thrown away.
+
+        Walked parent-first so the enclosing expression is in hand when the
+        call is reached; `ast.walk` alone gives no parent, and the parent is
+        the entire question. The same descent records the tests of `assert`
+        statements, which is sound because a stack descent always pops a node
+        before its children, so an `assert` is seen before the count buried
+        inside it is examined.
+        """
+        root = ctx.scopes(path)
+        if root is None:
+            return
+        scopes = {id(scope.node): scope for scope in root.walk()}
+        asserted: set[int] = set()
+        stack: list[tuple[ast.AST, Scope]] = [(tree, root)]
+        while stack:
+            node, scope = stack.pop()
+            current = scopes.get(id(node), scope)
+            if isinstance(node, ast.Assert):
+                asserted.add(id(node.test))
+            for child in ast.iter_child_nodes(node):
+                stack.append((child, current))
+                if not is_count_call(child):
+                    continue
+                asked = asks_emptiness(node, child)
+                if asked is None:
+                    continue
+                holder, negated = asked
+                if id(holder) in asserted:
+                    # Measured, and it is the difference between a rule that
+                    # reports one thing and one that reports eighty-three: of
+                    # every `.count()` emptiness test across Healthchecks,
+                    # NetBox and pretix, all but one is
+                    # `assert Model.objects.count() == 0` in a test suite.
+                    continue
+                counts, model = self.receiver(ctx, path, current, child, relations)
+                if not counts:
+                    continue
+                yield Emptiness(child, holder, negated, model)
+
+    def receiver(
+        self,
+        ctx: ProjectContext,
+        path: Path,
+        scope: Scope,
+        call: ast.Call,
+        relations: frozenset[str],
+    ) -> tuple[bool, str | None]:
+        """Whether the count is over rows, and which model's if that is known.
+
+        Declining is the answer for every receiver the tracker cannot resolve
+        and the model graph does not name. Without that the rule would report
+        any object in the project exposing a no-argument `.count()`.
+        """
+        value = ctx.tracked(path, scope).get(id(call))
+        if value is not None and value.origin in FRESH:
+            return True, value.model
+        func = call.func
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Attribute):
+            # `ctx['item'].bundled_with.count()` -- a receiver no tracker can
+            # type, ending in an attribute the project declares as a relation,
+            # which is enough to know that rows are being counted.
+            return func.value.attr in relations, None
+        return False, None
+
+    def report(self, ctx: ProjectContext, path: Path, found: Emptiness) -> Finding:
+        call, holder, negated, model = found
+        receiver = call.func.value if isinstance(call.func, ast.Attribute) else call.func
+        fix = f"{ast.unparse(receiver)}.exists()"
+        better = f"not {fix}" if negated else fix
+        subject = f"every row of `{model}`" if model else "every related row"
+        return self.finding(
+            location=ctx.location(path, holder),
+            confidence=Confidence.FIRM if model else Confidence.TENTATIVE,
+            message=(
+                f"`{ast.unparse(holder)}` counts {subject} to learn whether "
+                f"there are any. Use `{better}`, which stops at the first row."
+            ),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.AST,
+                    content=(
+                        f"{ast.unparse(holder)}\n"
+                        f"counts: {model or 'a relation the graph names but cannot type'}\n"
+                        f"emitted: SELECT COUNT(*) with no bound\n"
+                        f"suggested: {better}  (SELECT 1 ... LIMIT 1)"
+                    ),
+                    source=str(path),
+                ),
+            ),
+            properties={"model": model or "", "suggested": better},
         )

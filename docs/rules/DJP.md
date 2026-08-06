@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJP` — performance and ORM efficiency
 
-5 rules on the queries a Django project makes without meaning to. The ORM
+6 rules on the queries a Django project makes without meaning to. The ORM
 makes the expensive thing and the cheap thing look identical: `book.author.name`
 is an attribute access whether the author arrived with the book or costs its own
 round trip, and the source gives no indication which. Every rule here reports a
@@ -54,6 +54,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJP-003`](#djp-003--serializer-method-walks-a-relation-the-views-queryset-did-not-fetch) | Serializer method walks a relation the view's queryset did not fetch | high | firm |
 | [`DJP-004`](#djp-004--query-executed-inside-a-loop) | Query executed inside a loop | high | firm |
 | [`DJP-005`](#djp-005--len-on-a-queryset-whose-rows-are-never-read) | `len()` on a queryset whose rows are never read | medium | firm |
+| [`DJP-006`](#djp-006--count-used-only-to-test-whether-rows-exist) | `.count()` used only to test whether rows exist | low | firm |
 
 ---
 
@@ -165,5 +166,26 @@ $ djaudit run . --min-severity info --min-confidence tentative
 **References**
 
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#count>
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#exists>
+- <https://docs.djangoproject.com/en/stable/topics/db/optimization/#don-t-retrieve-things-you-don-t-need>
+
+---
+
+### DJP-006 — `.count()` used only to test whether rows exist
+
+**Severity** low · **Confidence** firm · **Tier** static
+
+**What it means.** `.count()` compiles to `SELECT COUNT(*)`, which the database answers by visiting every row that matches the filter. `.exists()` compiles to `SELECT 1 ... LIMIT 1`, which stops at the first one. Both are a single query, so the cost does not show up as a query count -- it shows up in the statement, and it grows with the size of the table while the answer stays one bit. On a filtered scan without a covering index the difference is the whole table against one row.
+
+**How to fix it.** Replace the comparison with `.exists()`, or `not ....exists()` where the question is whether the set is empty. Keep `.count()` wherever the number itself is used -- shown to a user, compared against a real bound, or reported in an assertion failure.
+
+**What this rule cannot see.**
+
+- A related accessor may already be prefetched, in which case both forms read the prefetch cache and cost the same. That case is reported at `tentative` rather than excluded, because `.exists()` is measurably never worse than `.count()` here: equal under `prefetch_related` and cheaper without it.
+- A `.count()` inside an `assert` is never reported. The number is what the failure message shows, and an assertion that a set is empty is cheapest exactly when it passes, since there are no rows to count. This is why the rule is silent on test suites, which is where the idiom overwhelmingly occurs.
+- A count bound to a name and only then compared is not reported; the rule reads the expression the call is written in, not the later uses of a variable.
+
+**References**
+
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#exists>
 - <https://docs.djangoproject.com/en/stable/topics/db/optimization/#don-t-retrieve-things-you-don-t-need>
