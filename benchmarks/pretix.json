@@ -1185,6 +1185,26 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "A RunPython data migration walking ticketoutputpdf.TicketLayout and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. A plugin migration, reported the same way as the core ones."
+    },
+    {
+      "fingerprint": "1a7a22803e09b8cc",
+      "rule_id": "DJP-008",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0159_mails_by_sales_channel.py",
+      "line": 16,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-06",
+      "note": "A data migration that builds one Event_SettingsStore per Event, in a list comprehension over Event.objects.all() handed straight to bulk_create. The batch_size=1000 on the bulk_create is the tell: the author already knew the row count was large enough to need batching, but the comprehension is fully evaluated before bulk_create sees a single row, so every Event and every constructed settings row is resident at once and the batching only bounds the SQL. Measured over 20000 rows, holding them costs 11.0 MB against 1.2 MB streamed. Passing a generator expression instead of a list, with Event.objects.all().iterator(), lets bulk_create consume it in batches."
+    },
+    {
+      "fingerprint": "4f46a285fce9ea69",
+      "rule_id": "DJP-008",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0159_mails_by_sales_channel.py",
+      "line": 23,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-06",
+      "note": "The second bulk_create in the same migration, identical in shape to the first: a list comprehension over the whole Event table, evaluated in full before bulk_create begins. Same verdict and same remediation -- drop the brackets and stream the outer queryset with .iterator(), which lets the existing batch_size actually bound memory instead of only bounding statement size. Worth noting this migration is unusual in reaching Event by direct import rather than apps.get_model(), which is precisely why djaudit can name the model here and stays silent on most other data migrations."
     }
   ]
 }

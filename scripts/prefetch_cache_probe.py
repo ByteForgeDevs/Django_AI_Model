@@ -18,6 +18,7 @@ Run: `uv run python scripts/prefetch_cache_probe.py`
 from __future__ import annotations
 
 import sys
+import tracemalloc
 import types
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -90,6 +91,24 @@ BULK_CEILING = 5
 """A SELECT, a BEGIN, the statement and a COMMIT, with one to spare."""
 
 LONG_AGO = datetime(2000, 1, 1, tzinfo=UTC)
+
+STREAM_ROWS = 20000
+"""Rows for the materialise-versus-stream comparison.
+
+Must exceed `iterator()`'s default `chunk_size`, which is **2000**. The first
+version of this gate used exactly 2000 rows and failed at a ratio of 2.5x --
+not because the claim was wrong but because at the chunk size `iterator()`
+holds every row too, so the two arms were measuring the same thing. At 20000
+the streaming arm peaks at roughly one chunk's worth, which is the shape the
+rule actually depends on.
+"""
+
+STREAM_RATIO = 5
+"""How much heavier materialising must be before the gate believes it.
+
+Measured at 9x. The margin is left wide because the absolute numbers depend on
+row width and on the interpreter, while the shape does not.
+"""
 """A sentinel `auto_now` value. Compared with `__lt`, never `__year`: on this
 SQLite build `__year` matches nothing at all, so a gate written with it would
 have passed by absence for both branches."""
@@ -349,6 +368,49 @@ def writes_report() -> list[str]:
     return failures
 
 
+def peak_bytes(materialise: bool) -> tuple[int, int]:
+    """Peak allocation, and rows alive at once, reading every Note.
+
+    `list(qs)` builds the whole result cache before the first row is used;
+    `.iterator()` streams server-side and never populates it. The row count is
+    taken from `_result_cache` rather than from memory, because it is the fact
+    the rule actually depends on -- memory is the consequence.
+    """
+    Note.objects.all().delete()
+    Note.objects.bulk_create([Note(text=f"n{i}" * 20) for i in range(STREAM_ROWS)])
+    queryset = Note.objects.all()
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    if materialise:
+        rows = list(queryset)
+        held = len(queryset._result_cache or [])
+        total = sum(len(row.text) for row in rows)
+    else:
+        total = sum(len(row.text) for row in queryset.iterator())
+        held = len(queryset._result_cache or [])
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert total  # the rows really were read, in both arms
+    return peak, held
+
+
+def streaming_report() -> list[str]:
+    """The `DJP-008` half: what materialising a whole table costs."""
+    failures: list[str] = []
+    print(f"\n{'reading ' + str(STREAM_ROWS) + ' rows':38} {'peak B':>10} {'cached':>8}")
+    peaks = {}
+    for label, materialise in (("list(qs)", True), ("qs.iterator()", False)):
+        peaks[label] = peak_bytes(materialise)
+        print(f"{label:38} {peaks[label][0]:>10} {peaks[label][1]:>8}")
+    # Two separate claims. The cache one is exact and is what the rule reads
+    # from the source; the memory one is the reason anybody cares.
+    if not (peaks["list(qs)"][1] == STREAM_ROWS and peaks["qs.iterator()"][1] == 0):
+        failures.append("iterator() populates the result cache")
+    if not peaks["list(qs)"][0] > peaks["qs.iterator()"][0] * STREAM_RATIO:
+        failures.append("materialising is not measurably heavier than streaming")
+    return failures
+
+
 def emptiness_report() -> list[str]:
     """The `DJP-006` half: what an emptiness test costs, and what it emits."""
     failures: list[str] = []
@@ -428,6 +490,7 @@ def main() -> int:
 
     wrong.extend(emptiness_report())
     wrong.extend(writes_report())
+    wrong.extend(streaming_report())
 
     if wrong:
         print(f"\nFAIL: Django no longer behaves as CACHE_READS assumes: {wrong}")

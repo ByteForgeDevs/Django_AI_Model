@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJP` — performance and ORM efficiency
 
-7 rules on the queries a Django project makes without meaning to. The ORM
+8 rules on the queries a Django project makes without meaning to. The ORM
 makes the expensive thing and the cheap thing look identical: `book.author.name`
 is an attribute access whether the author arrived with the book or costs its own
 round trip, and the source gives no indication which. Every rule here reports a
@@ -56,6 +56,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJP-005`](#djp-005--len-on-a-queryset-whose-rows-are-never-read) | `len()` on a queryset whose rows are never read | medium | firm |
 | [`DJP-006`](#djp-006--count-used-only-to-test-whether-rows-exist) | `.count()` used only to test whether rows exist | low | firm |
 | [`DJP-007`](#djp-007--a-row-written-once-per-iteration-where-a-bulk-write-would-do) | A row written once per iteration where a bulk write would do | medium | firm |
+| [`DJP-008`](#djp-008--a-whole-table-read-into-memory-where-it-could-be-streamed) | A whole table read into memory where it could be streamed | medium | firm |
 
 ---
 
@@ -214,3 +215,27 @@ $ djaudit run . --min-severity info --min-confidence tentative
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#bulk-update>
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#bulk-create>
 - <https://docs.djangoproject.com/en/stable/topics/db/optimization/#use-bulk-methods>
+
+---
+
+### DJP-008 — A whole table read into memory where it could be streamed
+
+**Severity** medium · **Confidence** firm · **Tier** static
+
+**What it means.** Materialising a queryset builds every row before the first one is used. Measured over 20000 rows: `list(qs)` peaks at 11.0 MB and holds 20000 rows in the result cache, while the same read through `.iterator()` peaks at 1.2 MB and holds none -- about one `chunk_size` at a time. In a migration, a management command or a background task the row count is whatever production has, so the memory is bounded by the table rather than by the code, and the failure mode is the process being killed partway through a deploy rather than anything that looks like a slow query.
+
+**How to fix it.** Iterate with `.iterator()` instead of building a list, passing `chunk_size` if the default 2000 rows is still too much. Where the rows are only used to build other rows, keep the batching explicit -- `bulk_create(..., batch_size=...)` consumes a generator. Where only a column is needed, `values_list(...)` avoids building model instances at all.
+
+**What this rule cannot see.**
+
+- A migration that reaches its model through `apps.get_model()` -- the documented idiom, and what almost every real data migration does -- gives the static graph no model to name, so nothing in it is reported. This is the rule's largest recall gap and the reason it is quiet on two of the three benchmark corpora.
+- A `RunPython` target defined in another module is not reported. The context is established per file, so only a function written beside the `RunPython` call that names it is covered.
+- Only migrations, management commands and scheduled tasks are considered, because they are the contexts whose row count is unbounded by construction. A request handler reading a whole table is not reported, since a table small enough to render is small enough to hold.
+- A queryset narrowed by `filter`, `exclude` or `none` is never reported. Narrowing does not prove the result is small, but it removes the rule's evidence that the read covers the whole table.
+- Table size is not knowable from source, so a whole-table read of a table that is small by nature -- content types, choices, feature flags -- is reported on the same footing as one of an unbounded table. The context requirement is what keeps that rare.
+- A bare `for` loop over an unnarrowed queryset is not reported even though it also fills the result cache, because in the corpora those loops are overwhelmingly the ones DJP-007 already speaks about, and two findings on one loop help nobody.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#iterator>
+- <https://docs.djangoproject.com/en/stable/topics/db/optimization/#retrieve-everything-at-once-if-you-know-you-will-need-it>

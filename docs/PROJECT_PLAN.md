@@ -3608,7 +3608,92 @@ We therefore build the dataflow foundation first, and we default this family to
   5 and proved nothing; it now runs 20 rows and asserts the **shape** — loop `>= N`,
   bulk `<= ceiling` — rather than a margin that drifts with Django's batching.
 
-- **3.3.4** — `DJP-008` unbounded `.all()` materialised into a list.
+- **3.3.4** — `DJP-008` unbounded `.all()` materialised into a list. **Done**,
+  and much narrower than this line originally promised.
+
+  The obvious version of this rule does not survive contact with the corpora.
+  Reporting every `list(Model.objects.all())` with no filter and no slice found
+  **23 sites — 17 of them test files**, and of the rest four were tables bounded
+  by their nature (content types, custom fields, tags, scripts). Nine of the 17
+  were a single netbox test module calling a custom manager method that returns
+  intervals rather than rows. Roughly two of 23 were worth reporting: **8%**.
+
+  The premise is the problem. Whether holding a table in memory is a bug depends
+  on how many rows it has, and the row count is not in the source. Every filter
+  that could be added is a proxy for "is this table big", and the measurement
+  says the proxies are weak.
+
+  So the rule stops guessing table size and requires a context where the count is
+  unbounded **by construction**: a data migration, a management command, or a
+  scheduled task. That is a positive structural claim, not the path heuristic
+  rejected in 3.3.3 — a migration step is a function `RunPython` was *handed*,
+  and the rule reads the `RunPython` call to find it rather than looking at the
+  directory name. A test proves the distinction: a helper sitting beside a
+  `RunPython` call in the same migration file is **not** reported.
+
+  Within such a context it reports only an explicit materialisation — `list()`,
+  `set()`, `sorted()`, `frozenset()`, or a comprehension — of a queryset never
+  narrowed by `filter`/`exclude`/`none`, never sliced, and not already streaming.
+  A bare `for` is deliberately excluded: it fills the result cache too, but in the
+  corpora those loops are overwhelmingly the ones DJP-007 already speaks about,
+  and two findings on one loop help nobody.
+
+  Result: **2 findings across 3,091 files**, both in one pretix migration, both
+  true positives. That is the intended shape. The corpora measure precision; the
+  planted-defect fixture measures recall.
+
+  The cost claim is a CI gate, and the first version of it failed — instructively.
+  Over 2,000 rows `list(qs)` peaked at 1.06 MB against `.iterator()`'s 0.43 MB, a
+  ratio of 2.5 that would not support the rule. The cause was not the claim:
+  **`.iterator()`'s default `chunk_size` is 2000**, so at exactly 2,000 rows the
+  streaming arm holds every row too and both arms measure the same thing. At
+  20,000 rows the numbers separate and explain themselves — 11.0 MB with 20,000
+  rows cached, against 1.2 MB with none, and 1.2 MB is about one chunk.
+
+  The rule's largest limitation is recorded rather than hidden: a migration that
+  reaches its model through **`apps.get_model()`** — the documented idiom, and
+  what nearly every real data migration does — gives the static graph no model to
+  name, so nothing in it is reported. pretix's `0159` is visible only because it
+  imports `Event` directly. This is why healthchecks and netbox both return zero.
+
+  **The first version of the rule failed the timing gate, and fixing it was the
+  substep's real work.** pretix went from 16.7s to 23.5s against a 20s budget --
+  a single rule costing 7 seconds. Two causes, both structural rather than
+  incidental. It called three separate `ast.walk` passes over every file in the
+  project to collect three facts, which is precisely the shape 3.6.3 removed
+  from `build_route_graph`; and inside those walks it called `ast.unparse` on
+  every call node to test one string. Collapsing the three walks into one and
+  replacing the unparse with a structural `Name`/`Attribute` check recovered
+  most of it, and the last of it came from a stronger observation: **a
+  production context can only be established at module or class level.**
+  `operations = [RunPython(f)]` is a class attribute, `handle` is a method, a
+  scheduling decorator is attached where the function is defined. Function
+  bodies are the bulk of any codebase and can establish none of these, so they
+  are never descended into.
+
+  Final cost, measured back to back on one box with the rule moved out and
+  back: **17.95s against 19.02s, about 1.1 seconds.** The absolute numbers are
+  not the budget position -- CI measures the same corpus at 11.3s -- but the
+  delta is the rule's, and it is the number worth quoting.
+
+  **Lesson (32): a project-wide scan inside a rule is a cost that compounds.**
+  DJP-007 scans every file for signal receivers and DJP-008 scans every file for
+  production contexts, each cheap alone. This is the second rule in a row to
+  need one, and the pattern should be hoisted into the context with caching
+  before it becomes a third.
+
+  **Lesson (31): a guard is only tested by a shape that reaches it.** Three of
+  DJP-008's guards survived injection, and none was dead. `list(str(qs.count()))`
+  never hands the tracker a queryset, so the `terminal` guard was never reached;
+  `apps.get_model()` is declined outright, so the unknown-model guard was never
+  reached. Both were found by printing what the tracker actually returned for
+  each candidate shape instead of assuming. The shapes that do reach them are
+  `list(Book.objects.all().first())` and `list(self.get_queryset())`. A fourth
+  "survivor" — reading the attribute of `RunPython(helpers.backfill)` — turned
+  out to be genuinely dead: the context is established per file, and in that form
+  the function is defined in another one. It was deleted, not decorated with a
+  test.
+
 - **3.3.5** — `DJP-009` field accessed after being excluded by `.only()` or `.defer()`, causing a per-row refetch.
 - **3.3.6** — `DJP-010` filtering or ordering on an unindexed field, using the model graph.
 
@@ -3995,9 +4080,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **52 rules are
+document specifies, and most of it is still only specified: **53 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first seven of Phase 3's.
+2, plus the first eight of Phase 3's.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against
