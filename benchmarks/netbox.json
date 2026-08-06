@@ -617,6 +617,16 @@
       "note": "`ObjectChange.objects.filter(...).order_by('-time').first()` per primary key while verifying bulk rename changelog entries, so the assertion costs one query per renamed object. One filtered query over `changed_object_id__in=pk_list` would return the whole set. Shared test utility, so it runs across many test classes; demoted by scope but genuinely worth fixing."
     },
     {
+      "fingerprint": "b44564b3128344df",
+      "rule_id": "DJP-005",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_models.py",
+      "line": 1695,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-06",
+      "note": "`test_get_available_vids` binds `child_vids = VLAN.objects.filter(group=vlangroup).values_list('vid', flat=True)` and then calls `len(child_vids)` to assert it equals 4. The name is read nowhere else in the method -- the next statement calls `vlangroup.get_available_vids()` and asserts on a different list -- so every matching row is fetched and turned into a tuple purely to produce an integer. `.count()` is the correct call and compiles to `SELECT COUNT(*)`. It is a test, so the cost does not reach production and severity is demoted to low by `djaudit.scope`, but the reading is right."
+    },
+    {
       "fingerprint": "745b70a3b644900f",
       "rule_id": "DJS-006",
       "verdict": "accepted_risk",

@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJP` — performance and ORM efficiency
 
-4 rules on the queries a Django project makes without meaning to. The ORM
+5 rules on the queries a Django project makes without meaning to. The ORM
 makes the expensive thing and the cheap thing look identical: `book.author.name`
 is an attribute access whether the author arrived with the book or costs its own
 round trip, and the source gives no indication which. Every rule here reports a
@@ -53,6 +53,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJP-002`](#djp-002--reverse-or-many-to-many-relation-evaluated-in-a-loop-without-prefetch_related) | Reverse or many-to-many relation evaluated in a loop without prefetch_related | medium | firm |
 | [`DJP-003`](#djp-003--serializer-method-walks-a-relation-the-views-queryset-did-not-fetch) | Serializer method walks a relation the view's queryset did not fetch | high | firm |
 | [`DJP-004`](#djp-004--query-executed-inside-a-loop) | Query executed inside a loop | high | firm |
+| [`DJP-005`](#djp-005--len-on-a-queryset-whose-rows-are-never-read) | `len()` on a queryset whose rows are never read | medium | firm |
 
 ---
 
@@ -143,3 +144,26 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/topics/db/optimization/#retrieve-everything-at-once-if-you-know-you-will-need-it>
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#in-bulk>
+
+---
+
+### DJP-005 — `len()` on a queryset whose rows are never read
+
+**Severity** medium · **Confidence** firm · **Tier** static
+
+**What it means.** `len(qs)` evaluates the queryset. Django issues `SELECT <every column> FROM <table>`, streams every matching row back, and builds a model instance for each one, so that `len()` can return the length of the list. When the rows are then read, that is the right trade -- the cache is populated and a separate `.count()` would be a second query. When they are not, the entire result set has been transferred and deserialised to produce one integer that `SELECT COUNT(*)` would have computed in the database. The cost scales with the table, not with the answer, and memory scales with it too: a count of a million rows holds a million model instances.
+
+**How to fix it.** Use `.count()`, which compiles to `SELECT COUNT(*)` and returns the integer without materialising anything. Where the count is only compared against zero, `.exists()` is better still: it adds `LIMIT 1` and stops at the first row instead of counting all of them. Keep `len()` only where the same rows are iterated afterwards, since there it saves a query rather than costing one.
+
+**What this rule cannot see.**
+
+- A queryset whose name is read more than once is never reported, even when the other reads cannot use the cache. That is deliberate: distinguishing a second read that reuses the rows from one that discards them needs more than a name count, and the safe direction for a rule about a correct idiom is silence.
+- A related accessor -- `author.books` -- is not reported, because it may already be prefetched, in which case `len()` costs nothing and `.count()` would not be an improvement.
+- A sliced queryset is not reported. `len(qs[:10])` fetches at most ten rows, so the cost does not scale with the table.
+- Row size is not modelled. `len()` over five rows and over five million are reported in the same terms.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#count>
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#exists>
+- <https://docs.djangoproject.com/en/stable/topics/db/optimization/#don-t-retrieve-things-you-don-t-need>

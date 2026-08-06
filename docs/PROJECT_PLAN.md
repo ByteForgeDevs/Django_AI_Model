@@ -3367,7 +3367,104 @@ We therefore build the dataflow foundation first, and we default this family to
 
 ### Step 3.3 — Query efficiency rules
 
-- **3.3.1** — `DJP-005` `len(queryset)` where `.count()` is intended.
+- **3.3.1** — `DJP-005` `len(queryset)` where `.count()` is intended. **Done.**
+
+  The hard part is that `len(qs)` is usually *right*. It evaluates the queryset
+  and populates its result cache, so code that counts rows and then reads them
+  should call it — one query beats `.count()` plus an iteration, which is two.
+  A rule that reported every `len(qs)` would be reporting a correct idiom, and
+  advising `.count()` there would make the code slower. So the rule reports
+  only what it can prove is discarded: a queryset written **inline** inside the
+  `len()`, which no name holds, or one held by a name that is loaded **exactly
+  once** in its scope.
+
+  Related accessors are excluded on measured grounds rather than caution:
+  `scripts/prefetch_cache_probe.py` counts `len(vm.interfaces.all())` at 2
+  queries under `prefetch_related`, the same as `.count()`, so there is no
+  improvement to advise. Sliced chains are excluded because `len(qs[:10])`
+  costs at most ten rows.
+
+  Where the count is only tested for emptiness — `> 0`, `== 0`, `not len(...)`
+  — the message names `.exists()` instead, which adds `LIMIT 1` and stops at
+  the first row. The two suggestions live in one rule because both are about
+  the `len()` expression; `DJP-006` takes the `.count()` expression.
+
+  Building this exposed a real gap in how the rule read the module:
+  `def_use` deliberately stops at a nested scope, so tracking the module alone
+  saw `Book.objects.all()` inside a function but never learned that `books`
+  referred to it. Every named case was silently invisible, and the first corpus
+  measurement returned zero across all three targets for that reason rather
+  than because the idiom is absent. Each scope is now tracked with its own
+  def-use chains and a `len()` is read against the innermost scope containing
+  it.
+
+  *Measured:* across all three corpora there are **15** `len()` calls on a
+  fresh manager queryset. **14 are correctly declined** because the name is read
+  again — verified by reading each: pretix's `modelimport.py` joins
+  `existing_codes` into an error message after counting it, and NetBox's
+  `test_changelog.py` indexes `changes[0]`…`changes[3]` after asserting its
+  length. Both would be false positives, and both would have been advised to
+  make their code slower. **1 is reported**, at
+  `netbox/ipam/tests/test_models.py:1695`, where `child_vids` is counted and
+  never read again; triaged `true_positive`. Healthchecks and pretix report
+  none. 21 rule tests, 15 injected defects all caught.
+
+  Two of those defects survived their first run and both were test bugs rather
+  than dead code. The `FRESH` exclusion looked unreachable because the test
+  used `len(author.books.all())`, which the queryset tracker does not resolve
+  at all — so the silence came from the tracker, not the guard. Replaced with
+  `len(self.get_queryset())`, which really does track as origin `self` with an
+  unknown model, plus a `_default_manager` case as the contrast that `FRESH`
+  admits. The argument-count guard looked unreachable because its test module
+  held no queryset, so `counts()` returned before the walk that would have
+  raised `IndexError` on `len()`. A third survived the run after the caching
+  work below: removing the check that the called name is `len` left every other
+  guard passing, so the rule would have told an author that `list(books)`
+  should be `.count()`. That one was a missing test, and the fix was a case
+  asserting `list(qs)` and `bool(qs)` are ignored while a real `len(qs)` beside
+  them is still reported.
+
+  **The rule cost more than it was worth, and fixing that fixed the whole run.**
+  Measured against the timing gate rather than a profiler: pretix went from
+  16.2–16.8s to **21.0s** against a 20s budget — a 28% increase for one rule.
+  Phase timings taken with a wall clock, not `cProfile`, which had already lied
+  once about this rule: of the marginal cost, `track` was 1.65s, `def_use`
+  0.93s, a scope-labelling descent 1.67s, and a *separate* `ast.walk` to find
+  `len()` candidates 1.43s — the last walking 478 files to discover that only
+  206 held a call.
+
+  Two changes, neither of them a heuristic. The candidate walk and the scope
+  descent became one pass, since both wanted the same traversal. And the real
+  fix: `def_use` and `track` are pure functions of a scope, and **four**
+  consumers were recomputing them over overlapping scopes — the loop inventory,
+  `DJP-002`, `DJP-003` and `DJP-005` — with `loop_queries` rebuilding a def-use
+  chain that `inventory` had already stored on the `LoopSite`. `ProjectContext`
+  now caches both, alongside the scope-tree cache added for the same reason.
+
+  The result is that the new rule costs a fraction of what it removed:
+
+  | corpus | before the rule | rule, no caches | rule + caches | budget |
+  |---|---|---|---|---|
+  | pretix | 16.2–16.8s | 21.0s | **15.6–16.4s** | 20 |
+  | NetBox | 16.3s | 16.3s | **12.5–13.0s** | 20 |
+  | Healthchecks | 2.7s | 2.7s | **2.2–2.4s** | 3.5 |
+
+  Every corpus is now faster *with* `DJP-005` than it was without it, and
+  NetBox is 3.3s faster than when this substep started. Finding counts and
+  100% precision are unchanged by the caching, which is the point: it removes
+  repeated work, not work. The caches are keyed on `id(scope.node)`, which is
+  sound only because the tree and scope caches hold their results for the run,
+  so nothing an id refers to can be collected and its address reused;
+  `tests/test_context.py` asserts identity rather than equality, because a
+  cache that quietly stopped being used would still return equal results and
+  every gate would stay green while the run got slower. All three cache tests
+  were shown to fail with their cache removed.
+
+  Each timing above was taken on an otherwise idle box, one corpus per
+  invocation. An earlier reading of the same NetBox configuration came back at
+  17.6–19.0s purely because three benchmarks were sharing one command — the
+  same trap that once made a pure machine-load fluctuation look like an
+  11.4s→17.9s regression.
 - **3.3.2** — `DJP-006` `.count() > 0` where `.exists()` is intended.
 - **3.3.3** — `DJP-007` `.save()` inside a loop where `bulk_update` or `bulk_create` applies.
 - **3.3.4** — `DJP-008` unbounded `.all()` materialised into a list.
@@ -3757,9 +3854,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **49 rules are
+document specifies, and most of it is still only specified: **50 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first four of Phase 3's.
+2, plus the first five of Phase 3's.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against
