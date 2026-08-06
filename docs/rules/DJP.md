@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJP` — performance and ORM efficiency
 
-6 rules on the queries a Django project makes without meaning to. The ORM
+7 rules on the queries a Django project makes without meaning to. The ORM
 makes the expensive thing and the cheap thing look identical: `book.author.name`
 is an attribute access whether the author arrived with the book or costs its own
 round trip, and the source gives no indication which. Every rule here reports a
@@ -55,6 +55,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJP-004`](#djp-004--query-executed-inside-a-loop) | Query executed inside a loop | high | firm |
 | [`DJP-005`](#djp-005--len-on-a-queryset-whose-rows-are-never-read) | `len()` on a queryset whose rows are never read | medium | firm |
 | [`DJP-006`](#djp-006--count-used-only-to-test-whether-rows-exist) | `.count()` used only to test whether rows exist | low | firm |
+| [`DJP-007`](#djp-007--a-row-written-once-per-iteration-where-a-bulk-write-would-do) | A row written once per iteration where a bulk write would do | medium | firm |
 
 ---
 
@@ -189,3 +190,27 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#exists>
 - <https://docs.djangoproject.com/en/stable/topics/db/optimization/#don-t-retrieve-things-you-don-t-need>
+
+---
+
+### DJP-007 — A row written once per iteration where a bulk write would do
+
+**Severity** medium · **Confidence** firm · **Tier** static
+
+**What it means.** `save()` inside a loop issues one `UPDATE` per row and each one is a separate round trip. Measured over 20 rows: 21 queries for the loop against 4 for `bulk_update`, and 20 against 1 for `bulk_create`. The number that matters is not the ratio but the shape -- the loop grows with the table and the bulk call does not, so a form that is imperceptible on a developer's 50 rows is an outage on production's 50 million. In a data migration it is the difference between a deploy that pauses and one that has to be abandoned halfway.
+
+**How to fix it.** Collect the rows into a list, mutate them in the loop, and issue one `bulk_update(rows, [...])` after it -- or build the instances and call `bulk_create(rows)` where the loop inserts. Pass `batch_size` on a table large enough that one statement would be unreasonable. Where the loop only ever assigns the same value, a single `queryset.update()` is shorter still, and an arithmetic update can go to the database whole with an `F()` expression.
+
+**What this rule cannot see.**
+
+- A model with a hand-written `save()` is never reported, because no bulk write calls it. This is not a corner case: of pretix's 68 loops that save their iteration target, 53 are on such a model.
+- A model named as the `sender` of a `pre_save` or `post_save` receiver is never reported. Measured: a 20-row loop delivers 20 `post_save` signals and `bulk_update` delivers none, so the advice would silently stop the receiver from running.
+- A model with an `auto_now` or `auto_now_add` column is never reported. Measured: the column advances under `save()` and does not under `bulk_update`, so the naive replacement would quietly stop maintaining a timestamp.
+- Only a loop whose rows come from a known model is considered. A loop over a list, a range or an unresolved call is skipped, since a bulk write needs rows of one model to write back.
+- A `delete()` in a loop is not reported. There is no `bulk_delete`, and replacing it with a queryset `delete()` changes which cascades and signals run.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#bulk-update>
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#bulk-create>
+- <https://docs.djangoproject.com/en/stable/topics/db/optimization/#use-bulk-methods>

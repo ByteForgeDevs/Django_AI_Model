@@ -685,6 +685,36 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-03",
       "note": "django-debug-toolbar in base_requirements.txt:15, pinned through to requirements.txt:4. NetBox handles this about as well as it can be handled with a single distribution: settings.py:472 lists debug_toolbar in INSTALLED_APPS and settings.py:511 removes it again under `if not DEBUG and 'collectstatic' not in sys.argv`, so the app is not installed on a normal production run. That is precisely why DJS-024 stays silent here and why this rule speaks instead: the package is still on the machine, and what keeps the toolbar off is the value of DEBUG rather than the absence of the code. NetBox is a self-hosted product whose operators are told to enable DEBUG when troubleshooting -- shipping the toolbar so that it works when they do is a deliberate product decision, not an oversight, and splitting the image in two to avoid it would cost their users more than it saves. Accepted rather than false positive because the statement is true and the exposure is real: an operator who leaves DEBUG on after an incident gets a SQL panel, and NetBox's own threat model would rather they knew that. The rule is low severity for exactly this reason -- it is a fact about the deployment, not an accusation."
+    },
+    {
+      "fingerprint": "d5fafec9537724ca",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "netbox/extras/migrations/0115_convert_dashboard_widgets.py",
+      "line": 14,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking extras.Dashboard and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. Rewrites a JSON config in memory, so nothing in the body needs the database."
+    },
+    {
+      "fingerprint": "710dbbeff537b829",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "netbox/extras/migrations/0117_move_objectchange.py",
+      "line": 27,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking extras.Dashboard and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. The file name is about ObjectChange but the rows written really are Dashboards -- the migration rewrites objectchange references stored inside dashboard configs, so the model the rule names is right."
+    },
+    {
+      "fingerprint": "c14a626cfae996bd",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "netbox/users/migrations/0009_update_group_perms.py",
+      "line": 16,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A data migration swapping a content type on every ObjectPermission. True as read, and the honest remediation here is smaller than the rule's: object_types.remove()/add() are M2M operations that write immediately, so perm.save() is not merely one query per row, it is a query per row that does nothing at all. Deleting it is better than bulk_update. Kept as a true positive because the statement the rule makes -- one write per iteration over rows of a known model -- is correct, and it points at real waste."
     }
   ]
 }

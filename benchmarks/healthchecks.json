@@ -195,6 +195,136 @@
       "note": "path(f'{prefix}admin/', admin.site.urls) at hc/urls.py:17. The prefix comes from the path component of SITE_ROOT (urls.py:11-13), which is empty for the default SITE_ROOT and empty for any deployment served from the root of a domain -- so for effectively every instance the admin is at /admin/, which is what the rule says, hedged to tentative precisely because that prefix cannot be read statically. None of the suppressors apply: hc/settings.py installs no django-axes, no django-otp and no two-factor package, and the line above (urls.py:16) routes admin/login/ to the project's own login view, which is a usability choice rather than a rate limit. True positive rather than accepted risk because there is a concrete change available and it is not a costly one, and because the finding is info severity and tentative confidence, so it is hidden at both default thresholds and costs a reader nothing unless they go looking. Recorded here so that the day Healthchecks adds a lockout package the rule goes quiet and the benchmark notices.",
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-03"
+    },
+    {
+      "fingerprint": "3fbbf3408c58e4b4",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/accounts/management/commands/sendinactivitynotices.py",
+      "line": 76,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A management command that walks inactive Profiles and stamps deletion_notice_date on each one. True as read: the loop writes its own iteration target and Profile has no save() override, no save signal and no auto_now column. Weakest of the healthchecks findings because the loop also sends an email per profile, so the write is not the dominant cost -- but collecting the profiles and issuing one bulk_update after the loop is still strictly fewer round trips and needs no restructuring of the sends."
+    },
+    {
+      "fingerprint": "95435be2cf90b691",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/accounts/migrations/0018_auto_20190112_1426.py",
+      "line": 24,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking accounts.Profile and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. Note the rule reports only profile.save(); the project.save() two lines above is not the loop target and is left alone, which is the documented limitation working."
+    },
+    {
+      "fingerprint": "a0bb1ba636e4443c",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/accounts/migrations/0018_auto_20190112_1426.py",
+      "line": 31,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking accounts.Profile and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. The save is inside an if, which bulk_update handles by appending conditionally."
+    },
+    {
+      "fingerprint": "f8c222fc1cd44d05",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/accounts/migrations/0020_auto_20190112_1950.py",
+      "line": 15,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking accounts.Project and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. select_related('owner') already avoids the read N+1; the write one remains."
+    },
+    {
+      "fingerprint": "fa7b5d593d600e05",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/api/migrations/0044_auto_20181120_2004.py",
+      "line": 18,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking api.Channel and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. Only rows whose value parses are written, so collect and bulk."
+    },
+    {
+      "fingerprint": "330d183cbc5ceffc",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/api/migrations/0061_webhook_values.py",
+      "line": 35,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking api.Channel and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. Two save sites in one loop, both reported; both append to the same list."
+    },
+    {
+      "fingerprint": "9a3602b67eabf2a1",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/api/migrations/0061_webhook_values.py",
+      "line": 54,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking api.Channel and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. The second of the two branches in this loop."
+    },
+    {
+      "fingerprint": "910cde6eb6002d4d",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/api/migrations/0067_last_error_values.py",
+      "line": 23,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking api.Channel and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. This loop is also a read N+1 -- Notification.objects.filter(channel=ch).latest() runs per row -- so the write is only half of what is wrong with it."
+    },
+    {
+      "fingerprint": "4aa87dc3272de464",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/api/migrations/0078_sms_values.py",
+      "line": 22,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking api.Channel and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. Every matched row is written, so the list is the whole queryset."
+    },
+    {
+      "fingerprint": "734016b5fafd0fae",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/api/migrations/0082_fill_last_notify.py",
+      "line": 18,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking api.Channel and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. Also a per-row Notification lookup, as in 0067."
+    },
+    {
+      "fingerprint": "9ee3b5832dad047f",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/api/migrations/0100_opsgenie_values.py",
+      "line": 19,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking api.Channel and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. An early continue skips already-migrated rows."
+    },
+    {
+      "fingerprint": "155dae7ae7b0d476",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/api/migrations/0104_fill_notification_code.py",
+      "line": 16,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking api.Notification and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. Backfilling a uuid4 per row, which is pure Python and needs no per-row query."
+    },
+    {
+      "fingerprint": "f69ec3c17f74e063",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "hc/api/migrations/0117_fill_badge_key.py",
+      "line": 14,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking api.Check and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. save(update_fields=['badge_key']) already names the field bulk_update needs."
     }
   ]
 }

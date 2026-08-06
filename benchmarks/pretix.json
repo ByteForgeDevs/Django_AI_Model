@@ -1035,6 +1035,156 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "ItemUpdate.get_context_data at control/views/item.py:1683 runs ctx['item'].bundled_with.count() > 0 to decide whether to show one advisory message. Read the surrounding code to confirm it: ctx['item'] comes from get_object(), which is a plain super().get_object(queryset) with no prefetch_related anywhere in the view, and bundled_with is the related_name of a ForeignKey on ItemBundle (base/models/items.py:1516), so the accessor is a real manager and the call is a real query. Django emits SELECT COUNT(*) with no bound where .exists() emits SELECT 1 ... LIMIT 1 -- both one query, but only one of them stops at the first row, which is measured by the EMPTINESS section of scripts/prefetch_cache_probe.py. Reported tentative rather than firm because the rule cannot type a subscript expression and so cannot rule out a prefetch it does not see; here there is none, and the fix is a one-word edit."
+    },
+    {
+      "fingerprint": "4feeb115a6b398fe",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1031,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Event.copy_data_from() clones ItemMetaValue rows with the pk=None + force_insert idiom. The rule reads that pair correctly and suggests bulk_create rather than bulk_update, which is the distinction that matters: these are inserts, not updates. Measured at 20 rows, create-in-a-loop is 20 queries against 1. Copying an event with many items is exactly when this loop is longest, so the cost lands on the largest events."
+    },
+    {
+      "fingerprint": "dbc81b898f6ac6ba",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1037,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The ItemVariationMetaValue arm of Event.copy_data_from(), same pk=None + force_insert clone as the ItemMetaValue loop above it. Reported as bulk_create, correctly. The remediation is mechanical here because nothing in the loop body needs the new pk: the property and variation are both remapped from dictionaries built before the loop."
+    },
+    {
+      "fingerprint": "16f23f21b3c9a815",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1043,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The ItemAddOn arm of Event.copy_data_from(). Same clone idiom, correctly reported as bulk_create. The loop already carries prefetch_related('base_item', 'addon_category'), so the reads are handled and the per-row insert is the only remaining round trip."
+    },
+    {
+      "fingerprint": "3b97f2cc7db06801",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1051,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The ItemBundle arm of Event.copy_data_from(). Clone idiom again, bulk_create is right. A conditional remap of bundled_variation sits inside the loop, which changes nothing: the instances can still be collected and inserted in one statement afterwards."
+    },
+    {
+      "fingerprint": "7e1f95f726b2479c",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1057,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The ItemProgramTime arm of Event.copy_data_from(), guarded by a has_subevents check. Clone idiom, correctly reported as bulk_create. Nothing in the body needs the new pk, so collecting the instances and inserting them once is a direct substitution."
+    },
+    {
+      "fingerprint": "7ec6c897918c6203",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1087,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The Discount arm of Event.copy_data_from(). Correctly identified as an insert via pk=None + force_insert. Worth recording that the remediation is not free here: the loop calls d.log_action() straight after the save and then attaches three M2M sets, all of which need the new primary key. bulk_create does return pks on Postgres, so it remains possible, but this one needs restructuring rather than a one-line swap."
+    },
+    {
+      "fingerprint": "766d19372300e73c",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/checkin.py",
+      "line": 1212,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A periodic task advancing exit_all_at on every CheckinList due for an automatic exit. cl.save(update_fields=['exit_all_at']) in a loop over a queryset of CheckinLists, and CheckinList has no save() override, no save signal and no auto_now column. update_fields already names precisely the column bulk_update would be given, so the fix is to collect the lists and issue one bulk_update(lists, ['exit_all_at']) after the loop."
+    },
+    {
+      "fingerprint": "7144f84465676e62",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/export.py",
+      "line": 511,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The scheduled-export runner stamps schedule_next_run on every due ScheduledEventExport. True as read. The loop also dispatches a Celery task per row, so it is inherently per-row work, but the write is still one UPDATE per schedule and update_fields already names the column. Note the queryset holds select_for_update(skip_locked=True): the rows are locked for the transaction either way, so bulk_update does not widen the lock."
+    },
+    {
+      "fingerprint": "2338f700b0f7c426",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/export.py",
+      "line": 522,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The ScheduledOrganizerExport half of the same runner, identical in shape to the event half above: apply_async per row, compute_next_run(), then a per-row save naming one column. Same verdict and same remediation -- collect and issue a single bulk_update."
+    },
+    {
+      "fingerprint": "420c66d045f4d258",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0071_auto_20170729_1616_squashed_0075_auto_20170828_0901.py",
+      "line": 61,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking pretixbase.InvoiceLine and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. This loop is also a read N+1: tax_rules.get() runs per line inside a try. The write is the part this rule owns."
+    },
+    {
+      "fingerprint": "70dc44e3c3c4df46",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0073_auto_20170716_1333.py",
+      "line": 56,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking pretixbase.InvoiceLine and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. The unsquashed twin of the 0071 loop, with the same per-row tax_rules lookup."
+    },
+    {
+      "fingerprint": "34dc0e456a7c71ff",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0097_auto_20180722_0804.py",
+      "line": 91,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A data migration cloning NotificationSetting rows onto a new action_type using pk=None followed by save(). The rule reads the pk=None assignment and suggests bulk_create rather than bulk_update, which is the correct call -- these rows are inserted, not updated. Historical models carry no overrides or signals, so the swap is equivalent."
+    },
+    {
+      "fingerprint": "7cdfff23863dad77",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0250_eventmetaproperty_filter_public.py",
+      "line": 15,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking pretixbase.EventMetaProperty and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. save(update_fields=['choices']) already names the one column bulk_update needs."
+    },
+    {
+      "fingerprint": "19bbbb5a8f795572",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0266_saleschannel_migrate_data.py",
+      "line": 60,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking pretixbase.Discount and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. The queryset uses .iterator(), which keeps memory flat while leaving the write count untouched -- so the remediation is bulk_update in batches, not one statement."
+    },
+    {
+      "fingerprint": "83ef066e5f4b89ce",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/plugins/ticketoutputpdf/migrations/0003_auto_20180710_1321.py",
+      "line": 16,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking ticketoutputpdf.TicketLayout and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. A plugin migration, reported the same way as the core ones."
     }
   ]
 }

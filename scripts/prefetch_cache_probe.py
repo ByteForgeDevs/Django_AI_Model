@@ -20,6 +20,7 @@ from __future__ import annotations
 import sys
 import types
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import django
@@ -62,6 +63,14 @@ class Iface(models.Model):
 
     class Meta:
         app_label = "probeapp"
+
+
+class Note(models.Model):
+    text = models.CharField(max_length=20)
+    touched = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = "probeapp"
 """,
         "<probeapp.models>",
         "exec",
@@ -72,11 +81,23 @@ sys.modules["probeapp.models"] = _models
 
 from django.db import connection  # noqa: E402
 from django.db.models import Prefetch  # noqa: E402
+from django.db.models.signals import post_save  # noqa: E402
 from django.test.utils import CaptureQueriesContext  # noqa: E402
+
+WRITE_ROWS = 20
+
+BULK_CEILING = 5
+"""A SELECT, a BEGIN, the statement and a COMMIT, with one to spare."""
+
+LONG_AGO = datetime(2000, 1, 1, tzinfo=UTC)
+"""A sentinel `auto_now` value. Compared with `__lt`, never `__year`: on this
+SQLite build `__year` matches nothing at all, so a gate written with it would
+have passed by absence for both branches."""
 
 VM = _models.VM
 Iface = _models.Iface
 Site = _models.Site
+Note = _models.Note
 
 CASES: dict[str, Callable[[Any], object]] = {
     ".all()": lambda vm: list(vm.interfaces.all()),
@@ -228,6 +249,106 @@ def prefetched_emptiness(method: str) -> int:
     return len(captured)
 
 
+def seed_notes() -> None:
+    """Reset to a known row count, so no measurement depends on the last one."""
+    Note.objects.all().delete()
+    Note.objects.bulk_create([Note(text="before") for _ in range(WRITE_ROWS)])
+
+
+def per_row_writes(bulk: bool) -> int:
+    """Queries spent updating every row of a table, one way or the other."""
+    seed_notes()
+    with CaptureQueriesContext(connection) as captured:
+        if bulk:
+            rows = list(Note.objects.all())
+            for row in rows:
+                row.text = "after"
+            Note.objects.bulk_update(rows, ["text"])
+        else:
+            for row in Note.objects.all():
+                row.text = "after"
+                row.save()
+    return len(captured)
+
+
+def per_row_inserts(bulk: bool) -> int:
+    """Queries spent creating rows one at a time against `bulk_create`."""
+    Note.objects.all().delete()  # the measurement is the inserts themselves
+    with CaptureQueriesContext(connection) as captured:
+        if bulk:
+            Note.objects.bulk_create([Note(text=f"n{i}") for i in range(WRITE_ROWS)])
+        else:
+            for i in range(WRITE_ROWS):
+                Note.objects.create(text=f"n{i}")
+    return len(captured)
+
+
+def signals_fired(bulk: bool) -> int:
+    """`post_save` deliveries for the same logical change.
+
+    This is why DJP-007 declines a model with a save signal: `bulk_update`
+    is not a drop-in replacement when something is listening.
+    """
+    seen = []
+    receiver = lambda **kw: seen.append(kw["instance"])  # noqa: E731
+    post_save.connect(receiver, sender=Note)
+    try:
+        per_row_writes(bulk)
+    finally:
+        post_save.disconnect(receiver, sender=Note)
+    return len(seen)
+
+
+def auto_now_moved(bulk: bool) -> bool:
+    """Whether the `auto_now` column advanced, which only `save()` guarantees."""
+    seed_notes()
+    Note.objects.update(touched=LONG_AGO)
+    rows = list(Note.objects.all())
+    for row in rows:
+        row.text = "after"
+    if bulk:
+        Note.objects.bulk_update(rows, ["text"])
+    else:
+        for row in rows:
+            row.save()
+    stale = Note.objects.filter(touched__lt=LONG_AGO + timedelta(days=1)).count()
+    return bool(stale == 0)
+
+
+def writes_report() -> list[str]:
+    """The `DJP-007` half: what a per-row write costs, and what bulk_* skips."""
+    failures: list[str] = []
+    print(f"\n{'per-row write over ' + str(WRITE_ROWS) + ' rows':38} {'queries':>8}")
+    spent = {}
+    for label, bulk in (("save() in a loop", False), ("bulk_update()", True)):
+        spent[label] = per_row_writes(bulk)
+        print(f"{label:38} {spent[label]:>8}")
+    # The claim is the shape, not the margin: one form grows with the row
+    # count and the other does not. A two-row table cannot show that, which is
+    # why WRITE_ROWS is large enough for the two to be unmistakable.
+    if not (spent["save() in a loop"] >= WRITE_ROWS and spent["bulk_update()"] <= BULK_CEILING):
+        failures.append("bulk_update does not flatten the query count")
+
+    print(f"\n{'per-row insert':38} {'queries':>8}")
+    for label, bulk in (("create() in a loop", False), ("bulk_create()", True)):
+        spent[label] = per_row_inserts(bulk)
+        print(f"{label:38} {spent[label]:>8}")
+    if not (spent["create() in a loop"] >= WRITE_ROWS and spent["bulk_create()"] <= BULK_CEILING):
+        failures.append("bulk_create does not flatten the query count")
+
+    print(f"\n{'what bulk_update skips':38} {'save()':>8} {'bulk':>8}")
+    fired = (signals_fired(False), signals_fired(True))
+    print(f"{'post_save deliveries':38} {fired[0]:>8} {fired[1]:>8}")
+    if not (fired[0] == WRITE_ROWS and fired[1] == 0):
+        failures.append("post_save signal behaviour")
+
+    moved = (auto_now_moved(False), auto_now_moved(True))
+    print(f"{'auto_now column advanced':38} {moved[0]!s:>8} {moved[1]!s:>8}")
+    if not (moved[0] and not moved[1]):
+        failures.append("auto_now behaviour")
+    return failures
+
+
 def emptiness_report() -> list[str]:
     """The `DJP-006` half: what an emptiness test costs, and what it emits."""
     failures: list[str] = []
@@ -256,6 +377,7 @@ def main() -> int:
         editor.create_model(Site)
         editor.create_model(VM)
         editor.create_model(Iface)
+        editor.create_model(Note)
     for i in range(3):
         vm = VM.objects.create(name=f"v{i}", site=Site.objects.create(name=f"s{i}"))
         for _ in range(2):
@@ -305,6 +427,7 @@ def main() -> int:
             wrong.append(label)
 
     wrong.extend(emptiness_report())
+    wrong.extend(writes_report())
 
     if wrong:
         print(f"\nFAIL: Django no longer behaves as CACHE_READS assumes: {wrong}")

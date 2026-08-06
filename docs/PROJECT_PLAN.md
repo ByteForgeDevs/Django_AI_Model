@@ -3532,7 +3532,82 @@ We therefore build the dataflow foundation first, and we default this family to
 
   Twenty-four defects are now injected into `count_idioms.py` — fifteen for
   `DJP-005`, nine for `DJP-006` — and all twenty-four turn the suite red.
-- **3.3.3** — `DJP-007` `.save()` inside a loop where `bulk_update` or `bulk_create` applies.
+- **3.3.3** — `DJP-007` `.save()` inside a loop where `bulk_update` or
+  `bulk_create` applies. **Done.**
+
+  This rule is almost entirely its blockers, and the only honest way to arrive at
+  them was to count first. `/tmp/saveloop.py` found **450 sites** across the three
+  corpora where a loop calls `.save()` on the thing it is iterating — netbox 245,
+  pretix 205. Shipping that would have been a noise machine. Four successive
+  filters, each justified by a measurement rather than a hunch, took it to **31**.
+
+  The first filter is not a heuristic at all: require that the loop iterate rows of
+  a **known model** (`site.model` resolved through the model graph, not a guess from
+  the variable name). That single condition removed **226 netbox sites** — every one
+  of them a test fixture building objects in a list comprehension — and left hc 13,
+  nb 7, px 66. It is worth naming why this worked so well: a path heuristic
+  (`"/tests/" in path`) would have removed the same files for the wrong reason and
+  would have been wrong the moment someone wrote a loop over real rows in a test.
+
+  The remaining three filters are the ones that make the advice *safe*, and each is
+  now a measured fact in `scripts/prefetch_cache_probe.py` rather than a claim:
+
+  | Fact | Loop of `.save()` | Bulk call |
+  |---|---|---|
+  | Queries, 20 updates | **21** | `bulk_update` **4** |
+  | Queries, 20 inserts | **20** | `bulk_create` **1** |
+  | `post_save` fires | **20** | **0** |
+  | `auto_now` column advances | **yes** | **no** |
+
+  So the rule declines when the model has a hand-written `save()` (including one
+  inherited through the MRO), when any `pre_save`/`post_save` receiver names it, or
+  when it carries an `auto_now`/`auto_now_add` field — because in each of those
+  three cases the bulk call is **not** behaviour-preserving, and the last two rows of
+  that table are the proof. On pretix those blockers alone took 68 sites to 15;
+  **53 of the 68 were blocked by a custom `save()`**, which says something about the
+  codebase and everything about why the blocker is mandatory. netbox went 7 to 3.
+
+  Reading the survivors changed the rule's output. pretix's `Event.copy_data_from()`
+  is six loops of `obj.pk = None; obj.save(force_insert=True)` — those are **inserts**,
+  and telling someone to use `bulk_update` there would be nonsense. The rule now
+  decides insert vs update from the code: `force_insert=True`, or an `obj.pk = None`
+  / `obj.id = None` assignment in the loop body, means `bulk_create`. `delete()` is
+  deliberately out of scope, because there is no `bulk_delete` to recommend.
+
+  Of the final 31, **21 are `RunPython` data migrations**. That is a product question,
+  not a technical one — a migration is the highest-value catch before it merges and
+  entirely unactionable after it has run — and it was put to the user, who chose to
+  report them like any other file. The triage notes carry that context per finding.
+  Two survivors are honest about their remediation cost rather than pretending:
+  netbox `0009_update_group_perms.py:16` calls `save()` after M2M `.remove()/.add()`,
+  where the save writes nothing and should simply be **deleted**; pretix
+  `event.py:1087` needs the new pk for a `log_action()` and three M2M sets, so its
+  fix is a restructure, not a swap.
+
+  The 21 tests were written against a **22-defect injection probe**, and the
+  first pass caught only 15. Every one of the seven survivors was a *missing
+  test* rather than dead code, and saying which is the whole point of running
+  the probe: the fixtures used `post_save` but never `pre_save`, `pk = None` but
+  never `id = None`, `auto_now` but never `auto_now_add` and never one inherited
+  from an abstract base, and had no `sender=` call that was *not* a save signal.
+  Six new tests closed all seven. The second pass caught 22 of 22.
+
+  **Lessons, continuing the numbered list.** (27) *Truncating a message hides the
+  payload.* The corpus run printed `[:110]` characters, which is exactly why nobody
+  noticed DJP-006 emitting `Book.objects.count.exists()` — `ast.unparse(call.func)`
+  where `call.func.value` was meant. Fifteen unit tests found it in one run.
+  (28) *A cheap prefilter can make a live guard look dead.* DJP-006's arity guard
+  survived injection because the file-level `".count()" not in source` prefilter
+  meant the probe's `.count(x)`-only fixture was never parsed. A bad test, not dead
+  code. Before deleting a guard that injection calls dead, establish whether it is
+  dead by bug, by design, or because nothing reaches it. (29) *A gate can pass by
+  absence in both directions.* The `auto_now` gate reported `True`/`True` until the
+  SQL was printed: `__year` matches nothing on this SQLite build while `__lt` works,
+  so both branches were failing identically and agreeing. (30) *Four rows cannot
+  demonstrate O(N) versus O(1).* The first `bulk_update` gate compared 4 queries to
+  5 and proved nothing; it now runs 20 rows and asserts the **shape** — loop `>= N`,
+  bulk `<= ceiling` — rather than a margin that drifts with Django's batching.
+
 - **3.3.4** — `DJP-008` unbounded `.all()` materialised into a list.
 - **3.3.5** — `DJP-009` field accessed after being excluded by `.only()` or `.defer()`, causing a per-row refetch.
 - **3.3.6** — `DJP-010` filtering or ordering on an unindexed field, using the model graph.
@@ -3920,9 +3995,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **51 rules are
+document specifies, and most of it is still only specified: **52 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first six of Phase 3's.
+2, plus the first seven of Phase 3's.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against
