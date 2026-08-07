@@ -21,6 +21,13 @@ from djaudit.llm.evaluate import (
     load_ground_truth,
     score,
 )
+from djaudit.llm.prompts import (
+    TRIAGE_SCHEMA,
+    build_triage_prompt,
+    redact,
+    render_finding,
+    worth_asking,
+)
 from djaudit.llm.provider import (
     Answer,
     Declined,
@@ -36,6 +43,7 @@ from djaudit.llm.provider import (
 )
 
 __all__ = [
+    "TRIAGE_SCHEMA",
     "Answer",
     "Budget",
     "Cache",
@@ -59,9 +67,13 @@ __all__ = [
     "Usage",
     "Verdict",
     "baselines",
+    "build_triage_prompt",
     "contested_rules",
     "headroom",
     "key_for",
     "load_ground_truth",
+    "redact",
+    "render_finding",
     "score",
+    "worth_asking",
 ]

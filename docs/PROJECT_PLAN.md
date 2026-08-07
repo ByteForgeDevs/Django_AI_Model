@@ -5551,7 +5551,43 @@ remove from them, and `6.5.3` asserts that by trying.
 
 ### Step 6.2 — Triage
 
-- **6.2.1** — Prompt construction from a finding plus its evidence and surrounding code.
+- **6.2.1** — **Prompt construction from a finding plus its evidence and
+  surrounding code — and the redaction that stands between them and a third
+  party.** `src/djaudit/llm/prompts.py`. **Done.**
+
+  A prompt is the first artefact in this project that leaves the machine. The
+  engine already masks secret *values* where it finds them — `mask()` in
+  `rules/_base.py` renders `SECRET_KEY` as `*x<redacted:50 chars>`, so a finding
+  never carries the key it is complaining about. That covers the values djaudit
+  went looking for. It does not cover a credential that happens to sit three
+  lines above one in a snippet, so the prompt builder redacts again on the way
+  out.
+
+  **I measured the wrong surface first and got the comforting answer.** Probing
+  snippets and evidence across all 245 corpus findings reported **zero** false
+  redactions. The test over the **full rendered prompt** — which also carries
+  the file path and the message — fired on **99 of 245**. The probe had been
+  clean because I pointed it at two of the prompt's four parts. *Measure the
+  artefact that actually ships.*
+
+  All 12 distinct false matches were file paths and squashed migration names
+  (`0001_initial_squashed_0043_...`). The separation is clean and not a matter
+  of taste: every false match contains `/` or `_`, and no vendor credential
+  shape contains either. So the regex is two tiers — prefix-anchored shapes
+  (`sk-`, `gh[pousr]_`, `AIza`, `xox`, JWT, PEM blocks) plus an opaque run
+  `\b[A-Za-z0-9+]{40,}={0,2}` that admits **no separators at all**.
+
+  Re-measured on the shipping artefact: **0 false redactions across all 245
+  rendered prompts, and 9 of 9 real key shapes caught.** The documented residual
+  gap is base64url, whose `-` and `_` the opaque tier will not match; anything
+  in that alphabet is only caught if it carries a vendor prefix.
+
+  `worth_asking` is the hook for 6.1.5's finding: it exists so `djaudit triage`
+  can spend a call only where the rule id does not already decide the verdict.
+  The response schema admits `unsure` as a third verdict, because a model with
+  nothing to add should be able to say so rather than guess.
+
+  Measured: 15 mutations, **15 caught** by 39 tests.
 - **6.2.2** — `djaudit triage`: rank findings by exploitability in this codebase's context.
 - **6.2.3** — False-positive suggestion — proposes suppressions, never applies them.
 - **6.2.4** — Grouping of related findings into a single reviewable theme.
