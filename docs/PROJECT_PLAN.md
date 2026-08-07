@@ -5943,7 +5943,38 @@ remove from them, and `6.5.3` asserts that by trying.
   The fix was to construct each defect in isolation. The other two survivors
   were paths nothing had reached: a suite that times out, and a surviving set
   that fails when re-verified together.
-- **6.4.4** — Deterministic fixes for the mechanical rules, with no model involved — most `DJS` settings fixes need no intelligence at all.
+- **6.4.4** — Deterministic fixes for the mechanical rules, with no model involved — most `DJS` settings fixes need no intelligence at all. **Done** — `tests/llm/test_fixes_need_no_model.py`, 10 tests, each shown failing on a real violation.
+
+  This substep had almost nothing to *build*: 6.4.2 already wrote every fix
+  from its own rule's remediation text, so no model was involved. The work was
+  turning that from something true today into something that stays true, since
+  a property nothing checks is a property that quietly stops holding.
+
+  **Three proofs, because each covers the others' blind spot.** A transitive
+  walk of the import graph from `fix`, `edit` and `verify` — reading source
+  with `ast`, not `sys.modules`, which by mid-test-run holds the whole package
+  and would report everything as reachable from everything. Then the CLI's
+  `_build_provider` is replaced with one that raises, and `fix` (with and
+  without `--verify`) runs to completion. Then the socket layer is closed
+  while the whole library path runs.
+
+  **The socket closure replaced a test that could not fail.** The first version
+  sabotaged the names in `djaudit.llm.provider` — but since no fix module
+  imports them, nothing could ever have tripped it. Closing `socket.socket`,
+  `create_connection` and `getaddrinfo` instead assumes nothing about *how* a
+  model would be reached: any provider, under any name, in any package, has to
+  open one.
+
+  **Every guard is shown failing.** A clean import graph and a broken detector
+  produce identical output, so the walk is pointed at `djaudit.llm.triage`,
+  which genuinely does reach a provider, and required to notice. The CLI
+  sabotage is proven by running `triage` under it and requiring the failure.
+  The socket closure is proven by calling a socket. And the whole gate was
+  checked by adding a real `from djaudit.llm.provider import Provider` to
+  `edit.py` and confirming it fails.
+
+  **Also pinned: the same fixture patched twice is byte-identical.** That is
+  the property having no model actually buys, so it is worth a test of its own.
 
 ### Step 6.5 — Guardrails
 

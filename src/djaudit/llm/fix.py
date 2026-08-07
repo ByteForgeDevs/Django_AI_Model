@@ -35,6 +35,19 @@ fresh key in an environment variable. Generating one into a diff would put a
 live credential into a terminal, a patch file and a pull request. They are
 refused, and separately, any finding whose snippet carries the engine's
 redaction marker is refused before the table is consulted.
+
+Nothing here consults a model, and nothing here can. Every value written is
+decided by its own rule and checked verbatim against that rule's remediation
+text before it is offered, so the judgement lives in the rule, where it is
+reviewable and versioned, rather than in an answer that could differ between
+two runs. A model could not make `DEBUG = False` more correct; it could only
+add a way for it to come out wrong.
+
+That guarantee is enforced rather than asserted -- see
+`tests/llm/test_fixes_need_no_model.py`, which walks the transitive import
+graph, sabotages the CLI's provider factory, and closes the socket layer while
+the whole path runs.
+
 """
 
 from __future__ import annotations
