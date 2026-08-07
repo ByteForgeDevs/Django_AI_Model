@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJI` — injection and untrusted input
 
-1 rules on the boundary between text the project wrote and text the
+2 rules on the boundary between text the project wrote and text the
 client sent. Every one of them is about the same mistake in a different
 costume: a value that should have travelled beside a command ends up inside
 it, and something that was meant to be data is read as syntax.
@@ -51,6 +51,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | Rule | Title | Severity | Confidence |
 |---|---|---|---|
 | [`DJI-001`](#dji-001--request-data-interpolated-into-a-sql-statement) | Request data interpolated into a SQL statement | critical | firm |
+| [`DJI-002`](#dji-002--request-data-interpolated-into-a-raw-query) | Request data interpolated into a .raw() query | critical | firm |
 
 ---
 
@@ -71,5 +72,27 @@ $ djaudit run . --min-severity info --min-confidence tentative
 **References**
 
 - <https://docs.djangoproject.com/en/stable/topics/db/sql/#performing-raw-queries>
+- <https://owasp.org/www-community/attacks/SQL_Injection>
+- <https://cwe.mitre.org/data/definitions/89.html>
+
+---
+
+### DJI-002 — Request data interpolated into a .raw() query
+
+**Severity** critical · **Confidence** firm · **Tier** static
+
+**What it means.** Model.objects.raw() sends its first argument to the database as SQL. Returning model instances does not make the statement safe, and the ORM does no escaping on the way in: a quote in a value built into the string ends the literal the author wrote and starts an expression the client chose. The params argument exists to carry values, and is sent to the driver separately, where nothing in it can be read as syntax.
+
+**How to fix it.** Move the value into params and leave a placeholder in the statement: Model.objects.raw('SELECT ... WHERE x = %s', [value]). If the query can be expressed with the ORM, prefer that -- filter() and annotate() are parameterised by construction. Where an identifier must be interpolated, take it from model metadata or check it against a fixed allowlist first.
+
+**What this rule cannot see.**
+
+- Taint is tracked within one function. A value that reaches the statement through a helper's parameter is reported as unknown rather than tainted, so an injection assembled across two functions is not seen.
+- The receiver must be an expression the model graph recognises as a queryset, so a .raw() call on a manager reached through an unresolved import, or on a queryset returned by an unrecognised helper, is skipped.
+- Composition alone is never reported, so an interpolated statement whose value arrives from a source this analysis does not model, such as a database row written by an earlier request, is not flagged.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/topics/db/sql/#passing-parameters-into-raw>
 - <https://owasp.org/www-community/attacks/SQL_Injection>
 - <https://cwe.mitre.org/data/definitions/89.html>

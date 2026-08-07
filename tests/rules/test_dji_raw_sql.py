@@ -423,7 +423,7 @@ class TestHowItSpeaks:
             """,
         )
         message = found[0].message
-        assert "an f-string" in message
+        assert "An f-string builds" in message
         assert "request.GET['q']" in message
         assert "query parameter" in message
 
@@ -541,3 +541,90 @@ class TestWithNothingToReasonFrom:
             """,
         )
         assert len(found) == 1
+
+
+class TestAStatementBuiltIntoALocal:
+    """The same defect written over two lines, which is the commoner way.
+
+    The rule originally read only the argument expression, so it reported
+    ``cursor.execute(f"...")`` and stayed silent on the assignment above the
+    call -- a hole in the shape most likely to be written by hand.
+    """
+
+    def test_an_fstring_assigned_then_passed(self, make_project):
+        found = findings(
+            make_project,
+            """
+            from django.db import connection
+
+            def search(request):
+                sql = f"SELECT * FROM book WHERE t = '{request.GET['q']}'"
+                with connection.cursor() as cursor:
+                    cursor.execute(sql)
+            """,
+        )
+        assert len(found) == 1
+        assert "assigned to sql" in found[0].message
+
+    def test_the_finding_points_at_the_call(self, make_project):
+        found = findings(
+            make_project,
+            """
+            from django.db import connection
+
+            def search(request):
+                sql = f"SELECT * FROM book WHERE t = '{request.GET['q']}'"
+                with connection.cursor() as cursor:
+                    cursor.execute(sql)
+            """,
+        )
+        assert found[0].location.line == 6
+        assert found[0].location.snippet == "cursor.execute(sql)"
+
+    def test_a_local_holding_a_literal(self, make_project):
+        assert (
+            findings(
+                make_project,
+                """
+                from django.db import connection
+
+                def search(request):
+                    sql = "SELECT * FROM book"
+                    with connection.cursor() as cursor:
+                        cursor.execute(sql)
+                """,
+            )
+            == []
+        )
+
+    def test_a_local_composed_from_safe_parts(self, make_project):
+        assert (
+            findings(
+                make_project,
+                """
+                from django.db import connection
+                from library.models import Book
+
+                def search(request):
+                    sql = f"SELECT * FROM {Book._meta.db_table}"
+                    with connection.cursor() as cursor:
+                        cursor.execute(sql)
+                """,
+            )
+            == []
+        )
+
+    def test_a_local_bound_to_nothing_it_can_read(self, make_project):
+        assert (
+            findings(
+                make_project,
+                """
+                from django.db import connection
+
+                def search(request, sql):
+                    with connection.cursor() as cursor:
+                        cursor.execute(sql)
+                """,
+            )
+            == []
+        )

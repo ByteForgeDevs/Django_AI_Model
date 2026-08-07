@@ -33,13 +33,8 @@ cursors would look identical from the outside.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from djaudit.dataflow.scopes import Scope
-from djaudit.dataflow.strings import Interpolation, interpolation
-from djaudit.dataflow.taint import Taint, request_source, tainted_parts
 from djaudit.models import (
     Confidence,
     Evidence,
@@ -49,7 +44,8 @@ from djaudit.models import (
     Severity,
     Tier,
 )
-from djaudit.registry import Rule, RuleMeta, register
+from djaudit.registry import RuleMeta, register
+from djaudit.rules._injection import Candidate, Composed, Frame, Site, SqlSurface
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -130,13 +126,8 @@ def is_cursor(receiver: ast.expr, chains: DefUse | None) -> bool:
     return receiver.id in CURSOR_NAMES
 
 
-def _describe(part: ast.expr) -> str:
-    """The spliced expression as source, for the message and the evidence."""
-    return ast.unparse(part)
-
-
-def composed(node: ast.AST) -> _Statement | None:
-    """The composed statement behind an ``execute`` call, if there is one.
+def statement_call(node: ast.AST) -> Candidate | None:
+    """An ``execute``-like call with something in the statement position.
 
     Used twice, and deliberately: once as a cheap whole-file prefilter that
     decides whether the scope tree is worth building at all, and once inside
@@ -151,47 +142,13 @@ def composed(node: ast.AST) -> _Statement | None:
     statement = sql_argument(node)
     if statement is None:
         return None
-    spliced = interpolation(statement)
-    if spliced is None:
-        return None
-    return _Statement(call=node, receiver=node.func.value, method=node.func.attr, spliced=spliced)
-
-
-def _direct(part: ast.expr) -> bool:
-    """Whether the request source is written into the splice itself.
-
-    ``f"... {request.GET['q']}"`` leaves nothing to infer; taint that arrived
-    through a name was inferred, however soundly, and the two deserve different
-    confidence.
-    """
-    return any(
-        isinstance(inner, ast.expr) and request_source(inner) is not None
-        for inner in ast.walk(part)
+    return Candidate(
+        call=node, receiver=node.func.value, surface=node.func.attr, argument=statement
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _Statement:
-    """A composed statement handed to an ``execute``-like method."""
-
-    call: ast.Call
-    receiver: ast.expr
-    """The object ``execute`` was called on, which must resolve to a cursor."""
-
-    method: str
-    spliced: Interpolation
-
-
-@dataclass(frozen=True, slots=True)
-class _Site:
-    """One composed statement handed to a cursor, with its tainted parts."""
-
-    statement: _Statement
-    parts: tuple[ast.expr, ...]
-
-
 @register
-class RawSqlInterpolation(Rule):
+class RawSqlInterpolation(SqlSurface):
     """`DJI-001` -- request data interpolated into a cursor statement."""
 
     meta = RuleMeta(
@@ -233,79 +190,31 @@ class RawSqlInterpolation(Rule):
         ),
     )
 
-    def check(self, ctx: ProjectContext) -> Iterator[Finding]:
-        for path in ctx.python_files:
-            source = ctx.source(path)
-            if source is None or "execute" not in source:
-                # Every shape this rule reports is a call to a method named
-                # `execute`, so a file without the word cannot contain one.
-                continue
-            tree = ctx.parse(path)
-            if tree is None:
-                continue
-            if not any(composed(node) for node in ast.walk(tree)):
-                # The expensive step is def-use chains, and this cheap walk is
-                # what keeps them from being built for the whole project: a
-                # composed statement handed to `execute` appears in 5 files
-                # across the three benchmark corpora, out of 3,091.
-                continue
-            root = ctx.scopes(path)
-            if root is None:
-                continue
-            yield from self.inspect(ctx, path, root)
+    WORDS = ("execute",)
+    """Every shape reported is a call to a method named ``execute``.
 
-    def inspect(self, ctx: ProjectContext, path: Path, scope: Scope) -> Iterator[Finding]:
-        """Walk one scope's own statements, then its children."""
-        for site in self.sites(scope, ctx.def_use(scope)):
-            yield self.report(ctx, path, site)
-        for child in scope.children:
-            yield from self.inspect(ctx, path, child)
+    A composed statement handed to one appears in 5 files across the three
+    benchmark corpora, out of 3,091; this word is what keeps def-use chains
+    from being built for the other 3,086.
+    """
 
-    def sites(self, scope: Scope, chains: DefUse | None) -> Iterator[_Site]:
-        """Composed statements in this scope whose parts reach the request."""
-        for node in self.calls(scope):
-            statement = composed(node)
-            if statement is None:
-                continue
-            if not is_cursor(statement.receiver, chains):
-                continue
-            tainted = tuple(
-                part
-                for part, taint in tainted_parts(
-                    statement.spliced.node, statement.spliced.parts, chains
-                )
-                if taint is Taint.TAINTED
-            )
-            if tainted:
-                yield _Site(statement, tainted)
+    def candidate(self, node: ast.AST) -> Candidate | None:
+        return statement_call(node)
 
-    def calls(self, scope: Scope) -> Iterator[ast.Call]:
-        """Calls belonging to this scope rather than to a nested one.
+    def accepts(self, found: Composed, frame: Frame) -> bool:
+        """``.execute`` is a method on plenty of things that are not cursors."""
+        return found.receiver is not None and is_cursor(found.receiver, frame.chains)
 
-        Descending into children here would report the same call once per
-        enclosing scope, and resolve its names against the wrong chains.
-        """
-        nested = {id(child.node) for child in scope.children}
-        stack: list[ast.AST] = list(ast.iter_child_nodes(scope.node))
-        while stack:
-            node = stack.pop()
-            if id(node) in nested:
-                continue
-            if isinstance(node, ast.Call):
-                yield node
-            stack.extend(ast.iter_child_nodes(node))
-
-    def report(self, ctx: ProjectContext, path: Path, site: _Site) -> Finding:
-        statement = site.statement
-        named = ", ".join(_describe(part) for part in site.parts)
-        direct = any(_direct(part) for part in site.parts)
+    def report(self, ctx: ProjectContext, path: Path, site: Site) -> Finding:
+        statement = site.composed
+        named, confidence = self.spoken(site)
         return self.finding(
             location=ctx.location(path, statement.call),
-            confidence=Confidence.CERTAIN if direct else Confidence.FIRM,
+            confidence=confidence,
             message=(
-                f"{statement.spliced.phrasing} builds the SQL passed to "
-                f"{statement.method}(), splicing in request data: {named}. Pass it as "
-                f"a query parameter instead."
+                f"{self.phrasing(statement)} the SQL passed to {statement.surface}(), "
+                f"splicing in request data: {named}. Pass it as a query parameter "
+                f"instead."
             ),
             evidence=(
                 Evidence(

@@ -3998,7 +3998,83 @@ We therefore build the dataflow foundation first, and we default this family to
 
   *Done when:* 42/42 injection, 5 corpus sites all recognised and all silent,
   and the taint model carrying its own tests for all three of its answers.
-- **3.4.2** — `DJI-002` `Model.objects.raw` with interpolation.
+- **3.4.2** — `DJI-002` `Model.objects.raw` with interpolation. **Done.**
+
+  `.raw()` is the ORM's own door out of the ORM, and that is what makes it
+  dangerous: it sits in a chain beside `.filter()`, it returns model instances,
+  and neither fact touches the string. The trigger is `DJI-001`'s — composed
+  **and** reaching the request — for the reason recorded there.
+
+  **The receiver is settled by the model graph, not by a name.** `.raw` is a
+  method on other objects, and `requests`' `Response.raw` is precisely the
+  false positive a name blocklist would have been written for. Asking
+  `ctx.tracked` instead was measured on six shapes before the rule was written:
+
+  | receiver | tracker | wanted |
+  |---|---|---|
+  | `Book.objects.raw(...)` | queryset | accept |
+  | `qs = Book.objects; qs.raw(...)` | queryset | accept |
+  | `Book.objects.filter(x=1).raw(...)` | queryset | accept |
+  | `cursor.raw(...)` | — | decline |
+  | `response.raw(...)` | — | decline |
+  | `thing.raw(...)` (a parameter) | — | decline |
+
+  Six for six, with the `requests` false positive excluded structurally rather
+  than by a list of names anyone would have had to maintain. The tracker keys a
+  whole chain at its *outermost* call, so the node to ask about is the `.raw()`
+  call, not its receiver — a detail measured rather than assumed, and now
+  asserted by a mutation that swaps the two.
+
+  **Lesson 43 — a rule that reads only the argument expression misses the
+  commoner way the defect is written.** DJI-002's first test run failed on
+
+  ```python
+  sql = "SELECT * FROM book WHERE t = '{}'".format(request.GET["q"])
+  return Book.objects.raw(sql)
+  ```
+
+  and DJI-001, already shipped and green, missed the identical shape through
+  `cursor.execute`. Both rules recognised composition only where it was written
+  in the argument position. Composing into a local and passing the local is not
+  an edge case; it is what anyone writes once the statement is longer than a
+  line, and it is what a hand-written injection looks like. The fix is one hop
+  through def-use in the shared base, so both rules gained it at once, and the
+  message now names the local: *"An f-string assigned to sql builds the SQL
+  passed to execute()"*. What made this findable was writing DJI-002's tests
+  from the shapes people write rather than from DJI-001's passing tests — a
+  suite copied from a sibling rule inherits its blind spots exactly.
+
+  The cost of that recall is measured, because the prefilter had to be relaxed
+  to admit files where composition and use are on different lines. Scope trees
+  built, before → after: healthchecks 0 → 4, NetBox 1 → 5, pretix 3 → 9. Nine
+  files of 1,225, for the shape most likely to be the real defect.
+
+  **Corpus: one `.raw()` call in 3,091 files, and it is correct.** NetBox's
+  search backend wraps `queryset.query.sql_with_params()` — SQL the ORM
+  generated, whose values are already travelling separately in `params` — in an
+  outer query. pretix's one composed `RawSQL` does the same thing. That idiom,
+  not an outlier, is what a composition-shaped rule would have flagged. The
+  diagnostic confirms the silence is taint's: 1 call, composed, recognised as a
+  queryset, judged `unknown`, not reported. The re-run of `DJI-001`'s
+  diagnostic under the relaxed prefilter is stronger still — 42 `execute`-like
+  sites, 26 resolving to cursors, 5 composed, 0 reported.
+
+  **Three shared-scaffolding survivors, all dead by design.** Widening the
+  prefilter — ignoring `WORDS`, admitting every file, matching `raw` instead of
+  `.raw(` — cannot change what the rule reports, because `candidate()` still
+  decides. Only *narrowing* loses findings, and nothing downstream would show
+  it, so that direction is now asserted directly: a test runs the rule with
+  both prefilter stages disabled and requires the same findings. The other two
+  survivors were weak tests of mine, not dead code, and both were the same
+  mistake in different clothes: a params-position test whose mutant produced a
+  `List` that was never an interpolation anyway, and a method-name test in a
+  file containing no `.raw(` at all, so the prefilter rejected it before the
+  name was ever compared — lesson 28, in a suite written by someone who had
+  already learned lesson 28.
+
+  *Done when:* 54/57 injection with the three survivors explained, 31 tests,
+  the receiver table measured, and the corpus silence shown to be taint's.
+
 - **3.4.3** — `DJI-003` `.extra()` with untrusted input.
 - **3.4.4** — `DJI-004` `RawSQL` or `Func` with an interpolated template.
 - **3.4.5** — `DJI-005` queryset kwargs expanded from request data (`filter(**request.GET)`).
@@ -4378,7 +4454,7 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **56 rules are
+document specifies, and most of it is still only specified: **57 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's and the first of its injection family.
 
