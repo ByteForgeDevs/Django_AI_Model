@@ -4302,6 +4302,87 @@ We therefore build the dataflow foundation first, and we default this family to
   and the corpus silence traced past the receiver test to taint.
 
 - **3.4.6** — `DJI-006` `order_by` driven by a request parameter with no allowlist.
+  **Done.** The substep began by disproving its own premise. `order_by` sits in
+  the injection family because the plan assumed a string reaching it could carry
+  SQL, and it cannot: `QuerySet.order_by` hands every name to
+  `Query.add_ordering`, which resolves it through `names_to_path` and raises
+  `FieldError` on anything that is not a field. Read from Django's source and
+  then confirmed against a real in-memory database rather than reasoned about —
+  `order_by("nickname; DROP TABLE x--")` raises, and nothing reaches the driver.
+
+  What the same probe showed is that `order_by("account__password_hash")` is
+  *accepted*, emitting a real join and `ORDER BY "app_account"."password_hash"`.
+  So the defect is not injection but **column selection**: `names_to_path`
+  follows `__` across relations, so a client who chooses the ordering can sort
+  by any column on the model or on anything it joins to. Sorting is a comparison
+  oracle. A page of results ordered by a column the view never selects still
+  reveals the relative order of its values, and paging recovers a hidden
+  column's ordering one boundary at a time. The `FieldError` path leaks in a
+  smaller way, because its message names the model's valid fields. The rule is
+  therefore `MEDIUM`, and its message says in as many words that this is not SQL
+  injection — there is a test asserting that sentence, because the easiest way
+  for this rule to be wrong is to overclaim.
+
+  **The corpus chose the design.** Across 3,091 files there are 528 `order_by`
+  calls; 43 non-constant arguments survive to taint analysis and exactly **one**
+  is `TAINTED` — netbox `dcim/views.py:1066`. It is correct code:
+
+  ```python
+  ORDERING_CHOICES = {'name': 'Name (A-Z)', '-name': 'Name (Z-A)', ...}
+  sort = request.GET.get('sort', 'name')
+  if sort not in ORDERING_CHOICES:
+      sort = 'name'
+  racks = racks.order_by(sort)
+  ```
+
+  A rule that reported every tainted ordering argument would have shipped with
+  its only real-world finding being a false positive. So the allowlist guard is
+  not a refinement of this rule; it *is* the rule, the same lesson `DJI-005`
+  learned from the class-based-view idiom.
+
+  Healthchecks was expected to be the second case and turned out not to be one.
+  `front/views.py:227` does validate `request.GET.get("sort")` against
+  `VALID_SORT_VALUES`, but it then persists the choice and sorts **in Python**
+  via `sortchecks(checks, ...)`, never touching `order_by`. The shape is kept as
+  a test even though the site is not a finding, because it is the other way the
+  guard gets written.
+
+  **Matching a guard to a value needed identity, not syntax.** The ordering
+  argument at the call is usually a bare name while the guard is written against
+  whatever that name came from, so the guard walks reaching definitions and
+  compares two things: the local names involved, and which request parameter was
+  read, as `source:key` pairs recovered by peeling the subscript or `.get()` that
+  `request_source` alone cannot see through. `request` and `self` are excluded
+  from name matching — they appear in nearly every view, and including them let
+  `if request.method in ("GET", "HEAD")` excuse every ordering in the file. Each
+  of those decisions has a test that fails without it, including guards on a
+  different name, on a different request parameter, and inside a nested
+  function.
+
+  The guard is deliberately generous in one direction, recorded as a limitation:
+  it does not examine what the branch *does* with the comparison. Deciding
+  whether every path out of it rejects the request or substitutes a default
+  would mean guessing, and a wrong guess calls defensive code a vulnerability.
+
+  **The netbox site is declined by the guard, and that had to be proved
+  separately.** The call is `racks.order_by(sort)`, and `racks` is not a
+  queryset the tracker follows, so the receiver test already drops it — which
+  would have made the guard look effective while never running. The corpus
+  diagnostic therefore evaluates the guard for every tainted argument regardless
+  of the receiver test, and reports `guard_declines 1, guard_admits 0`. Today
+  the corpus is silent either way; the guard is what keeps it silent if the
+  receiver test ever widens, as `queryset_calls` widened in 3.4.5.
+
+  Of the 23 injection defects aimed at this rule, five survived the first run
+  and three were missing tests rather than dead code. `latest`/`earliest` were
+  "declined" only because the tracker rejects terminal calls, so that test now
+  asserts against `arguments()` directly; a tainted positional argument to
+  `values_list` had no test at all; and the starred-argument test never observed
+  the unwrapping, only the flag derived from it.
+
+  *Done when:* 25 tests, 122/135 injection with the thirteen survivors explained
+  as widenings, the netbox site shown declined by the guard rather than by the
+  receiver test, and the "not SQL injection" claim asserted in the message.
 
 ### Step 3.5 — Untrusted input rules
 
@@ -4677,9 +4758,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **60 rules are
+document specifies, and most of it is still only specified: **61 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first ten of Phase 3's and the first five of its injection family.
+2, plus the first ten of Phase 3's and the first six of its injection family.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

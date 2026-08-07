@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJI` — injection and untrusted input
 
-5 rules on the boundary between text the project wrote and text the
+6 rules on the boundary between text the project wrote and text the
 client sent. Every one of them is about the same mistake in a different
 costume: a value that should have travelled beside a command ends up inside
 it, and something that was meant to be data is read as syntax.
@@ -55,6 +55,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJI-003`](#dji-003--request-data-interpolated-into-a-extra-clause) | Request data interpolated into a .extra() clause | critical | firm |
 | [`DJI-004`](#dji-004--request-data-interpolated-into-a-rawsql-or-func-expression) | Request data interpolated into a RawSQL or Func expression | critical | firm |
 | [`DJI-005`](#dji-005--request-data-expanded-into-queryset-keyword-arguments) | Request data expanded into queryset keyword arguments | high | firm |
+| [`DJI-006`](#dji-006--ordering-field-chosen-by-request-data-with-no-allowlist) | Ordering field chosen by request data with no allowlist | medium | firm |
 
 ---
 
@@ -168,3 +169,26 @@ $ djaudit run . --min-severity info --min-confidence tentative
 - <https://docs.djangoproject.com/en/stable/topics/db/queries/#field-lookups>
 - <https://owasp.org/www-community/attacks/Mass_Assignment>
 - <https://cwe.mitre.org/data/definitions/915.html>
+
+---
+
+### DJI-006 — Ordering field chosen by request data with no allowlist
+
+**Severity** medium · **Confidence** firm · **Tier** static
+
+**What it means.** order_by() does not build SQL from its argument -- Django resolves the string to a field and raises FieldError if it cannot, so this is not an injection. What it does allow is any field on the model or on anything the model joins to, because the resolver follows __ across relations. Letting the client pick that field turns an ordinary listing into a comparison oracle: sorting by a column nobody is allowed to read still reveals the order of its values, and a paginated list gives that up a boundary at a time. The FieldError path leaks separately, because its message names the model's valid fields.
+
+**How to fix it.** Map the parameter through an allowlist before it reaches the ORM: keep a dict of accepted values to field names and fall back to a default when the lookup misses, which is what netbox does with ORDERING_CHOICES. In DRF, add OrderingFilter and set ordering_fields to the columns the endpoint should expose -- but not to '__all__', which restores the problem for every field on the model.
+
+**What this rule cannot see.**
+
+- A membership test on the same value or the same request parameter counts as an allowlist wherever it sits in the function, and what the branch then does with the result is not examined.
+- Taint is tracked within one function, so an ordering field that arrives through a helper's parameter or a form's cleaned_data is unknown rather than tainted and is not reported.
+- Only order_by is examined. The earliest, latest and distinct methods also name fields, but each returns one row or collapses the result, so none of them hands back the ordered page the oracle depends on.
+- A DRF view that sets ordering_fields to '__all__' re-opens every field on the model without naming a request source, and is not reported here because no request data appears in the order_by call itself.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#order-by>
+- <https://www.django-rest-framework.org/api-guide/filtering/#orderingfilter>
+- <https://cwe.mitre.org/data/definitions/213.html>
