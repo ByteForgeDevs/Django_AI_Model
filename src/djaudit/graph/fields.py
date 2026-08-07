@@ -116,6 +116,28 @@ _BOOL_KWARGS = {
 }
 """Django's own defaults, so an absent keyword reports what Django would do."""
 
+_IMPLIED: dict[str, dict[str, bool]] = {
+    "ForeignKey": {"db_index": True},
+    "OneToOneField": {"db_index": True, "unique": True},
+    "ForeignObject": {"db_index": True},
+    "SlugField": {"db_index": True},
+}
+"""Where Django's default differs from the blanket one, by field class.
+
+Measured against Django rather than read off the signatures: creating the
+tables for a model with a plain `ForeignKey`, a `ForeignKey(db_index=False)`,
+a `OneToOneField` and a `SlugField` emits `CREATE INDEX` for the first, third
+and fourth and nothing for the second, and the one-to-one reports `unique`
+without having been given it. Treating these as unindexed would have any rule
+that reads `indexed_fields` accuse every foreign-key filter in the corpus of a
+table scan.
+"""
+
+
+def _defaults(kind: str) -> dict[str, bool]:
+    """The boolean defaults for one field class."""
+    return {**_BOOL_KWARGS, **_IMPLIED.get(kind, {})}
+
 
 def field_kind(call: ast.Call, bindings: dict[str, str]) -> str | None:
     """The field class being called, or ``None`` if this is not a field.
@@ -214,7 +236,7 @@ def extract_fields(class_node: ast.ClassDef, bindings: dict[str, str]) -> dict[s
         )
 
         unreadable: list[str] = []
-        for kwarg, default in _BOOL_KWARGS.items():
+        for kwarg, default in _defaults(kind).items():
             if kwarg not in keywords:
                 setattr(field, kwarg, default)
                 continue

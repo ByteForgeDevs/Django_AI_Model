@@ -66,6 +66,14 @@ jobs:
       - name: rule reference matches the registry
         run: uv run python scripts/gen_rule_docs.py --check
 
+      # DJP-002 tells people to add `prefetch_related`, and that is only sound
+      # for the three manager methods that read back out of the prefetch
+      # cache. Every other method clones the queryset and re-queries, so the
+      # advice would cost a query rather than save one. Our tests encode that
+      # split but cannot observe it; this runs real Django and counts.
+      - name: prefetch cache behaviour still matches CACHE_READS
+        run: uv run python scripts/prefetch_cache_probe.py
+
       - name: pytest
         run: uv run pytest
 
@@ -116,6 +124,16 @@ jobs:
             --summary "$GITHUB_STEP_SUMMARY"
           uv run djaudit eval tests/fixtures/drf_project \
             --summary "$GITHUB_STEP_SUMMARY"
+          uv run djaudit eval tests/fixtures/orm_project \
+            --summary "$GITHUB_STEP_SUMMARY"
+          uv run djaudit eval tests/fixtures/injection_project \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      # The manifest above proves the controls are silent. It cannot prove they
+      # are reachable, and a control the rule never looks at is silent for the
+      # wrong reason -- which is how a fixture comes to certify a broken rule.
+      - name: prove the recall fixtures' controls are load-bearing
+        run: uv run python scripts/fixture_controls_probe.py
 
   false_positives:
     name: precision gate (${{ matrix.target.name }})
@@ -124,12 +142,27 @@ jobs:
       fail-fast: false
       matrix:
         target:
+          # `budget` is seconds one analysis run may take on this target. It
+          # was one shared number until Step 3.2 added whole-project dataflow,
+          # which spread the three targets from 1.0s to 7.3s here -- driven by
+          # how many loops a project writes, not how many files it has. A
+          # single ceiling then measures only the slowest target and lets the
+          # other two drift by 7x unnoticed, which is the failure the shared
+          # number was meant to prevent.
+          #
+          # Measured on this runner: healthchecks 0.98s, netbox 7.05s, pretix
+          # 7.25s. Each budget is roughly 2.7x its measurement, which is not
+          # generosity: the same runs take 2.27s, 13.15s and 13.36s on a loaded
+          # development machine, and a gate contributors cannot pass locally is
+          # a gate that gets switched off.
           - name: healthchecks
             repo: healthchecks/healthchecks
             sha: 5086d282ea33831e8c86eb9d0802dc2602c66ef7
+            budget: 3.5
           - name: netbox
             repo: netbox-community/netbox
             sha: 4877d1167f4e20c0507bc902ee4c708e20f92e36
+            budget: 20
           # DRF-heavy and multi-tenant, which neither of the other two are:
           # healthchecks has no DRF at all and NetBox scopes nothing to a
           # tenant, so without this the Phase 2 authorization rules would have
@@ -137,6 +170,7 @@ jobs:
           - name: pretix
             repo: pretix/pretix
             sha: 7627e4b54825318c87f2093bfa078b4d039fb85a
+            budget: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -189,6 +223,20 @@ jobs:
           uv run python scripts/graph_coverage.py target \
             --name ${{ matrix.target.name }} \
             --expect benchmarks/graph/${{ matrix.target.name }}.json
+
+      # Risk 8 described this step as existing for the whole of Phase 2 while
+      # nothing here timed anything. It is checked on the same clone the
+      # precision gate just used.
+      #
+      # Performance is the one property that decays without anyone making a
+      # mistake: each new rule walks the same trees, so the cost grows a little
+      # at a time and no single commit looks like the one that broke it.
+      - name: timing gate
+        run: |
+          uv run python scripts/timing_gate.py target \
+            --name ${{ matrix.target.name }} \
+            --budget ${{ matrix.target.budget }} \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       - name: upload report
         if: always()

@@ -1,0 +1,162 @@
+{
+  "description": "The ORM recall fixture, and the only place any performance rule has a known answer. NetBox and pretix measure precision -- they are mature, so almost anything djaudit says about them is a false positive -- and that leaves recall entirely to this project. Every DJP rule from 001 to 010 fires here exactly once, and this is also where DJD-003 gets its first end-to-end case: that rule shipped at the end of Phase 2 reporting nothing in any fixture and nothing on any benchmark, and an unexamined zero is not a passing control. The structure carries the argument. Every defect in inventory/views.py has a correctly-written twin in inventory/controls.py, and this manifest forbids any finding in that file at all rather than at particular lines -- a line-numbered control stops guarding anything the first time someone adds an import, and does it silently. Detecting that a loop mentions a relation is easy and worthless; the question is whether the fetch that covers it is present, and each control is that same query with the fetch. Reachability is measured rather than assumed by scripts/fixture_controls_probe.py, which removes the fix from each control and requires the matching rule to then report it. That probe found one control that was worthless: DJP-010 only speaks about models carrying a self-stamping timestamp, so a control viewset over Site passed by being unreachable, which is indistinguishable from the rule being broken. It now lists the same growing table as the reported viewset and differs only in which columns a caller may sort by. DJP-008 is the one control that cannot be un-fixed, because what guards it is context rather than code: the rule speaks only inside migrations, management commands and scheduled tasks, so the identical whole-table read appears twice -- reported in inventory/management/commands/export_events.py and silent in a request handler. RecentEventViewSet is expected to trip DJD-003 and is still a valid DJP-010 control. Its draft turned pagination off to keep the count tidy and traded DJD-003 for DJA-013, which is not a fix; a fixture that hides one rule behind another is lying about both.",
+  "expected": [
+    {
+      "rule_id": "DJD-001",
+      "file": "inventory/models.py",
+      "line": 76,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJD-002",
+      "file": "inventory/models.py",
+      "line": 48,
+      "severity": "low",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJD-003",
+      "file": "inventory/views.py",
+      "line": 88,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJD-003",
+      "file": "inventory/views.py",
+      "line": 131,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJP-001",
+      "file": "inventory/views.py",
+      "line": 30,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJP-002",
+      "file": "inventory/views.py",
+      "line": 38,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJP-002",
+      "file": "inventory/views.py",
+      "line": 46,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJP-003",
+      "file": "inventory/serializers.py",
+      "line": 28,
+      "severity": "high",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJP-004",
+      "file": "inventory/views.py",
+      "line": 54,
+      "severity": "high",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJP-005",
+      "file": "inventory/views.py",
+      "line": 61,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJP-006",
+      "file": "inventory/views.py",
+      "line": 67,
+      "severity": "low",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJP-007",
+      "file": "inventory/views.py",
+      "line": 76,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJP-008",
+      "file": "inventory/management/commands/export_events.py",
+      "line": 21,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJP-009",
+      "file": "inventory/views.py",
+      "line": 84,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJP-010",
+      "file": "inventory/views.py",
+      "line": 105,
+      "severity": "medium",
+      "confidence": "firm"
+    }
+  ],
+  "must_not_report": [
+    {
+      "rule_id": "DJP-001",
+      "file": "inventory/controls.py"
+    },
+    {
+      "rule_id": "DJP-002",
+      "file": "inventory/controls.py"
+    },
+    {
+      "rule_id": "DJP-003",
+      "file": "inventory/controls.py"
+    },
+    {
+      "rule_id": "DJP-004",
+      "file": "inventory/controls.py"
+    },
+    {
+      "rule_id": "DJP-005",
+      "file": "inventory/controls.py"
+    },
+    {
+      "rule_id": "DJP-006",
+      "file": "inventory/controls.py"
+    },
+    {
+      "rule_id": "DJP-007",
+      "file": "inventory/controls.py"
+    },
+    {
+      "rule_id": "DJP-008",
+      "file": "inventory/controls.py"
+    },
+    {
+      "rule_id": "DJP-009",
+      "file": "inventory/controls.py"
+    },
+    {
+      "rule_id": "DJP-010",
+      "file": "inventory/controls.py"
+    },
+    {
+      "rule_id": "DJP-003",
+      "file": "inventory/serializers.py",
+      "line": 41
+    },
+    {
+      "rule_id": "DJP-010",
+      "file": "inventory/views.py",
+      "line": 153
+    }
+  ]
+}

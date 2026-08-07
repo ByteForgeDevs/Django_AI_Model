@@ -2710,6 +2710,13 @@ their own. Substep 2.6.1 extends `RULE_ID_PATTERN` to admit `DJD`.
   it; pretix is already over that budget before dataflow analysis has been
   written, so 3.6.3 starts from a known deficit rather than discovering one.
 
+  **Corrected in Phase 3, and left standing rather than edited away.** The 16s
+  was measured with a profiler attached — overhead of 2.6–3.5× — so the real
+  figure was 7.58s and pretix was never over budget, nor ever the slowest
+  target. NetBox was, at 8.40s. The diagnosis was right, the remedy was right,
+  and the number used to argue for both was wrong; 3.6.3 records what a clean
+  clock says. A run timed under a profiler is not the run anyone else has.
+
 ---
 
 # Phase 3 — Performance and injection
@@ -2722,12 +2729,13 @@ local dataflow analysis.
 **Entry criteria.** Phase 2 merged, and the two things it leaves behind
 acknowledged before dataflow is built on top of them.
 
-The route graph walks every module's AST three times — router variables,
-`register()` calls, endpoints — and pretix already takes 16 s against a 10 s
-budget with no dataflow in it at all. So Substep 3.6.3 is a fix with a
-measurement attached, not a measurement that might find nothing, and it also
-has to build the CI gate that the risk register spent Phase 2 describing as
-though it existed.
+The route graph walked every module's AST three times — router variables,
+`register()` calls, endpoints — which was 74% of a run before any dataflow
+existed. Substep 3.6.3 was therefore taken first rather than last: a
+measurement taken on top of a known, fixable inefficiency measures the
+inefficiency. It is **done** — one shared scan, slowest target 8.40s → 6.34s,
+and the CI timing gate the risk register spent Phase 2 describing as though it
+existed now exists. Dataflow is built on that, with a gate already watching it.
 
 Substep 1.10.2 (`django-configurations`) is still deferred. A class-configured
 project now fails loudly rather than scoring as clean, which is the floor
@@ -2749,71 +2757,2407 @@ We therefore build the dataflow foundation first, and we default this family to
 
 ### Step 3.1 — Dataflow foundation
 
-- **3.1.1** — Scope model: module, class, function, comprehension, with proper name shadowing.
-- **3.1.2** — Definition–use chains within a function body.
-- **3.1.3** — QuerySet value tracking: recognise a queryset origin (`Model.objects...`, a related manager, a custom manager) and follow it through assignment.
-- **3.1.4** — Method chain analysis: accumulate `filter`, `exclude`, `select_related`, `prefetch_related`, `only`, `defer`, `annotate`, `values`, and slicing across a chain.
-- **3.1.5** — Loop model: `for`, comprehensions, and nested loops, recording which variable binds the iteration element.
-- **3.1.6** — Cross-function propagation limited to one hop within a module, with an explicit budget. Deliberately not whole-program — unbounded interprocedural analysis on a large repository is slow and produces confident nonsense.
+- **3.1.1** — Scope model: module, class, function, comprehension, with proper name shadowing. **Done.**
+
+  `djaudit.dataflow.scopes` builds the scope tree for a module and answers
+  "what is this name?". Four Python rules are handled explicitly because each
+  one, got wrong, is a false positive generator rather than a technicality:
+
+  - **Class bodies are not enclosing scopes.** A method reading `queryset`
+    does *not* see `queryset = Model.objects.all()` in its class body — that
+    is a `NameError`, not an attribute read. A resolver that walks parents
+    blindly reports an N+1 against a queryset the method never touches.
+  - **A name assigned anywhere in a function is local to all of it**, not
+    only after the assignment.
+  - **Comprehensions scope their target but evaluate the first iterable
+    outside**, which matters because comprehensions are where a large share
+    of real N+1s live.
+  - **A walrus inside a comprehension binds outside it** (PEP 572).
+
+  `global` and `nonlocal` are resolved by filing the binding where the name
+  actually lives, once, at the point it is recorded. That is what stops
+  `resolve()` and `resolve_scope()` from answering related questions with
+  unrelated logic — the first version had exactly that split.
+
+  **Validated on the three benchmark corpora, not just on its own fixtures:**
+  3,091 files, 36,913 scopes, 178,535 bindings, **zero crashes**, and **zero
+  comprehension-target leaks**. Name resolution inside functions reaches 99.6%
+  on healthchecks and pretix. NetBox sits at 90.5% for a known and correct
+  reason: 316 of its 1,213 files use `from x import *`, and we deliberately
+  bind nothing for a star import rather than guess.
+
+  **The limit is measured rather than asserted.** Every one of the 441 `for`
+  loops over a queryset-shaped expression across the three targets has its
+  target bound correctly via `own_all()`. But `resolve()`, which returns the
+  last binding of a name, picks the right one for only 80.6% of them on
+  pretix — about one loop variable in five is rebound later in the same scope.
+  A rule built on `resolve()` alone would reason about the wrong value one
+  time in five. That number is the case for 3.1.2, and it is recorded in the
+  module docstring so nobody builds on `resolve()` believing it is enough.
+- **3.1.2** — Definition–use chains within a function body. **Done.**
+  `dataflow/chains.py` answers "which definition is in effect *here*", where
+  3.1.1 could only answer "which definitions exist in this scope". `Use.reaching`
+  is the set that may be in effect; `Use.unambiguous` (exactly one) is the
+  confidence signal the whole `DJP` family keys off — a rule may speak firmly
+  about an unambiguous use and must hedge about any other.
+
+  *Measured on the three corpora, 3,091 files, zero crashes.* The metric was
+  fixed before measuring so it could not be tuned afterwards: for every
+  `for TARGET in ...:`, take each read of `TARGET` in the body and ask which
+  binding the analysis names.
+
+  | target | flow-insensitive (3.1.1) | flow-sensitive (3.1.2) |
+  |---|---|---|
+  | healthchecks | 84.6% | **97.8%** |
+  | netbox | 89.5% | **98.5%** |
+  | pretix | 80.5% | **97.4%** |
+
+  pretix reproduces 3.1.1's independently-derived 80.6% to within 0.1pp, which
+  is a useful cross-check that the baseline number was real.
+
+  The residual is **not** error. All 225 remaining cases (hc 9, nb 28, px 188)
+  were checked mechanically, not sampled: in every one the loop variable is
+  genuinely rebound inside the body before the read, so naming the assignment
+  rather than the loop target is the *correct* answer. Zero unexplained. The
+  true accuracy is therefore 100% of loop-target reads; 97.4% is the floor the
+  metric can see.
+
+  *Design notes, each of which cost a wrong first attempt:*
+  - The loop fixpoint belongs **at the loop, not the function**. A whole-body
+    second pass — the first thing tried — is wiped by any assignment sitting
+    between the top of the scope and the loop, so a definition at the bottom of
+    a loop still failed to reach the top. Analysing each loop body twice, from
+    the merge of "never entered" and "completed one pass", is what actually
+    reaches the fixpoint.
+  - Because a body is analysed twice, `load` **unions** across passes. Reaching
+    definitions is a *may* analysis, so the answer is the union over all passes;
+    taking the last pass alone can only narrow a set and lie about it.
+  - *Two passes are enough, and this is measured, not assumed:* a third pass
+    changes **0 of 311,040** uses across all three corpora.
+  - Cost of the second pass: **+10% netbox, +27% pretix**. That is the price of
+    80.5% → 97.4%. Max loop nesting observed is 4 (one file each in nb and px),
+    so the 2^depth worst case stays theoretical.
+  - Comprehension scopes *are* analysed, unlike the first draft, because a large
+    share of real N+1s live in them. Only the first generator's iterable is
+    evaluated in the enclosing scope; everything else is analysed inside.
+
+  *Known cost, deliberately not paid down yet:* `def_use_all` over a whole
+  corpus takes hc 0.35s / nb 2.16s / px 2.70s. It is not wired into `engine.run()`
+  yet — the rules that consume it arrive in Step 3.2 — but that is a measured
+  2.16s of incoming netbox cost against a 10s budget. Step 3.2 must therefore
+  build chains **lazily, per scope a rule actually asks about**, not eagerly for
+  the whole tree. This is why the timing budget is not being tightened now even
+  though the gate asks for it (see 3.6.3).
+- **3.1.3** — QuerySet value tracking: recognise a queryset origin (`Model.objects...`, a related manager, a custom manager) and follow it through assignment. **Done.**
+  `dataflow/querysets.py`. Chains say which definition reaches a name; this says
+  whether that definition is a queryset and over which model. Without the model
+  label nothing downstream is possible — `book.author` cannot be called an
+  unprefetched forward relation until `book` is known to be a `Book`.
+
+  *Measured on the three corpora with a fully discovered context, zero crashes:*
+
+  | target | models | querysets found | reached only via assignment | model resolved |
+  |---|---|---|---|---|
+  | healthchecks | 12 | 2,849 | 705 (24.7%) | 98.8% |
+  | netbox | 187 | 29,430 | 4,386 (14.9%) | 99.6% |
+  | pretix | 106 | 18,209 | 4,644 (25.5%) | 98.1% |
+
+  **The middle column is the case for this substep.** One queryset in four on
+  two of the three targets is never written inline at the point it is used —
+  it is named first and used later. A matcher that only recognises
+  `Model.objects...` spelled out at the loop silently misses all of them, and
+  would have reported an N+1 false-negative rate nobody could see.
+
+  *Recall was checked against a ground truth counted independently of the
+  tracker* — every `<Name>.objects` in the source where `<Name>` is a model in
+  the graph — because a tracker grading its own homework is the fourth way a
+  number here has lied. Coverage is **100.0% on all three targets**, 739/739,
+  9,323/9,323 and 5,038/5,038, with no gaps to explain.
+
+  *A false-positive source found by measuring rather than by reading.* The
+  first version treated any queryset-shaped method on `self` as a queryset
+  origin, which is how `self.get(...)` on a DRF view, `self.update()` on a
+  form and `self.count()` on anything at all became "querysets". It inflated
+  healthchecks by 33× on a corpus with 12 models — visible only because the
+  first run was done against an empty graph, where every remaining detection
+  had to be spurious. `Origin.SELF` now requires `get_queryset` /
+  `get_query_set` / `filter_queryset` specifically. Accidentally running
+  against an empty graph turned out to be the most informative control in the
+  substep, and is worth repeating deliberately elsewhere: with the real
+  signal removed, everything still detected is noise.
+
+  *Limits, stated so they are not mistaken for bugs:* resolution stops at an
+  **ambiguous** use rather than picking a branch, for the reason 3.1.2 gives.
+  A queryset arriving as a parameter is not followed — that is 3.1.6's bounded
+  job. `self.model.objects` and `get_user_model().objects` yield an
+  `UNKNOWN` origin carrying the method chain but no model, so a caller can
+  reason about what was applied without being handed a model that might be
+  wrong. Self-referential definitions (`qs = qs.filter(...)` in a loop) are
+  guarded by an in-progress set; the use is ambiguous there anyway, but the
+  recursion still had to terminate.
+- **3.1.4** — Method chain analysis: accumulate `filter`, `exclude`, `select_related`, `prefetch_related`, `only`, `defer`, `annotate`, `values`, and slicing across a chain. **Done.**
+  `dataflow/chaining.py`. 3.1.3 says a name holds a queryset over a model.
+  This says what that queryset has *already fetched*, which is the entire
+  difference between an N+1 and a correctly written loop. `DJP-001` cannot
+  emit a single finding without it: the loop body looks identical either way,
+  and only the chain distinguishes them.
+
+  To carry this, `QuerysetValue.chain` became `tuple[Step, ...]` rather than
+  `tuple[str, ...]`. A method *name* is not a fact — `select_related` alone
+  says nothing, `select_related("author")` says what was loaded. Keeping the
+  call node is what makes the arguments readable at all.
+
+  *Measured on the three corpora, zero crashes over 3,091 files:*
+
+  | target | querysets | `select_related` | `prefetch_related` | `only`/`defer` | non-instance | sliced | args unreadable |
+  |---|---|---|---|---|---|---|---|
+  | healthchecks | 2,849 | 15 | 6 | 27 | 22 | 1 | 11 |
+  | netbox | 30,782 | 48 | 219 | 29 | 1,894 | 2,788 | 239 |
+  | pretix | 18,222 | 530 | 245 | 16 | 544 | 92 | 475 |
+
+  **The non-instance column is a false-positive suppressor, not a statistic.**
+  `values()`, `values_list()` and `aggregate()` yield dicts and tuples, which
+  have no related attributes and therefore cannot produce an N+1 however they
+  are looped over. On NetBox that is 1,894 querysets — 6% of the corpus — that
+  a rule reasoning only about loops would have had to be right about by luck.
+
+  *Django semantics that invert the answer, each one a test:* a bare
+  `select_related()` means every non-null forward relation, so it is stored as
+  a sentinel rather than as an empty set that would read as "fetched nothing";
+  `select_related(None)` and `prefetch_related(None)` **clear** rather than
+  add, so a reader that only accumulates reports the exact opposite of what
+  the code does; a lookup implies its prefixes, since `select_related("a__b")`
+  loads `a` on the way to `b`; `prefetch_related(Prefetch("books", ...))`
+  hides its path inside an object; and `only()`/`defer()` make an ordinary
+  attribute read *cost* a query, which is an N+1 that no relation traversal
+  appears in.
+
+  *The unreadable column is deliberate.* `select_related(*paths)` and no
+  `select_related` at all must not look alike to a rule deciding whether to
+  speak firmly, so methods whose arguments could not be read are recorded by
+  name. 475 on pretix is 2.6% of its querysets — the size of the population
+  that will correctly be denied a `firm` finding rather than guessed at.
+
+  *Recall repair found by measurement.* `_root` stopped at `ast.Subscript`,
+  making `Book.objects.all()[:10]` invisible: the tracker returned nothing for
+  a queryset that plainly is one. Slicing is now a synthetic `SLICE`/`INDEX`
+  step, which is also what distinguishes `qs[0]` — one instance, no loop, no
+  N+1 — from `qs[:10]`. This recovered 1,352 querysets on NetBox alone that
+  3.1.3 had reported as if they did not exist.
+
+  *Risk 13 control, run deliberately this time rather than by accident.* With
+  the model graph emptied, the survivors are 33 / 127 / 340 and are **100%
+  `Origin.SELF`** on all three targets — `self.get_queryset()`, which is a
+  queryset by method name and needs no graph. No `MANAGER`, `RELATED` or
+  `DEFAULT_MANAGER` detection survives the removal of the signal it claims to
+  come from, which is the property the control exists to establish.
+
+  *Risk 12 proof.* Each of the four load-bearing behaviours was reverted in
+  turn and the suite re-run: `None`-clears → 2 tests fail, the bare-call
+  sentinel → 1, prefix coverage → 1, sentinel honoured in `covers()` → 1.
+  Every gate fails on the defect it exists to catch, and the file was verified
+  byte-identical after restoring.
+- **3.1.5** — Loop model: `for`, comprehensions, and nested loops, recording which variable binds the iteration element. **Done.**
+  `dataflow/loops.py`. 3.1.3 says a name holds a queryset over a model; 3.1.4
+  says what that queryset already fetched. This closes the gap to `DJP-001`:
+  *when the loop runs, which variable is a row, and a row of what?*
+  `book.author` costs a query only if `book` is a `Book` row, and nothing
+  before this substep had looked at a loop at all.
+
+  *Measured on the three corpora, zero crashes:*
+
+  | target | loops | `for` | comprehension | rows of a known model | written inline | **found only via indirection** | nested | wrapped |
+  |---|---|---|---|---|---|---|---|---|
+  | healthchecks | 263 | 194 | 69 | 31 | 19 | 12 (39%) | 12 | 13 |
+  | netbox | 2,099 | 1,235 | 864 | 135 | 64 | **71 (53%)** | 237 | 61 |
+  | pretix | 3,753 | 2,067 | 1,686 | 179 | 129 | 50 (28%) | 781 | 229 |
+
+  **The indirection column is the case for this substep.** On NetBox, more
+  than half the loops we can name a model for are *not* written as `for x in
+  Model.objects...` at the loop. They arrive through an assignment, through
+  `list(...)`, or through both. A matcher keyed on the literal spelling finds
+  64 of 135 and reports the rest as clean.
+
+  *Recall was checked against a ground truth built independently of the loop
+  model* — every `for`/comprehension whose iterable roots at a model name and
+  whose first attribute is a real manager on that model — and is **100.0% on
+  all three targets**, 19/19, 64/64, 129/129, with no unexplained gaps.
+
+  Getting that ground truth right took two corrections, both of which were the
+  *metric* being wrong rather than the analyser. The first pass scored 76.6% on
+  pretix; every single shortfall was a `values_list()` loop, where the rows are
+  tuples and naming a model would be the error. The second pass still showed
+  misses, all of them `Model.PRICE_MODES`, `Model.FEE_TYPES` and
+  `Model._meta.fields` — class constants and field metadata, model-shaped but
+  not rows. Requiring the chain to start at an actual manager removed the last
+  of them. **Nothing was adjusted to make a number look better; the analyser is
+  unchanged between 76.6% and 100%.**
+
+  *Wrappers are the substance here.* `list`, `tuple`, `set`, `frozenset`,
+  `sorted`, `reversed` and `iter` all iterate the same rows, as do
+  `.iterator()` and `.aiterator()`. Unwrapping composes with assignment, so
+  `rows = list(qs)` then `for book in rows` resolves, and with itself, so
+  `reversed(sorted(list(qs)))` does too.
+
+  *Tuple targets are where a careless reader invents a model.* `enumerate`
+  puts the row at index 1 and an integer at index 0 — 4 / 64 / 103 counters
+  across the targets that a positional guess would have called rows. `zip`
+  attributes each position to its own iterable. A bare `for a, b in qs` over
+  an instance queryset cannot mean what it says, since a model instance does
+  not unpack, so neither name is given the model.
+
+  *A Django trap that is not the one it looks like.* `prefetch_related(...)
+  .iterator()` reads like a dropped prefetch, and before Django 4.1 it was.
+  Since 4.1 it **raises `ValueError`** unless `chunk_size` is given, and
+  `aiterator()` never raises because its `chunk_size` defaults to 2000. Both
+  facts were read out of `django/db/models/query.py` rather than assumed. So
+  it is a crash, not an N+1, and it is recorded as its own observation. The
+  plausible guess would have filed it under the wrong rule with the wrong
+  remediation.
+
+  *A precision bug in 3.1.3, found because 3.1.5 needed the answer.*
+  `QuerysetValue.terminal` checked only the last step, so
+  `Book.objects.get(pk=1).pk` — an integer — was reported as a `Book`
+  queryset, as was `qs[0].site`. On the corpora that was **515 chains on
+  NetBox and 319 on pretix** carrying a model label on a value that is not a
+  queryset at all. `terminal` now holds if *any* step is terminal, and
+  tracking stops at the last step that is still a queryset. Deliberately not
+  extended to unknown methods: `Book.objects.for_user(u)` and
+  `qs.filter_available()` are custom manager and queryset methods and are
+  genuinely querysets — 2,433 of them on NetBox — so the rule is about
+  leaving through a known exit, not about arriving somewhere unrecognised.
+
+  *Risk 13 control:* with the model graph emptied, the loop count is unchanged
+  — loops exist regardless — and **rows-of-a-known-model falls to 0 on all
+  three targets**. No model claim survives the removal of the graph it comes
+  from.
+
+  *Risk 12 proof, including one guard that failed it.* Five behaviours were
+  reverted in turn: nested-scope skipping → 2 failures, terminal chains → 2,
+  `enumerate`'s counter → 1, `values()` rows → 3. The fifth, suppressing
+  comprehension scopes, produced **zero failures** — it is dead code, because
+  a comprehension node has no `body` and the generic path already returns
+  nothing. The invariant is really held by the fallback declining to walk the
+  whole subtree, confirmed by reinstating that walk and watching 6 tests fail.
+  The guard was kept as defence in depth and its docstring now says which of
+  the two is load-bearing, rather than implying the guard is.
+- **3.1.6** — Cross-function propagation limited to one hop within a module,
+  with an explicit budget. Deliberately not whole-program: unbounded
+  interprocedural analysis on a large repository is slow and produces confident
+  nonsense. **Done — measured, and deliberately not enabled.**
+
+  `dataflow/interproc.py`. One hop within a module, with an explicit budget (12 call sites, 400
+  functions). A call is resolved only through a name binding that is a
+  `FUNCTION_DEF`, or a `self.`/`cls.` attribute naming a method of the
+  *enclosing* class — never a base class, whose body may live in another module.
+  Two definitions of one name record `None` and refuse. Every call site must
+  agree on model, origin and chain; one caller passing a non-queryset or a
+  terminal silences the parameter, because a caller that cannot speak must not
+  be counted as agreeing. 42 tests.
+
+  **This substep does not pay for itself, and is therefore not wired into any
+  default path.** The honest numbers, on all three corpora:
+
+  | | healthchecks | netbox | pretix |
+  |---|---|---|---|
+  | loops iterating a bare parameter | 13 | 88 | 107 |
+  | …whose function has any in-module caller | 6 | 50 | 68 |
+  | parameters actually resolved | 1 | 2 | 5 |
+  | **extra loops resolved to a model** | **+2** | **+0** | **+0** |
+  | cost of the pass | 0.61s | 2.01s | 3.75s |
+
+  The gains are real where they exist — healthchecks resolves
+  `prometheus/views.py:75 checks -> api.Check` carrying `filter/only/order_by`,
+  which is exactly the chain a deferred-field rule needs — and pretix resolves
+  `base_qs -> pretixbase.Invoice` and `subeventqs -> pretixbase.SubEvent` across
+  2 and 3 agreeing call sites. But +0 loops on the two large corpora against
+  ~3.75s on a 10s budget is not a trade worth making by default.
+
+  **Why so few, measured rather than guessed:** 56% of netbox functions taking
+  parameters (1,254 of 2,250) are never called anywhere in their own module,
+  and printing them shows why — `post(request)`, `get_queryset(request)`,
+  `is_allowed(request)`, `to_internal_value(data)`. These are *framework
+  callbacks*. Django and DRF supply their arguments, so no Python call site
+  exists for an interprocedural pass to find, in this module or any other.
+  Widening to whole-program would not reach them either.
+
+  **The lever this measurement actually found:** 6 of healthchecks' 13
+  parameter-iterating loops are Django admin actions — `send_report(qs)`,
+  `activate(qs)`, `deactivate(qs)` — where the second parameter is a queryset
+  of the `ModelAdmin`'s model *by framework contract*. That is knowable with no
+  dataflow at all, and it feeds `find_loops(parameters=...)` through the same
+  seam this substep built. The seam is kept; the walk behind it is not enabled.
+
+  **Correcting an earlier number in this plan.** 3.1.6 was scoped against "15 /
+  118 / 221 loops iterating a parameter". That measurement was wrong: it peeled
+  attribute access down to a base name, so `for f in self.fields` counted as
+  iterating the parameter `self`. Propagating a value into `self` says nothing
+  about `self.fields`. Counting only a bare parameter name — the sole shape
+  propagation can help — the true figure is **13 / 88 / 107**. The opportunity
+  was overstated by up to 2x before a line of it was written.
+
+  *Risk 12:* six defects injected. Dropping the `self` positional shift → 5
+  failures; treating `@staticmethod` as having an implicit first parameter → 1;
+  letting disagreeing callers stop silencing each other → 2; accepting a
+  terminal argument → 1; un-refusing duplicate definitions → 1. The sixth,
+  removing both `*args` guards, produced **zero failures** — investigated
+  rather than papered over. The definition-side guard is genuinely redundant
+  (over-supply already refuses the misattributing case), but the *call-site*
+  one is load-bearing and was simply untested: `render(*rows, Book.objects.all())`
+  attributes the queryset to parameter `b`, when `rows` has unknown length and
+  it may reach any parameter at all. Test added; it now fails on the defect.
+  A dead `_Target.ambiguous` field was found the same way — declared and read
+  but never set — and removed, since refusal is really carried by a `None`
+  entry in the name map.
+
+  *Risk 13:* with an empty model graph, resolved parameters fall 1/2/5 → 0/0/3
+  and loops-over-a-known-model fall to 0 on all three. Every pretix survivor
+  printed verbatim is `Origin.SELF` with `model=None` — `self.get_queryset()`,
+  recognised by framework contract rather than by the graph, and unable to
+  drive a model-attributed finding. This reproduces 3.1.4's control exactly.
+
+  *Defect found in already-committed 3.1.5:* `Loop.node` is
+  `ast.For | ast.AsyncFor | ast.comprehension`, and `ast.comprehension` carries
+  no `lineno`. Any rule reporting at `loop.node.lineno` would have raised
+  `AttributeError` on every comprehension — found when the validation script
+  did precisely that. `Loop.anchor` and `Loop.lineno` added, anchoring a
+  comprehension to its iterable; removing the special case fails 2 tests.
 
 ### Step 3.2 — N+1 detection
 
-- **3.2.1** — `DJP-001` forward relation accessed on a loop variable whose queryset lacks `select_related` for that path.
-- **3.2.2** — `DJP-002` reverse relation or many-to-many accessed in a loop without `prefetch_related`.
-- **3.2.3** — `DJP-003` relation traversal inside a `SerializerMethodField` or serializer property, where the queryset is defined in the view — the most common real-world N+1 and the one existing tools miss.
-- **3.2.4** — `DJP-004` query executed inside a loop body (`.get`, `.filter().first()`, `.count`, `.exists`).
+- **3.2.1** — `DJP-001` forward relation accessed on a loop variable whose
+  queryset lacks `select_related` for that path. **Done.** 4 / 9 / 19 findings
+  on healthchecks / netbox / pretix, **every one verified against source as a
+  true positive — a 0% false-positive rate on all three**, and all 32 recorded
+  in `benchmarks/` with a reviewer note apiece. `src/djaudit/rules/performance.py`,
+  23 tests.
+
+  The rule's whole difficulty is telling three identical-looking attribute
+  reads apart: `b.author` crosses a relation and costs a query, `b.title` reads
+  a column already in the row, and `b.author_id` reads the foreign key's own
+  integer column and costs nothing. Only the model graph can separate them.
+  It reports a *path* rather than a read — `b.author.publisher` is one query,
+  however many times it appears — and only the longest chain at each site, so
+  `b.author.name` is not also charged as `b.author`. Forward relations only:
+  a `ManyToManyField` cannot be joined into one row and belongs to `DJP-002`.
+
+  *Risk 12:* five guards removed one at a time, all five load-bearing —
+  dropping the forward-only restriction → 1 failure; letting `select_related`
+  stop silencing → 3; reporting the same path twice → 1; crediting a rebound
+  loop element → 1; charging sub-chains as separate queries → 2. No dead guard
+  this time, unlike 3.1.5 and 3.1.6.
+
+  *Risk 13:* with the model graph emptied, findings fall 4 / 9 / 19 → **0 / 0 /
+  0**. This is the first detector in the project whose control reaches zero on
+  every target — 3.1.4 and 3.1.6 both left `Origin.SELF` survivors, which
+  cannot arise here because a survivor needs a model name to traverse from.
+  Kept as a test rather than a one-off script.
+
+  *What the corpus taught, beyond the count.* Two findings are worth more than
+  their severity suggests and two are worth less. `sendflappingnotices` is
+  worse than reported: the queryset is narrowed by `only("name")`, so
+  `check.project` costs a query *and* the deferred `project_id` is missing too
+  — the second half needs `DJP-009`. NetBox's `cables.py` iterates one
+  queryset four times in nine lines, which is a distinct defect this rule
+  cannot name and Step 3.3 should. Against that, 4 of the 32 are in test files:
+  true by mechanism, worthless in practice, and an argument for scoping rather
+  than for a different verdict. And `pretix`'s `if logentry.user:` loads an
+  entire related row to test for null when `logentry.user_id` is already in
+  hand — the cheapest fix in the whole corpus.
+
+  *Cost, and the budget it broke.* The rule needs a loop inventory over the
+  whole project, which took the slowest target from ~4 s to 15.6 s and failed
+  the 10 s timing gate 3.1 had been passing. Two fixes, both measured: a file
+  is skipped before parsing unless its text contains `for` (sound — every loop
+  form in Python is written with that keyword; it skips 45% / 26% / 58% of
+  files and the loop count is unchanged at 263 / 2099 / 3753), and
+  `scope_has_loop` became a flag recorded by `build_scopes` as it goes instead
+  of a second full walk, verified to agree with `find_loops` on all 33,357
+  scopes with **zero misses**. Together: 15.6 → 13.1 s (netbox), 15.2 → 13.7 s
+  (pretix). Staged, the remainder is `parse` 5.2 s, `build_scopes` 2.9 s,
+  `def_use` 0.9 s, `find_loops` 0.4 s — **parsing is over half of it and there
+  is no faster parser in the standard library**, so this is close to the floor
+  for whole-project dataflow in CPython. The budget was raised rather than the
+  measurement massaged; see 3.6.3.
+- **3.2.2** — `DJP-002` reverse relation or many-to-many accessed in a loop
+  without `prefetch_related`. **Done.** The rule reuses Phase 2's
+  `RelationEdge.accessor` and `ModelGraph.incoming`, so a reverse accessor is
+  matched by the name Django actually installs rather than by guessing
+  `_set`. Two things had to be kept apart from DJP-001. `select_related`
+  cannot substitute — *including* its bare no-argument form, which sets the
+  ALL_FORWARD marker and would otherwise silence every many-to-many — so
+  coverage is tested by a new `ChainSpec.prefetches()` that deliberately does
+  not honour that marker. And the attribute is not the query: `book.tags`
+  builds a manager for free, and only the call after it talks to the database.
+
+  Two whole classes of finding were removed after measurement, both because
+  the remediation would have been false. **Writes**: `groups.add(g)` and
+  `invoices.all().update(...)` do cost one query per row, but no cache can
+  serve a write and a write invalidates the cache it would have filled.
+  **Cloning reads**: `values_list`, `filter`, `first` and `iterator` clone the
+  queryset and discard `_result_cache`, so prefetching adds a query rather
+  than removing one. That second one was found only by running Django:
+  `scripts/prefetch_cache_probe.py` counts queries with and without the
+  prefetch and shows the cloning forms going from 4 to **5**, strictly worse.
+  It is now a CI gate, because the split is an assumption about another
+  project's internals that our own tests cannot observe. The first attempt at
+  this guard was a denylist of write methods; it was wrong, because it named
+  the writes and missed `values_list`, which turned out to be the single most
+  common form in the corpora. The allowlist replaced it.
+
+  Both exclusions are per call, not per loop, so a genuine finding standing
+  next to a write is still reported. *Measured:* 16 raw findings fell to
+  **9** — healthchecks 0, NetBox 2, pretix 7 — and all 9 are true positives
+  against source, **0% false-positive rate**. The 7 removed were exactly the
+  writes and the cloning reads. Seven of the nine are in data migrations and
+  two are in tests; the one production path is pretix's order-list exporter,
+  which runs a query per multiple-choice question on every export. Seven
+  guards, all shown load-bearing by defect injection (2/6/2/1/1/5/2 test
+  failures). Empty-graph control reports nothing. 42 rule tests.
+- **3.2.3** — `DJP-003` relation traversal inside a `SerializerMethodField`,
+  where the queryset is defined in the view. **Done.** Every other rule in
+  this family starts from a `for`; this one has no loop to start from. DRF
+  supplies the repetition, the getter supplies the traversal, and the view
+  supplies the queryset that could have avoided it — three files, no `for`
+  anywhere, which is why it survives review. Making that reachable meant
+  refactoring `accesses`/`evaluations`/`reassigned` to take a plain tuple of
+  statements instead of a `LoopSite`, so a loop-less rule reuses the same
+  machinery. A view's branches are intersected, not unioned: a `get_queryset`
+  that adds `select_related` on one path and forgets it on another is still
+  reported.
+
+  Three defects were found by measuring rather than by testing, and each was
+  worth more than the rule's original yield. **The serializer was never
+  found.** `ClassIndex.resolve_name` returns the name as written, which for
+  NetBox's `from .circuits import *` re-export packages is the re-export
+  path, not the definition. `lookup` follows the star and its record carries
+  the canonical label. Keying on the written name linked 1 of NetBox's 137
+  serializer-bearing views. **The getter was never found.** 177 of NetBox's
+  187 reachable method fields declare the field on a base class and implement
+  `get_<field>` there too; searching only the subclass found ten. The rule now
+  walks `ClassIndex.ancestry` and reports at the file where the traversal is
+  written, which is usually not the file the view names. **An unreadable fetch
+  was read as no fetch.** `InterfaceViewSet` calls
+  `prefetch_related(GenericPrefetch("cable__terminations__termination", ...))`;
+  a prefetch *through* a forward foreign key does populate it — measured at 3
+  queries against a 5-query baseline — so treating the unreadable argument as
+  absent produced a firm false positive. `ChainSpec.unreadable` now downgrades
+  to tentative, which is what that field was added for. Both halves of that
+  measurement are a new section in `scripts/prefetch_cache_probe.py`, shown
+  failing on a false claim before being trusted.
+
+  A fourth came out of defect injection and was a design fault, not a test
+  gap: `getter` signalled "no such method" with `LookupError`, and `IndexError`
+  is a `LookupError` subclass, so an out-of-range argument list was being
+  caught by the caller's handler. A guard looked dead because a bug was
+  quietly producing its result. It returns `None` now. The rule also dropped a
+  `len(walk.steps) < len(parts)` condition DJP-001 does not have: a bare
+  `obj.author` with nothing after it is still one query per row, and the two
+  rules must not disagree about what a forward relation costs.
+
+  *Measured:* healthchecks 0 — it does not use DRF at all — pretix 0, which
+  its two total `SerializerMethodField`s make credible, and NetBox **3**: two
+  firm, both true positives against source, and one tentative that is very
+  likely already fixed by the prefetch we cannot read. **0% false-positive
+  rate** at `firm`. Thirteen guards, all shown load-bearing by defect
+  injection. Empty-API control reports nothing. 29 rule tests.
+- **3.2.4** — `DJP-004` query executed inside a loop body (`.get`,
+  `.filter().first()`, `.count`, `.exists`). **Done.** The rule's difficulty is
+  not finding queries in loops, it is deciding which of them are one round trip
+  per row. The first measurement returned **539** findings; the number was
+  wrong three separate ways and each correction is a rule about what a finding
+  *is*. Dataflow classifies every later read of a name bound to a result, so
+  one `get()` answered at three subsequent uses of the variable counted three
+  times — findings are now keyed on `Step.call`, the node where the round trip
+  is *written*, which is also the test that keeps a queryset built above the
+  loop and merely read inside it from being reported. Chunked bulk writes were
+  reported, which tells people to undo an optimisation: `for chunk in batched(...):
+  bulk_create(chunk)` is the recommended pattern, so `bulk_create`, `bulk_update`
+  and `in_bulk` are excluded outright. And writes were reported alongside reads
+  under one remediation, when `DJP-007` already owns "`.save()` in a loop where
+  `bulk_update` applies" — their fixes skip signals and can leave primary keys
+  unset, so merging them would give half the findings advice that silently
+  changes behaviour. **539 → 83.**
+
+  Two guards were then deleted for failing to earn their place. Defect
+  injection showed the `Origin.RELATED` branch unreachable, and the reason was
+  not a bug: all 83 findings have a manager origin, because a walk off a row
+  already in hand is DJP-001's or DJP-002's, which can name the
+  `select_related` or `prefetch_related` that fixes it. Verified by running
+  DJP-002 on the same fixture and watching it report what DJP-004 skips. The
+  tentative-confidence branch was unreachable for a structural reason:
+  `_from_manager` only builds a value after resolving the model, so a manager
+  origin always has a known model. Both removed rather than left as guards that
+  cannot be shown to work. **Ten defects, all load-bearing.**
+
+  *Measured:* healthchecks 5, NetBox 28, pretix 50 — **83 findings, 0 false
+  positives**, 81 true positives and 2 accepted risks, every one triaged
+  against source. The two accepted risks are the interesting ones: Healthchecks
+  re-checks existence before each prune *because* rows disappear during a long
+  operation, and pretix's `create_nfc_mf0aes_keyset` writes its query inside
+  `for i in range(20)` that returns on success, so it runs once. Both are
+  correct readings of code whose loop bounds and control flow the rule does not
+  model, which is now a stated limitation. 15 rule tests.
+
+  This substep also settled a scoping question that DJP-001, DJP-002 and
+  DJP-004 had each hit separately: 35 of these 83 are in test or migration
+  files. Answering it per rule would have produced three different answers, so
+  it is answered once in `src/djaudit/scope.py`, for every rule in every
+  family. Findings in `tests/`, `testing/` and `migrations/` are **reported and
+  demoted one severity rank**, with the scope recorded in
+  `properties["scope"]` so the demotion is auditable rather than a number that
+  quietly disagrees with the rule's declared severity. Suppressing them was
+  rejected — nobody audits what they were not shown, and a data migration
+  issuing one query per row is how a deploy times out — and so was leaving them
+  equal, because the first screen is the only screen most people read and on
+  NetBox it would have been test helpers. Classification is by whole path
+  segment, so `latest/` and `contest.py` stay production. Severity is not part
+  of the fingerprint, so no baseline or triage entry was invalidated.
 - **3.2.5** — Prefetch-awareness refinement: honour `Prefetch(...)` objects, nested lookups, and `to_attr`. *Done when:* the false-positive rate on NetBox is measured and documented.
+
+  **Done.** `ChainSpec` already read a `Prefetch`'s lookup, and that turned out
+  to be the problem: three different Django behaviours all hide behind the same
+  lookup string, and reading it alone got two of them backwards. Each was
+  settled by running Django and counting queries — `scripts/prefetch_cache_probe.py`
+  now carries all three as CI gates, over three VMs with two interfaces each:
+
+  | form | reading | queries |
+  |---|---|---|
+  | `prefetch_related('interfaces')` | `.interfaces` | 2 |
+  | `Prefetch('interfaces', to_attr='recent')` | `.recent` | 2 |
+  | `Prefetch('interfaces', to_attr='recent')` | `.interfaces` | **5** |
+  | `prefetch_related('interfaces')` | `iface.site` | 8 |
+  | `Prefetch('interfaces', queryset=Iface.objects.select_related('site'))` | `iface.site` | **2** |
+  | `Prefetch('interfaces', queryset=Iface.objects.prefetch_related('site'))` | `iface.site` | **3** |
+
+  So `to_attr` moves the rows and leaves the related manager cold — keying on
+  the lookup would have called a real N+1 covered, the one direction a
+  performance rule must not err in — while a nested queryset fetches paths
+  *below* the lookup that were being reported as unfixed. `ChainSpec` gained a
+  `to_attr` field and `_nested_paths`, which joins each inner
+  `select_related`/`prefetch_related` argument onto the lookup. On the corpora
+  that yields 275 extra covered paths in pretix and 7 in NetBox.
+
+  The third fix was `GenericPrefetch`, which takes the same leading lookup and
+  was being read as unreadable. It has a measured consequence: NetBox's
+  `InterfaceViewSet` finding at `dcim/api/serializers_/cables.py:123` was
+  triaged `accepted_risk` on the explicit grounds that *"djaudit cannot read a
+  `GenericPrefetch`"*. It can now, `cable__terminations__termination` covers
+  `cable`, and the finding is gone rather than merely downgraded — so the
+  triage entry was deleted. Project-local subclasses are deliberately still not
+  matched: NetBox's `RestrictedPrefetch(lookup, user, action, queryset)` is used
+  18 times and reorders the positional arguments, so name-matching it would read
+  `user` as the inner queryset. Unmatched it reads as unreadable, which
+  downgrades rather than mis-states.
+
+  Two guards written for this substep were then shown dead by injection and
+  **removed rather than defended**: flattening a `GenericPrefetch` list, because
+  `ast.walk` already descends into an `ast.List`, and a redirect check inside
+  `_nested_paths`, because its only caller already declines to call it for a
+  `to_attr` prefetch. The remaining 11 defects are all caught. 20 new chaining
+  tests.
+
+  *Measured:* **NetBox DJP false-positive rate 0.0% over 41 reported findings**
+  (9 DJP-001, 2 DJP-002, 2 DJP-003, 28 DJP-004, all `true_positive`), down one
+  from 42 — the `GenericPrefetch` finding that is now correctly absent, and the
+  only `accepted_risk` the DJP family had on this corpus. Healthchecks 19
+  reported and pretix 102, both 100% precision, unchanged: no corpus finding
+  today depends on the nested-queryset paths, which prevent a false positive
+  that the three corpora do not currently contain.
 
 ### Step 3.3 — Query efficiency rules
 
-- **3.3.1** — `DJP-005` `len(queryset)` where `.count()` is intended.
-- **3.3.2** — `DJP-006` `.count() > 0` where `.exists()` is intended.
-- **3.3.3** — `DJP-007` `.save()` inside a loop where `bulk_update` or `bulk_create` applies.
-- **3.3.4** — `DJP-008` unbounded `.all()` materialised into a list.
-- **3.3.5** — `DJP-009` field accessed after being excluded by `.only()` or `.defer()`, causing a per-row refetch.
+- **3.3.1** — `DJP-005` `len(queryset)` where `.count()` is intended. **Done.**
+
+  The hard part is that `len(qs)` is usually *right*. It evaluates the queryset
+  and populates its result cache, so code that counts rows and then reads them
+  should call it — one query beats `.count()` plus an iteration, which is two.
+  A rule that reported every `len(qs)` would be reporting a correct idiom, and
+  advising `.count()` there would make the code slower. So the rule reports
+  only what it can prove is discarded: a queryset written **inline** inside the
+  `len()`, which no name holds, or one held by a name that is loaded **exactly
+  once** in its scope.
+
+  Related accessors are excluded on measured grounds rather than caution:
+  `scripts/prefetch_cache_probe.py` counts `len(vm.interfaces.all())` at 2
+  queries under `prefetch_related`, the same as `.count()`, so there is no
+  improvement to advise. Sliced chains are excluded because `len(qs[:10])`
+  costs at most ten rows.
+
+  Where the count is only tested for emptiness — `> 0`, `== 0`, `not len(...)`
+  — the message names `.exists()` instead, which adds `LIMIT 1` and stops at
+  the first row. The two suggestions live in one rule because both are about
+  the `len()` expression; `DJP-006` takes the `.count()` expression.
+
+  Building this exposed a real gap in how the rule read the module:
+  `def_use` deliberately stops at a nested scope, so tracking the module alone
+  saw `Book.objects.all()` inside a function but never learned that `books`
+  referred to it. Every named case was silently invisible, and the first corpus
+  measurement returned zero across all three targets for that reason rather
+  than because the idiom is absent. Each scope is now tracked with its own
+  def-use chains and a `len()` is read against the innermost scope containing
+  it.
+
+  *Measured:* across all three corpora there are **15** `len()` calls on a
+  fresh manager queryset. **14 are correctly declined** because the name is read
+  again — verified by reading each: pretix's `modelimport.py` joins
+  `existing_codes` into an error message after counting it, and NetBox's
+  `test_changelog.py` indexes `changes[0]`…`changes[3]` after asserting its
+  length. Both would be false positives, and both would have been advised to
+  make their code slower. **1 is reported**, at
+  `netbox/ipam/tests/test_models.py:1695`, where `child_vids` is counted and
+  never read again; triaged `true_positive`. Healthchecks and pretix report
+  none. 21 rule tests, 15 injected defects all caught.
+
+  Two of those defects survived their first run and both were test bugs rather
+  than dead code. The `FRESH` exclusion looked unreachable because the test
+  used `len(author.books.all())`, which the queryset tracker does not resolve
+  at all — so the silence came from the tracker, not the guard. Replaced with
+  `len(self.get_queryset())`, which really does track as origin `self` with an
+  unknown model, plus a `_default_manager` case as the contrast that `FRESH`
+  admits. The argument-count guard looked unreachable because its test module
+  held no queryset, so `counts()` returned before the walk that would have
+  raised `IndexError` on `len()`. A third survived the run after the caching
+  work below: removing the check that the called name is `len` left every other
+  guard passing, so the rule would have told an author that `list(books)`
+  should be `.count()`. That one was a missing test, and the fix was a case
+  asserting `list(qs)` and `bool(qs)` are ignored while a real `len(qs)` beside
+  them is still reported.
+
+  **The rule cost more than it was worth, and fixing that fixed the whole run.**
+  Measured against the timing gate rather than a profiler: pretix went from
+  16.2–16.8s to **21.0s** against a 20s budget — a 28% increase for one rule.
+  Phase timings taken with a wall clock, not `cProfile`, which had already lied
+  once about this rule: of the marginal cost, `track` was 1.65s, `def_use`
+  0.93s, a scope-labelling descent 1.67s, and a *separate* `ast.walk` to find
+  `len()` candidates 1.43s — the last walking 478 files to discover that only
+  206 held a call.
+
+  Two changes, neither of them a heuristic. The candidate walk and the scope
+  descent became one pass, since both wanted the same traversal. And the real
+  fix: `def_use` and `track` are pure functions of a scope, and **four**
+  consumers were recomputing them over overlapping scopes — the loop inventory,
+  `DJP-002`, `DJP-003` and `DJP-005` — with `loop_queries` rebuilding a def-use
+  chain that `inventory` had already stored on the `LoopSite`. `ProjectContext`
+  now caches both, alongside the scope-tree cache added for the same reason.
+
+  The result is that the new rule costs a fraction of what it removed:
+
+  | corpus | before the rule | rule, no caches | rule + caches | budget |
+  |---|---|---|---|---|
+  | pretix | 16.2–16.8s | 21.0s | **15.6–16.4s** | 20 |
+  | NetBox | 16.3s | 16.3s | **12.5–13.0s** | 20 |
+  | Healthchecks | 2.7s | 2.7s | **2.2–2.4s** | 3.5 |
+
+  Every corpus is now faster *with* `DJP-005` than it was without it, and
+  NetBox is 3.3s faster than when this substep started. Finding counts and
+  100% precision are unchanged by the caching, which is the point: it removes
+  repeated work, not work. The caches are keyed on `id(scope.node)`, which is
+  sound only because the tree and scope caches hold their results for the run,
+  so nothing an id refers to can be collected and its address reused;
+  `tests/test_context.py` asserts identity rather than equality, because a
+  cache that quietly stopped being used would still return equal results and
+  every gate would stay green while the run got slower. All three cache tests
+  were shown to fail with their cache removed.
+
+  Each timing above was taken on an otherwise idle box, one corpus per
+  invocation. An earlier reading of the same NetBox configuration came back at
+  17.6–19.0s purely because three benchmarks were sharing one command — the
+  same trap that once made a pure machine-load fluctuation look like an
+  11.4s→17.9s regression.
+- **3.3.2** — `DJP-006` `.count() > 0` where `.exists()` is intended. **Done.**
+
+  The rule was designed backwards from a corpus measurement, because the naive
+  version of it is a noise machine. Before writing anything, `/tmp/empty2.py`
+  found every no-argument `.count()` in an emptiness context across all three
+  corpora: **83 calls in 3,091 files — 82 of them in test files, exactly one in
+  production code.** 81 of the 83 are `== 0`, not `> 0`. Reading the source
+  settled the shape: all 82 test cases are a bare `assert <qs>.count() == 0`.
+
+  So `assert` is excluded, and not for tidiness. Two measured reasons: the
+  number *is* the failure message — `assert 3 == 0` names how many rows leaked,
+  `assert not True` names nothing — and `count() == 0` is cheapest precisely
+  when the assertion passes, because there are no rows to count. The related
+  `self.assertEqual(qs.count(), 0)` needs no exclusion at all: the call is an
+  argument, which is never an emptiness context.
+
+  **A query-count gate would have found nothing here.** Both forms are exactly
+  one query, so the `EMPTINESS` section added to `scripts/prefetch_cache_probe.py`
+  asserts on the emitted **SQL**, not the count:
+
+  | expression | SQL Django emits |
+  |---|---|
+  | `.count() > 0` | `SELECT COUNT(*) AS "__count" FROM "probeapp_iface"` |
+  | `.exists()` | `SELECT 1 AS "a" FROM "probeapp_iface" LIMIT 1` |
+
+  The gate checks for the `LIMIT`, which is the entire difference: one form
+  scans the table to produce a number nobody reads, the other stops at the
+  first row.
+
+  **Why this rule includes related accessors when `DJP-005` refuses them.** The
+  test is domination. `.exists()` *weakly dominates* `.count() > 0`: measured on
+  a prefetched related set both cost 2 queries, and without a prefetch
+  `.exists()` is strictly cheaper — so the advice is never wrong, at worst
+  neutral. `.count()` does **not** dominate `len(qs)`: they tie under prefetch,
+  but wherever the rows are read afterwards `.count()` is strictly worse. Hence
+  `DJP-005` declines the case outright while `DJP-006` reports it at
+  `tentative`, since a prefetch it cannot see is the only way it is merely
+  redundant rather than an improvement.
+
+  Corpus result at `tentative`: healthchecks 0, netbox 0, pretix **1** —
+  `src/pretix/control/views/item.py:1683`, `ctx['item'].bundled_with.count() > 0`
+  in `get_context_data`. Verified by reading it: `ctx['item']` comes from
+  `get_object()` with no `prefetch_related`, and `bundled_with` is a
+  `related_name` on a `ForeignKey`. A real `SELECT COUNT(*)` where `LIMIT 1`
+  would do. Triaged `true_positive`.
+
+  Cost against the timing gate, measured one corpus per invocation: pretix
+  17.04–17.44s (from 16.04–16.98s), netbox 14.12–14.82s (from 13.71–14.38s),
+  healthchecks 2.29–2.53s. About +0.5s on the largest corpus, well inside the
+  20s budget — the file-level `".count()" not in source` skip is what keeps it
+  there, since the rule parses nothing in the majority of files.
+
+  Three lessons paid for here. First, **truncating a message hides the
+  payload**: the corpus run printed 110 characters and looked correct, while
+  the unit tests immediately caught that `ast.unparse(call.func)` had been
+  suggesting `Book.objects.count.exists()` — the receiver needed
+  `call.func.value`. Second, a test that asserts an exclusion must **assert the
+  contrast**: the `assert` test puts a reportable call on the next line and
+  pins the finding to that line, so it cannot pass just because the module went
+  silent. Third, **a cheap prefilter can make a guard look dead**: the arity
+  test survived injection because the file-level `".count()" not in source`
+  skip meant a module containing only `list.count(x)` was never parsed. The
+  guard was fine; the test needed a real no-argument `.count()` beside the
+  argument-taking one, which is exactly the mixed file the guard exists for.
+
+  Twenty-four defects are now injected into `count_idioms.py` — fifteen for
+  `DJP-005`, nine for `DJP-006` — and all twenty-four turn the suite red.
+- **3.3.3** — `DJP-007` `.save()` inside a loop where `bulk_update` or
+  `bulk_create` applies. **Done.**
+
+  This rule is almost entirely its blockers, and the only honest way to arrive at
+  them was to count first. `/tmp/saveloop.py` found **450 sites** across the three
+  corpora where a loop calls `.save()` on the thing it is iterating — netbox 245,
+  pretix 205. Shipping that would have been a noise machine. Four successive
+  filters, each justified by a measurement rather than a hunch, took it to **31**.
+
+  The first filter is not a heuristic at all: require that the loop iterate rows of
+  a **known model** (`site.model` resolved through the model graph, not a guess from
+  the variable name). That single condition removed **226 netbox sites** — every one
+  of them a test fixture building objects in a list comprehension — and left hc 13,
+  nb 7, px 66. It is worth naming why this worked so well: a path heuristic
+  (`"/tests/" in path`) would have removed the same files for the wrong reason and
+  would have been wrong the moment someone wrote a loop over real rows in a test.
+
+  The remaining three filters are the ones that make the advice *safe*, and each is
+  now a measured fact in `scripts/prefetch_cache_probe.py` rather than a claim:
+
+  | Fact | Loop of `.save()` | Bulk call |
+  |---|---|---|
+  | Queries, 20 updates | **21** | `bulk_update` **4** |
+  | Queries, 20 inserts | **20** | `bulk_create` **1** |
+  | `post_save` fires | **20** | **0** |
+  | `auto_now` column advances | **yes** | **no** |
+
+  So the rule declines when the model has a hand-written `save()` (including one
+  inherited through the MRO), when any `pre_save`/`post_save` receiver names it, or
+  when it carries an `auto_now`/`auto_now_add` field — because in each of those
+  three cases the bulk call is **not** behaviour-preserving, and the last two rows of
+  that table are the proof. On pretix those blockers alone took 68 sites to 15;
+  **53 of the 68 were blocked by a custom `save()`**, which says something about the
+  codebase and everything about why the blocker is mandatory. netbox went 7 to 3.
+
+  Reading the survivors changed the rule's output. pretix's `Event.copy_data_from()`
+  is six loops of `obj.pk = None; obj.save(force_insert=True)` — those are **inserts**,
+  and telling someone to use `bulk_update` there would be nonsense. The rule now
+  decides insert vs update from the code: `force_insert=True`, or an `obj.pk = None`
+  / `obj.id = None` assignment in the loop body, means `bulk_create`. `delete()` is
+  deliberately out of scope, because there is no `bulk_delete` to recommend.
+
+  Of the final 31, **21 are `RunPython` data migrations**. That is a product question,
+  not a technical one — a migration is the highest-value catch before it merges and
+  entirely unactionable after it has run — and it was put to the user, who chose to
+  report them like any other file. The triage notes carry that context per finding.
+  Two survivors are honest about their remediation cost rather than pretending:
+  netbox `0009_update_group_perms.py:16` calls `save()` after M2M `.remove()/.add()`,
+  where the save writes nothing and should simply be **deleted**; pretix
+  `event.py:1087` needs the new pk for a `log_action()` and three M2M sets, so its
+  fix is a restructure, not a swap.
+
+  The 21 tests were written against a **22-defect injection probe**, and the
+  first pass caught only 15. Every one of the seven survivors was a *missing
+  test* rather than dead code, and saying which is the whole point of running
+  the probe: the fixtures used `post_save` but never `pre_save`, `pk = None` but
+  never `id = None`, `auto_now` but never `auto_now_add` and never one inherited
+  from an abstract base, and had no `sender=` call that was *not* a save signal.
+  Six new tests closed all seven. The second pass caught 22 of 22.
+
+  **Lessons, continuing the numbered list.** (27) *Truncating a message hides the
+  payload.* The corpus run printed `[:110]` characters, which is exactly why nobody
+  noticed DJP-006 emitting `Book.objects.count.exists()` — `ast.unparse(call.func)`
+  where `call.func.value` was meant. Fifteen unit tests found it in one run.
+  (28) *A cheap prefilter can make a live guard look dead.* DJP-006's arity guard
+  survived injection because the file-level `".count()" not in source` prefilter
+  meant the probe's `.count(x)`-only fixture was never parsed. A bad test, not dead
+  code. Before deleting a guard that injection calls dead, establish whether it is
+  dead by bug, by design, or because nothing reaches it. (29) *A gate can pass by
+  absence in both directions.* The `auto_now` gate reported `True`/`True` until the
+  SQL was printed: `__year` matches nothing on this SQLite build while `__lt` works,
+  so both branches were failing identically and agreeing. (30) *Four rows cannot
+  demonstrate O(N) versus O(1).* The first `bulk_update` gate compared 4 queries to
+  5 and proved nothing; it now runs 20 rows and asserts the **shape** — loop `>= N`,
+  bulk `<= ceiling` — rather than a margin that drifts with Django's batching.
+
+- **3.3.4** — `DJP-008` unbounded `.all()` materialised into a list. **Done**,
+  and much narrower than this line originally promised.
+
+  The obvious version of this rule does not survive contact with the corpora.
+  Reporting every `list(Model.objects.all())` with no filter and no slice found
+  **23 sites — 17 of them test files**, and of the rest four were tables bounded
+  by their nature (content types, custom fields, tags, scripts). Nine of the 17
+  were a single netbox test module calling a custom manager method that returns
+  intervals rather than rows. Roughly two of 23 were worth reporting: **8%**.
+
+  The premise is the problem. Whether holding a table in memory is a bug depends
+  on how many rows it has, and the row count is not in the source. Every filter
+  that could be added is a proxy for "is this table big", and the measurement
+  says the proxies are weak.
+
+  So the rule stops guessing table size and requires a context where the count is
+  unbounded **by construction**: a data migration, a management command, or a
+  scheduled task. That is a positive structural claim, not the path heuristic
+  rejected in 3.3.3 — a migration step is a function `RunPython` was *handed*,
+  and the rule reads the `RunPython` call to find it rather than looking at the
+  directory name. A test proves the distinction: a helper sitting beside a
+  `RunPython` call in the same migration file is **not** reported.
+
+  Within such a context it reports only an explicit materialisation — `list()`,
+  `set()`, `sorted()`, `frozenset()`, or a comprehension — of a queryset never
+  narrowed by `filter`/`exclude`/`none`, never sliced, and not already streaming.
+  A bare `for` is deliberately excluded: it fills the result cache too, but in the
+  corpora those loops are overwhelmingly the ones DJP-007 already speaks about,
+  and two findings on one loop help nobody.
+
+  Result: **2 findings across 3,091 files**, both in one pretix migration, both
+  true positives. That is the intended shape. The corpora measure precision; the
+  planted-defect fixture measures recall.
+
+  The cost claim is a CI gate, and the first version of it failed — instructively.
+  Over 2,000 rows `list(qs)` peaked at 1.06 MB against `.iterator()`'s 0.43 MB, a
+  ratio of 2.5 that would not support the rule. The cause was not the claim:
+  **`.iterator()`'s default `chunk_size` is 2000**, so at exactly 2,000 rows the
+  streaming arm holds every row too and both arms measure the same thing. At
+  20,000 rows the numbers separate and explain themselves — 11.0 MB with 20,000
+  rows cached, against 1.2 MB with none, and 1.2 MB is about one chunk.
+
+  The rule's largest limitation is recorded rather than hidden: a migration that
+  reaches its model through **`apps.get_model()`** — the documented idiom, and
+  what nearly every real data migration does — gives the static graph no model to
+  name, so nothing in it is reported. pretix's `0159` is visible only because it
+  imports `Event` directly. This is why healthchecks and netbox both return zero.
+
+  **The first version of the rule failed the timing gate, and fixing it was the
+  substep's real work.** pretix went from 16.7s to 23.5s against a 20s budget --
+  a single rule costing 7 seconds. Two causes, both structural rather than
+  incidental. It called three separate `ast.walk` passes over every file in the
+  project to collect three facts, which is precisely the shape 3.6.3 removed
+  from `build_route_graph`; and inside those walks it called `ast.unparse` on
+  every call node to test one string. Collapsing the three walks into one and
+  replacing the unparse with a structural `Name`/`Attribute` check recovered
+  most of it, and the last of it came from a stronger observation: **a
+  production context can only be established at module or class level.**
+  `operations = [RunPython(f)]` is a class attribute, `handle` is a method, a
+  scheduling decorator is attached where the function is defined. Function
+  bodies are the bulk of any codebase and can establish none of these, so they
+  are never descended into.
+
+  Final cost, measured back to back on one box with the rule moved out and
+  back: **17.95s against 19.02s, about 1.1 seconds.** The absolute numbers are
+  not the budget position -- CI measures the same corpus at 11.3s -- but the
+  delta is the rule's, and it is the number worth quoting.
+
+  **Lesson (32): a project-wide scan inside a rule is a cost that compounds.**
+  DJP-007 scans every file for signal receivers and DJP-008 scans every file for
+  production contexts, each cheap alone. This is the second rule in a row to
+  need one, and the pattern should be hoisted into the context with caching
+  before it becomes a third.
+
+  **Lesson (31): a guard is only tested by a shape that reaches it.** Three of
+  DJP-008's guards survived injection, and none was dead. `list(str(qs.count()))`
+  never hands the tracker a queryset, so the `terminal` guard was never reached;
+  `apps.get_model()` is declined outright, so the unknown-model guard was never
+  reached. Both were found by printing what the tracker actually returned for
+  each candidate shape instead of assuming. The shapes that do reach them are
+  `list(Book.objects.all().first())` and `list(self.get_queryset())`. A fourth
+  "survivor" — reading the attribute of `RunPython(helpers.backfill)` — turned
+  out to be genuinely dead: the context is established per file, and in that form
+  the function is defined in another one. It was deleted, not decorated with a
+  test.
+
+- **3.3.5** — `DJP-009` field accessed after being excluded by `.only()` or
+  `.defer()`, causing a per-row refetch. **Done**, and the only rule so far that
+  ships on zero corpus findings — deliberately, and with the user's agreement.
+
+  The measurement went in the opposite direction from every other rule in this
+  phase. A first probe found **11 candidates** (netbox 1, pretix 10), which
+  looked like a healthy yield. Every one of them was a false positive, for two
+  reasons that a rule reasoning about the source alone would never have
+  distinguished from the defect:
+
+  - **Ten of the eleven read a rebound name.** Both pretix loops
+    (`services/orders.py:1443` and `:1513`) do `o = Order.objects…get(pk=o.pk)`
+    inside a `transaction.atomic()` before touching the fields the probe
+    flagged. The reads are on a fully loaded instance; the restricted queryset
+    says nothing about them.
+  - **The eleventh was an assignment.** netbox's
+    `0070_vlangroup_vlan_id_ranges.py` writes `group.vid_ranges`, and *writing*
+    a deferred column does not load it, because nothing needs the old value.
+
+  Both were settled by measurement rather than argument, and both are now CI
+  gates in `scripts/prefetch_cache_probe.py`. On twenty rows: reading a field
+  `only()` loaded costs **1** query, reading one it left out costs **21**,
+  assigning one costs **1**, and reading `pk` costs **1**. Multi-table and
+  abstract inheritance were measured separately and both reload, which is why
+  the rule walks `mro` and not just `inherited`.
+
+  With the two corrections applied the corpora go to **zero** — all fourteen
+  restricted loops and all seven restricted view querysets in healthchecks,
+  netbox and pretix are correct. netbox's `DataFileViewSet` defers `data` and
+  pairs it with a serializer whose `fields` list omits `data`, which is the
+  pattern working exactly as intended. That is the honest result for a rule
+  whose target population is code written by people already thinking about
+  query cost, and it is why this one is framed as a regression guard: the
+  defect is real and expensive, and the corpora are one `fields` edit away from
+  it.
+
+  Because the corpus could not exercise the rule, the **injection probe had to
+  do all of the work**, and it found more than any previous one. Of 26 planted
+  defects the first pass caught **9**. The seventeen survivors decomposed into
+  four genuinely different problems, and only the first was a missing test:
+
+  - **A shared helper was wrong.** `reassigned()` — used by `DJP-001`, `DJP-002`
+    and now this rule — treated `b.field = x` as rebinding `b`, because it
+    walked the assignment target for any matching `Name` rather than asking
+    whether the name was in a *binding* position. Every loop that writes to the
+    rows it reads was therefore invisible to the whole family, so
+    `for b in books: b.slug = b.author.name` was an N+1 nobody would ever be
+    told about. Fixed with an explicit `binds()` that descends only `Name`,
+    `Starred`, `Tuple` and `List` targets; it also picks up `with … as b` and
+    `:=`, which the original missed entirely.
+
+    **This unmasked a second bug that had been cancelling it out.** With those
+    loops finally visible, the corpus gained 36 findings — and 21 of them were
+    wrong, because `accesses()` never asked whether a chain was being *read*.
+    NetBox's `Device.save` writes `device.site = self.site`, `device.rack`,
+    `device.location`, and each store was reported as a relation follow. Setting
+    a foreign key assigns an id and queries nothing. The two defects had been
+    invisible for the same reason: the loops that trigger the second are exactly
+    the loops the first discarded. A new `read_chain()` now yields the part of a
+    chain that is actually loaded — the whole of it under `Load`, and everything
+    below the last segment under `Store`, since `device.site.name = x` must
+    fetch `site` before it can set anything on it.
+
+    That left 15 real findings, all triaged `true_positive`: pretix's cart
+    consumption path following five unselected foreign keys per position, two
+    event-clone loops reading `i.grant_membership_type` and `imv.item.pk`
+    where the adjacent lines already use the `_id` column form, a shredder that
+    prefetches `answers` but reaches `order`, two data migrations, and a
+    healthchecks command whose queryset excludes on `user__*` — a join that
+    selects nothing — then reads `profile.user.email` three times per row.
+    Every one of them sits in a loop that writes to its rows, which is to say
+    every one of them was hidden by the helper bug and by nothing else.
+  - **A guard hid a false negative.** Requiring a single-segment chain meant
+    `b.title.upper()` — which loads `title` exactly as `b.title` does — was
+    never reported. Now only the *first hop* is considered, and whether it is a
+    relation is left to `concrete_field`.
+  - **Three guards were dead by redundancy** and were deleted rather than
+    given tests: `head()`'s `__` split (every name containing `__` is a
+    relation, and relations are declined anyway), `restricted()`'s "no
+    restriction" early return (`missing_field` already reads empty sets as
+    "nothing deferred"), and `agreed()`'s explicit `None` check (`None` equals
+    only itself, so the equality test rejects it).
+  - **The rest were tests that could not reach the guard they were aimed at**,
+    each diagnosed by printing what the analyser actually held rather than by
+    reading the code. `b.pk` and `b.id` never reach the `primary_key` guard
+    because a model with an implicit key has no such column in the graph — it
+    takes an explicitly declared `primary_key=True`. A serializer that inherits
+    its `Meta` has `model=None` and is declined before the `mode` branch runs.
+    A view whose queryset comes from another module is skipped by the text
+    prefilter, so reaching the empty-spec branch needs a sibling view in the
+    same file to supply the `.only(` the prefilter looks for.
+
+  Final: **23 of 23 caught**, 45 tests. Two defects were retired rather than
+  chased — the text prefilter, which is a cost optimisation and cannot change
+  results (lesson 28 again), and the load-context test, which `written` fully
+  subsumes.
+
+  **Lesson 35 — the same noise lied twice in one session.** The rule was
+  measured at **+13 seconds** against pretix (19.8s → 32.7s), which would have
+  been fatal. It was an artefact: the injection probe was still finishing on
+  the same box. Alternating *without / with / without* gave 16.5s / 16.8s /
+  17.8s — the rule costs about 0.2s, and the "baseline" in the bad measurement
+  was slower than the instrumented run in the good one. Moving code out and
+  back is not enough on its own; the baseline has to be taken twice, on either
+  side of the change, and the box has to be quiet.
+
+  **Lesson 36 — never truncate the output of the thing you are verifying.** The
+  `reassigned()` fix was declared free of triage churn on the strength of a
+  `tail -6`, which showed unchanged totals. The benchmark prints its untriaged
+  findings *above* the summary table, so the 36 new ones scrolled past unseen,
+  and the totals were unchanged only because the table counts triaged findings
+  alone. A gate that exits 1 was reported as passing for several steps.
+
+  **Lesson 37 — two bugs can hide each other, and fixing one is how you find
+  the other.** `reassigned()` discarded every loop that wrote to its rows;
+  `accesses()` reported writes as reads. Neither could be observed while the
+  other stood, because the only loops that expose the second are the loops the
+  first threw away. The corpus was quiet, and it was quiet for two reasons that
+  had to be removed in order. When a fix that should have changed nothing
+  produces a flood of findings, the flood is the more interesting result.
+
+  The `read_chain` fix then broke a third thing, and the benchmark's regression
+  check caught it: three findings in `0204_orderposition_backfill_is_bundled`
+  that had been judged `true_positive` went silent. The refactor had moved the
+  dedup bookkeeping above the "is this chain rooted at the row" test, so
+  walking `OrderPosition.all.filter(item=ib.bundled_item)` marked every
+  attribute beneath `.all.filter` as seen — including `ib.bundled_item`, which
+  is a keyword *value* in the call, not part of the chain. The dedup set exists
+  to stop a chain being reported twice, so it must only ever remember chains
+  that were actually yielded.
+
+  **Lesson 38 — triage is a regression suite, not a scoreboard.** Every one of
+  the three silenced findings was correct and had been reviewed months earlier.
+  Nothing in the unit tests covered the shape, and the precision table still
+  read 100%, because a finding that disappears cannot be a false positive. It
+  was `regressed` — verdicts recorded and no longer reported — that found it.
+  That column earns its keep the first time a shared helper changes.
+
 - **3.3.6** — `DJP-010` filtering or ordering on an unindexed field, using the model graph.
+
+  Shipped, deliberately much narrower than the line above describes, and the
+  narrowing was chosen by measurement rather than taste. Static analysis cannot
+  know how many rows a table holds, which is the whole difficulty: an unindexed
+  sort is free on fifty rows and ruinous on fifty million, and nothing in the
+  source says which one it is. The three readings were measured against the
+  corpora before any of them was built:
+
+  | Reading | Findings | Why not |
+  |---|---|---|
+  | Any `Meta.ordering` on an unindexed column | 44 (nb 9, px 35) | Mostly lookup tables — `DeviceRole`, `Platform`, `ItemCategory` |
+  | Any `ordering_fields` naming an unindexed column | 21 (px) | Same problem, smaller |
+  | The above, on a table that accumulates rows | **7 (px)** | Shipped |
+
+  The accumulation test is the idea worth keeping. A column that stamps its own
+  creation — `auto_now_add=True`, or a date defaulted to `now` — is what an
+  append-only table looks like, and it is the difference between a log and a
+  configuration list. `auto_now` is deliberately excluded: it records
+  modification, so it says a row *changed*, not that another one arrived.
+  Applying it leaves exactly pretix's transactional tables — `Checkin`,
+  `Invoice`, `CartPosition`, `WaitingListEntry`, `Voucher`, `ReusableMedium`,
+  `RevokedTicketSecret` — and rejects all 9 netbox candidates, which are
+  inventory. That it discriminates in the right direction on a corpus it was
+  not tuned against is the reason to trust it.
+
+  `ordering_fields` rather than `Meta.ordering` because the caller picks the
+  column: the expensive plan is one query parameter away and no care taken in
+  the view prevents it. Postgres given `ORDER BY unindexed LIMIT 50` sorts every
+  qualifying row before returning the first page, and repeats that for each page.
+
+  **The graph was wrong about indexes and nothing had noticed**, because until
+  now no rule read `indexed_fields`. One set of boolean defaults was applied to
+  every field class, so a plain `ForeignKey` reported `db_index=False` and a
+  `OneToOneField` reported `unique=False`. Django creates an index for both, and
+  for `SlugField` — measured by building the tables and reading the emitted
+  `CREATE INDEX` statements rather than by reading signatures, since the foreign
+  key's index lives in a default argument and enumerating field classes whose
+  `db_index` defaults to `True` returns only `SlugField`. Left alone, DJP-010
+  would have accused every foreign-key filter in the corpus of a table scan.
+
+  **Injection found a real bug in the rule, not just missing tests.** 22
+  mutations, 8 survivors. One was `ordering_fields = ['__all__']` being read as
+  the wildcard: DRF compares `ordering_fields == '__all__'` against the
+  attribute itself, so inside a list it is an ordinary column name. Reading
+  DRF's `get_valid_fields` also settled the neighbouring question — the wildcard
+  expands to `_meta.fields`, which contains foreign-key columns and no
+  many-to-many — so the rule now declines only *multi-valued* relations, and a
+  `ForeignKey(db_index=False)` is reported like the column it is. Two guards
+  were dead by redundancy and deleted: `pk` and a relation path are both absent
+  from `all_fields`, so the lookup already declines them. Final: 20 of 20.
+
+  **Lesson 39 — a false-positive rate is a design input, not a report.** Three
+  scopes were measured before a line of the rule was written, and the numbers
+  chose the design. The alternative — build the broad version, discover 44
+  findings, then bolt on filters until the number looks acceptable — reaches a
+  similar place with no evidence that the filters mean anything. Here the
+  discriminator is checkable: it was never shown netbox, and it rejects all 9
+  of netbox's candidates for the stated reason.
+
+  **The rule is free, and the way to know that is to bracket it.** pretix timed
+  baseline / change / baseline on a quiet box: 18.51s, 18.88s, 19.45s. The
+  change sits *between* its two baselines, so the 0.94s drift between the
+  baselines is larger than the 0.37s it appears to cost — an `ApiRule` reuses
+  the route graph that has already been built. A single before/after pair would
+  have reported either a 2% regression or a 3% speedup depending on which
+  baseline it happened to take, and both readings would have been noise.
+
+  *Done when:* 35 tests, 20/20 injection, 7 findings all triaged
+  `true_positive`, the graph's index defaults measured against Django, and the
+  rule's cost shown to be inside the corpus's own timing noise.
 
 ### Step 3.4 — SQL and ORM injection
 
-- **3.4.1** — `DJI-001` `cursor.execute` with an interpolated string (f-string, `%`, `+`, `.format`).
-- **3.4.2** — `DJI-002` `Model.objects.raw` with interpolation.
-- **3.4.3** — `DJI-003` `.extra()` with untrusted input.
-- **3.4.4** — `DJI-004` `RawSQL` or `Func` with an interpolated template.
-- **3.4.5** — `DJI-005` queryset kwargs expanded from request data (`filter(**request.GET)`).
+- **3.4.1** — `DJI-001` `cursor.execute` with an interpolated string (f-string, `%`, `+`, `.format`). **Done.**
+
+  **Substep 3.5.1 was built here, because 3.4 cannot be written without it.**
+  The plan put the taint source model at the head of Step 3.5, but three of
+  Step 3.4's six rules name request data in their own one-line description, and
+  this one is unbuildable without it. Pulled forward rather than duplicated:
+  `src/djaudit/dataflow/taint.py` is 3.5.1, and 3.5.1 is marked done below.
+
+  **The corpus chose the trigger, and it chose against the obvious one.** The
+  three targets contain exactly five `.execute()` calls whose statement was
+  composed rather than written whole, and **all five are correct**:
+
+  | site | spliced | why it is fine |
+  |---|---|---|
+  | nb `middleware.py:276` | `mode` | a local, `'READ WRITE' if w else 'READ ONLY'` |
+  | px `metrics.py:250` | `type._meta.db_table` | an identifier; cannot be a parameter |
+  | px `vouchers.py:111` | `_meta.db_table`, `tmptable` | metadata and `", ".join(['(%s)'] * n)` |
+  | px `locking.py:113` | `LOCK_ACQUISITION_TIMEOUT` | a module constant |
+  | px `locking.py:114` | `calls` | integers from `pg_lock_key()` |
+
+  So a rule that reported *composition* would have scored nought for five on
+  mature code. The rule reports **reach** instead: the statement is composed
+  **and** a spliced part reads something Django filled from the request.
+
+  **The gate's own arithmetic settled the middle case.** `locking.py:114`
+  cannot be shown safe — `calls` is built from keys returned by another
+  function — and the tempting design reports it at `tentative` as "could not
+  verify". `benchmark` runs at the `tentative` floor and `max_false_positive_rate`
+  is 0.0, so that finding would have to be triaged, and the only honest verdict
+  is `false_positive`: the code is safe and `accepted_risk` means something
+  else. One unverifiable value would have failed the build. Unknown is
+  therefore not reported, and the reason is recorded rather than the preference.
+
+  **Silence had to be shown to be the right silence.** A rule that could not
+  recognise a cursor would also report nothing here, and from the outside the
+  two are identical. The diagnostic asserts the contrast directly: **5 sites
+  found, 5 receivers resolved to cursors, 0 reported.** Every one is quiet
+  because taint said so.
+
+  **The source set is an allowlist because the corpus made the case.**
+  Counting attribute reads off `request` finds `request.event` 1,727 times,
+  `request.user` 1,400 and `request.organizer` 782 — middleware-attached
+  objects, not client text. "Anything reached through `request`" would have
+  made a model instance an injection vector. `self.request` earns its place the
+  same way: pretix reads it 3,735 times against 2,401 for the bare name.
+
+  **Injection: 42 mutations, 42 caught, after two rounds.** The first found a
+  real bug and one dead branch. `is_cursor` claimed "resolution first,
+  convention second" but implemented "resolution decides, always" — a parameter
+  *has* a binding, with no value, so a cursor handed to a helper was rejected
+  and the convention fallback was unreachable. Resolution now speaks only when
+  it has a value to speak with. The dead branch was `binding.element_of` in the
+  taint lattice, dead by *design* rather than by bug: for `DJP` the difference
+  between a queryset and one of its rows is the whole rule, and for taint a
+  container and its element carry the same verdict in both directions. Deleted,
+  with the reasoning kept as the comment that explains why the collapse is
+  sound here and nowhere else.
+
+  **Lesson 40 — the false-positive budget is part of the rule's specification.**
+  `max_false_positive_rate = 0.0` is not a scoreboard setting; it decides what
+  a rule is allowed to say. Reporting "I could not verify this" sounds humble
+  and costs a false positive, because a reviewer's only honest verdict on safe
+  code is `false_positive`. A three-valued analysis is worth building precisely
+  so that the third value can be kept out of the output.
+
+  **Lesson 41 — re-derive injection anchors after every `ruff format`.** Five
+  of the first round's 43 mutations did not apply, and an unapplied mutation
+  reports as neither caught nor survived: it silently shrinks the denominator.
+  The probe now prints unapplied anchors with their match counts, so a stale
+  anchor cannot be mistaken for a passing test.
+
+  **Lesson 42 — interleave A/B when the box will not go quiet.** The baseline
+  read 18.51s earlier in the day and 22.42s an hour later with a load average
+  of 6.8, so a sequential before/after would have charged this rule a 21%
+  regression it did not cause. Alternating base, change, base, change instead
+  put the drift on both sides equally: baselines 22.25s and 22.18s, a 0.07s
+  spread, against 22.73s and 22.89s with the rule. The cost is **+0.55s on
+  pretix, about 2.5%** — an order of magnitude larger than the baseline spread,
+  so unlike `DJP-010` this one is real and worth stating rather than noise.
+
+  The reason it is only 2.5% is the prefilter, which is also measured rather
+  than assumed: the word `execute` admits 0.9% of healthchecks, 1.6% of NetBox
+  and 4.4% of pretix, and of pretix's 1,225 files exactly **three** go on to
+  have a scope tree built. Def-use chains are the expensive part of every
+  dataflow rule, and the point of the prefilter is that they are never built
+  for a file that cannot produce a finding. `composed()` is shared between the
+  prefilter and the rule for the same reason the loop inventory is shared: a
+  prefilter that admits less than the rule reports is a recall hole nothing
+  downstream would reveal.
+
+  *Done when:* 42/42 injection, 5 corpus sites all recognised and all silent,
+  and the taint model carrying its own tests for all three of its answers.
+- **3.4.2** — `DJI-002` `Model.objects.raw` with interpolation. **Done.**
+
+  `.raw()` is the ORM's own door out of the ORM, and that is what makes it
+  dangerous: it sits in a chain beside `.filter()`, it returns model instances,
+  and neither fact touches the string. The trigger is `DJI-001`'s — composed
+  **and** reaching the request — for the reason recorded there.
+
+  **The receiver is settled by the model graph, not by a name.** `.raw` is a
+  method on other objects, and `requests`' `Response.raw` is precisely the
+  false positive a name blocklist would have been written for. Asking
+  `ctx.tracked` instead was measured on six shapes before the rule was written:
+
+  | receiver | tracker | wanted |
+  |---|---|---|
+  | `Book.objects.raw(...)` | queryset | accept |
+  | `qs = Book.objects; qs.raw(...)` | queryset | accept |
+  | `Book.objects.filter(x=1).raw(...)` | queryset | accept |
+  | `cursor.raw(...)` | — | decline |
+  | `response.raw(...)` | — | decline |
+  | `thing.raw(...)` (a parameter) | — | decline |
+
+  Six for six, with the `requests` false positive excluded structurally rather
+  than by a list of names anyone would have had to maintain. The tracker keys a
+  whole chain at its *outermost* call, so the node to ask about is the `.raw()`
+  call, not its receiver — a detail measured rather than assumed, and now
+  asserted by a mutation that swaps the two.
+
+  **Lesson 43 — a rule that reads only the argument expression misses the
+  commoner way the defect is written.** DJI-002's first test run failed on
+
+  ```python
+  sql = "SELECT * FROM book WHERE t = '{}'".format(request.GET["q"])
+  return Book.objects.raw(sql)
+  ```
+
+  and DJI-001, already shipped and green, missed the identical shape through
+  `cursor.execute`. Both rules recognised composition only where it was written
+  in the argument position. Composing into a local and passing the local is not
+  an edge case; it is what anyone writes once the statement is longer than a
+  line, and it is what a hand-written injection looks like. The fix is one hop
+  through def-use in the shared base, so both rules gained it at once, and the
+  message now names the local: *"An f-string assigned to sql builds the SQL
+  passed to execute()"*. What made this findable was writing DJI-002's tests
+  from the shapes people write rather than from DJI-001's passing tests — a
+  suite copied from a sibling rule inherits its blind spots exactly.
+
+  The cost of that recall is measured, because the prefilter had to be relaxed
+  to admit files where composition and use are on different lines. Scope trees
+  built, before → after: healthchecks 0 → 4, NetBox 1 → 5, pretix 3 → 9. Nine
+  files of 1,225, for the shape most likely to be the real defect.
+
+  **Corpus: one `.raw()` call in 3,091 files, and it is correct.** NetBox's
+  search backend wraps `queryset.query.sql_with_params()` — SQL the ORM
+  generated, whose values are already travelling separately in `params` — in an
+  outer query. pretix's one composed `RawSQL` does the same thing. That idiom,
+  not an outlier, is what a composition-shaped rule would have flagged. The
+  diagnostic confirms the silence is taint's: 1 call, composed, recognised as a
+  queryset, judged `unknown`, not reported. The re-run of `DJI-001`'s
+  diagnostic under the relaxed prefilter is stronger still — 42 `execute`-like
+  sites, 26 resolving to cursors, 5 composed, 0 reported.
+
+  **Three shared-scaffolding survivors, all dead by design.** Widening the
+  prefilter — ignoring `WORDS`, admitting every file, matching `raw` instead of
+  `.raw(` — cannot change what the rule reports, because `candidate()` still
+  decides. Only *narrowing* loses findings, and nothing downstream would show
+  it, so that direction is now asserted directly: a test runs the rule with
+  both prefilter stages disabled and requires the same findings. The other two
+  survivors were weak tests of mine, not dead code, and both were the same
+  mistake in different clothes: a params-position test whose mutant produced a
+  `List` that was never an interpolation anyway, and a method-name test in a
+  file containing no `.raw(` at all, so the prefilter rejected it before the
+  name was ever compared — lesson 28, in a suite written by someone who had
+  already learned lesson 28.
+
+  *Done when:* 54/57 injection with the three survivors explained, 31 tests,
+  the receiver table measured, and the corpus silence shown to be taint's.
+
+- **3.4.3** — `DJI-003` `.extra()` with untrusted input. **DONE.**
+
+  `.extra()` is Django's oldest and widest raw-SQL door: it takes SQL in four
+  of its six arguments at once — `select`, `where`, `tables`, `order_by` — and
+  the two that are not SQL, `params` and `select_params`, are the fix sitting
+  next to the defect. `extra(where=["title = '%s'" % request.GET["q"]])` is the
+  textbook Django injection.
+
+  **The one number that shapes this rule: `.extra(` appears in 0 of the 3,091
+  files across all three benchmark corpora.** Not rare — absent. So this rule
+  can never have corpus evidence, and its diagnostic says so in full: 0 files
+  contain the word, 0 admitted, 0 SQL slots, 0 reported, on each of
+  healthchecks, NetBox and pretix. Its fixtures are the whole of its evidence,
+  which is recorded as a limitation on the rule itself rather than left for a
+  reader to infer. It is still worth shipping, because the codebases that
+  still call `.extra()` are exactly the old ones nobody has audited.
+
+  **The signature was read, not remembered.** An earlier draft listed a
+  `having` argument. `inspect.signature(QuerySet.extra)` on Django 6.0.7 has no
+  such parameter and has not for years; it was removed from four places. Two
+  minutes of reading beat a confident memory — lesson 13 applied to our own
+  framework rather than someone else's library.
+
+  **Four SQL slots in one call made the shared base grow a dimension.**
+  `candidate()` became `candidates()`, returning an iterator, with a `slot`
+  field naming which argument each came from, so `extra(where=[...],
+  select={...})` is two findings that each name their own clause. `elements()`
+  unwraps the container — dict values (the keys are aliases, not SQL), list,
+  tuple and set elements — because composition happens per element, and that is
+  where a reader needs pointing.
+
+  **A generator object is always truthy.** The file-level second stage was
+  nearly written `any(self.candidates(node) for node in ast.walk(tree))`, which
+  would have admitted every file while looking exactly like a filter. It is an
+  explicit loop with a docstring saying why.
+
+  **The rule's tests found a bug in shared machinery instead.**
+  `extra(where=[f"...{term}"])` resolved to `unknown` while the byte-identical
+  shape in a positional argument resolved to `tainted`. Cause: `ast.keyword` is
+  not an `ast.expr`, and both the def-use engine and the scope builder filtered
+  their generic child walk on `isinstance(child, ast.expr)`, stepping over
+  every keyword argument whole. Fixed in commit `f0cb2c5`, separately, because
+  it is shared machinery: 35,694 name reads gained def-use chains (2.0% / 7.5%
+  / 6.6% of all reads) and 670 lambdas and comprehensions gained scope objects
+  that had none. Corpus findings were unchanged by both halves — measured on
+  all three benchmarks, not assumed — so the value is entirely in what the next
+  rule can see. Cost, interleaved A/B on pretix: +0.42s on ~19.3s against a
+  base spread of 1.21s.
+
+  **The mutation probe found dead code I had written myself.** `admits()` was
+  built as an explicit loop precisely to avoid the truthy-generator trap — and
+  then `check()` grew its own inline spelling of the same filter, leaving the
+  careful version unreachable. The tell was a mutant that made `admits()`
+  return `False` for every file and *survived*: a change that should have
+  silenced every finding in the family changed nothing, because nothing called
+  it. Behaviour was correct throughout; the guard with the docstring explaining
+  the subtlety was protecting nothing. `check()` now calls `admits()`.
+
+  Three further survivors were missing tests, each a shape nobody writes until
+  someone does: seven positional arguments walking off the end of `POSITIONS`
+  (an `IndexError` in a rule is swallowed into `rule_errors`, silently
+  disabling it for the whole file); a `where=` keyword on a method that is not
+  `extra`, which no fixture had because every fixture reaching that check was
+  already an `.extra()` call; and a message that hardcoded the word `where`,
+  invisible while every message test used the `where` clause. The remaining
+  four survivors all *widen* a prefilter and so cannot change output, a
+  direction already asserted by a test that runs the rule with both prefilter
+  stages disabled.
+
+  *Done when:* 24 tests covering all six arguments, 69/73 injection with four
+  survivors explained, and the corpus silence shown to be the surface's absence
+  rather than the rule's.
+
+- **3.4.4** — `DJI-004` `RawSQL` or `Func` with an interpolated template. **DONE.**
+
+  These are the two raw-SQL doors that are *expressions* rather than queryset
+  methods, so they can be built in one place and handed to `annotate()`,
+  `filter()` or `order_by()` somewhere else entirely — which is what lets an
+  injectable one survive review.
+
+  **Key on the callable, never on the keyword.** `template=` appears 44 times
+  across the corpus and exactly twice is it a `Func`: the other 42 are
+  `create(template=…)`, `send_mail(template=…)`, `mail(template=…)`,
+  `response_class(template=…)` — Django's email and view machinery, where the
+  word means an HTML file. A rule triggered by the keyword would have spent its
+  life reading mail templates. Keyed on the callable it sees exactly 20 calls:
+  12 `Func`, 8 `RawSQL`.
+
+  **`Func`'s SQL slots came from reading `Func.as_sql`, not from memory.** It
+  ends in `template % data`, and `data` is fed by `function`, `arg_joiner` and
+  the compiled expressions — so three keywords are SQL text, not one. In the
+  corpus `function=` is on 11 of 11 `Func` calls and `template=` on 1, so the
+  slot a keyword-shaped rule would have found is the rarest of the three. The
+  signature also settles the asymmetry with `RawSQL`: `Func(*expressions,
+  output_field=None, **extra)` makes its SQL keywords keyword-*only*, so a
+  positional argument is always an expression and never a template, while
+  `RawSQL(sql, params)` puts its SQL first. The two are read differently
+  because Django defines them differently.
+
+  **A same-file import beat a project-wide index, on measurement.** All 19
+  resolvable calls name a Django import in their own file (`django.db.models.Func`
+  11, `django.db.models.expressions.RawSQL` 8); no file in 3,091 defines a
+  class of either name; none aliases either on import; and no call is written
+  as a module attribute. So `accepts()` reads the file's own imports rather
+  than building a `ClassIndex`, which is cheaper and, on this evidence, no less
+  precise — lesson 32 answered before it was incurred rather than after.
+
+  **The diagnostic is the strongest of the family so far**, because it shows
+  the composed sites getting all the way past the receiver test before taint
+  declines them: 32 files hold one of the words, 10 hold a real call, 20 SQL
+  slots, 2 composed, 2 confirmed Django-imported, 0 reported. Both composed
+  sites are the idiom already met in 3.4.1 and 3.4.2 — netbox's
+  `Func(template=f"to_jsonb(%(expressions)s -> '{old_name}')")` and pretix's
+  `RawSQL` wrapping a queryset's own compiled SQL. Neither is request-reachable,
+  both are `unknown`, and `UNKNOWN` is never reported.
+
+  **The mutation probe found one weak test and one dead branch.** The weak test
+  gave `output_field` an uncomposed value, so two separate mutants that widened
+  the slot list had nothing to report and both survived — lesson 28 for the
+  third time in this family, and the third time it was a value that was never
+  an interpolation. Composing the value kills both. The dead branch was the
+  `alias.asname or alias.name` in the import reader: since the matcher compares
+  names exactly, an aliased import can never become a candidate for it to
+  confirm. Rather than keep an unreachable branch it now declines aliases
+  explicitly, which is also the safer direction — `RawSQL as Func` would
+  otherwise have the rule report a `RawSQL` call while calling it a `Func`.
+
+  All five remaining survivors *widen* a prefilter or an acceptance test, and
+  none can change output.
+
+  *Done when:* 26 tests, 82/87 injection with five survivors explained, and the
+  corpus silence traced past `accepts` to taint.
+
+- **3.4.5** — `DJI-005` queryset kwargs expanded from request data
+  (`filter(**request.GET)`). **DONE.**
+
+  `Book.objects.filter(**request.GET)` is not string composition, so this rule
+  is the first in the family that is not a `SqlSurface`. There is no SQL to
+  splice: the client instead chooses the *keywords*, and Django parses each one
+  as a field lookup. That is enough to walk relations (`author__email__contains`),
+  read columns the view never meant to expose, and on `create`/`update` to
+  assign fields nobody offered — mass assignment through the ORM's own grammar.
+  Severity is `high` rather than `critical` precisely because of that
+  confinement: the attacker gets the lookup language, not arbitrary SQL.
+
+  **The naive rule would have shipped at 0% precision, and only measurement
+  showed it.** Keying on method name plus a request source finds twelve calls
+  across the corpus — and all twelve are
+  `self.get(self.request, *self.args, **self.kwargs)`, the class-based-view
+  idiom for re-rendering a form after a failed `post`. `self.get` is the view's
+  own handler; it shares a name with `QuerySet.get` and nothing else. Testing
+  the receiver structurally against the queryset tracker excludes all twelve
+  without a single name on a blocklist, and the corpus diagnostic confirms they
+  are still the *only* tainted calls the receiver test declines.
+
+  **Which methods belong was read from Django's signatures, not remembered.**
+  `filter`, `exclude`, `get`, `get_or_create`, `update_or_create`, `create` and
+  `update` all take lookup or value keywords. `order_by(*field_names)` and
+  `values_list(*fields, flat=False, named=False)` take no `**kwargs` at all, and
+  `annotate`/`aggregate`/`alias`/`values` take query expressions, so a request
+  string in one of those is a `TypeError` rather than an injection. An earlier
+  draft of this entry listed `order_by` and `values_list`; the signatures did
+  not, and the signatures are what shipped.
+
+  **The tracker keys a chain only at its outermost call, which this rule is the
+  first to be hurt by.** `.raw()` and `.extra()` are written last, so the call
+  the rule holds is the call the tracker keyed. `.filter()` is chained past
+  constantly, and `filter(**request.GET).exclude(archived=True)` would have been
+  missed entirely. Peeling each tracked expression back down its own spine
+  recovers the inner calls and cannot admit anything the tracker had not already
+  accepted; on the corpus it lifts the real-queryset count from 54 to 63, a 17%
+  recall gain, and `DJI-002` and `DJI-003` now share the same helper. Three
+  shapes drive it — a chained lookup, one before a terminal `.count()`, and one
+  before a slice, the last of which is why the spine is seeded from every node
+  rather than every call, since a subscript heads that chain and is not a call.
+
+  **The two-stage prefilter earns its keep here, and the taint model supplies a
+  third stage.** `"**"` appears in 608 of the 3,091 files, but only 117 hold a
+  call this rule could ever report. `request_source` recognises exactly two
+  things — an attribute of the name `request`, and the literal `self.kwargs` —
+  and taint propagates only along def-use chains, which do not leave the scope.
+  So a mapping cannot be judged tainted unless one of those two strings appears
+  in the file's own text. That is a necessary condition read off the taint model
+  rather than a heuristic, and it halves the work: 608 files walked becomes 264,
+  and 117 scope trees become 68. The full funnel: 608 files with `**` → 264 past
+  the source words → 117 admitted → 423 expansion calls → 63 on a real queryset
+  → all 63 `unknown` → 0 reported. `Q(**terms)` accounts for 69 further calls,
+  all `unknown`; it is recorded as a limitation rather than machinery, because a
+  `Q` object's destination is not visible locally.
+
+  **This rule failed the pretix timing gate before it passed it, and the first
+  measurement was nearly the wrong one.** It arrived at 23.02s against a 20s
+  budget — but the box was slow that hour, and the stashed baseline measured
+  18.33s rather than the 13.22s recorded at the previous commit. Re-baselining
+  on the same box turned an apparent 74% blow-up into a real but smaller 26%
+  one. Three changes account for it. The rule computed def-use chains, the
+  queryset tracker and the spine walk for *every* scope in an admitted file,
+  when almost no scope holds an expansion at all; doing that work only after a
+  syntactic match is found returned 4.2s. `admits()` allocated a generator for
+  each of the 833,609 nodes it walked, when 7% of them are calls; guarding with
+  an `isinstance` fast path — a fast path, not a second opinion, since
+  `expansions` declines a non-call itself — returned a further 0.2s. The source
+  words above cut the walk in half again. `check()` fell from 1.643s to 0.863s,
+  and the interleaved A/B settled at 12.94s base against 13.99s, **+1.05s or
+  8%**, with 30% of the budget still spare.
+
+  **The mutation probe found three tests that could not reach the guard they
+  named.** A decline test for a written-out keyword, one for a non-lookup
+  method, and one for a call with no receiver all used sources containing no
+  `**` at all — so the file-level prefilter discarded them before the guard ran,
+  and each passed for the wrong reason. This is lesson 28 for the fourth time in
+  this family, and the first time the vacuum was caused by the prefilter rather
+  than by an uncomposed value. Every decline test now carries a `**` the rule
+  must walk past. The source-word prefilter needed a guard of its own for the
+  same reason: `self.kwargs` is the only way a true positive can arrive in a
+  file that never says `request`, so there is a test written deliberately
+  without that word, which fails the moment either source word is dropped.
+
+  Of the nine remaining survivors, seven *widen* a prefilter or an acceptance
+  test, one is `DJI-004`'s deliberately unreachable alias branch, and the last
+  changes only when the spine is computed rather than what it computes.
+
+  *Done when:* 28 tests, 103/112 injection with nine survivors explained, the
+  twelve class-based-view calls shown excluded by structure rather than by name,
+  and the corpus silence traced past the receiver test to taint.
+
 - **3.4.6** — `DJI-006` `order_by` driven by a request parameter with no allowlist.
+  **Done.** The substep began by disproving its own premise. `order_by` sits in
+  the injection family because the plan assumed a string reaching it could carry
+  SQL, and it cannot: `QuerySet.order_by` hands every name to
+  `Query.add_ordering`, which resolves it through `names_to_path` and raises
+  `FieldError` on anything that is not a field. Read from Django's source and
+  then confirmed against a real in-memory database rather than reasoned about —
+  `order_by("nickname; DROP TABLE x--")` raises, and nothing reaches the driver.
+
+  What the same probe showed is that `order_by("account__password_hash")` is
+  *accepted*, emitting a real join and `ORDER BY "app_account"."password_hash"`.
+  So the defect is not injection but **column selection**: `names_to_path`
+  follows `__` across relations, so a client who chooses the ordering can sort
+  by any column on the model or on anything it joins to. Sorting is a comparison
+  oracle. A page of results ordered by a column the view never selects still
+  reveals the relative order of its values, and paging recovers a hidden
+  column's ordering one boundary at a time. The `FieldError` path leaks in a
+  smaller way, because its message names the model's valid fields. The rule is
+  therefore `MEDIUM`, and its message says in as many words that this is not SQL
+  injection — there is a test asserting that sentence, because the easiest way
+  for this rule to be wrong is to overclaim.
+
+  **The corpus chose the design.** Across 3,091 files there are 528 `order_by`
+  calls; 43 non-constant arguments survive to taint analysis and exactly **one**
+  is `TAINTED` — netbox `dcim/views.py:1066`. It is correct code:
+
+  ```python
+  ORDERING_CHOICES = {'name': 'Name (A-Z)', '-name': 'Name (Z-A)', ...}
+  sort = request.GET.get('sort', 'name')
+  if sort not in ORDERING_CHOICES:
+      sort = 'name'
+  racks = racks.order_by(sort)
+  ```
+
+  A rule that reported every tainted ordering argument would have shipped with
+  its only real-world finding being a false positive. So the allowlist guard is
+  not a refinement of this rule; it *is* the rule, the same lesson `DJI-005`
+  learned from the class-based-view idiom.
+
+  Healthchecks was expected to be the second case and turned out not to be one.
+  `front/views.py:227` does validate `request.GET.get("sort")` against
+  `VALID_SORT_VALUES`, but it then persists the choice and sorts **in Python**
+  via `sortchecks(checks, ...)`, never touching `order_by`. The shape is kept as
+  a test even though the site is not a finding, because it is the other way the
+  guard gets written.
+
+  **Matching a guard to a value needed identity, not syntax.** The ordering
+  argument at the call is usually a bare name while the guard is written against
+  whatever that name came from, so the guard walks reaching definitions and
+  compares two things: the local names involved, and which request parameter was
+  read, as `source:key` pairs recovered by peeling the subscript or `.get()` that
+  `request_source` alone cannot see through. `request` and `self` are excluded
+  from name matching — they appear in nearly every view, and including them let
+  `if request.method in ("GET", "HEAD")` excuse every ordering in the file. Each
+  of those decisions has a test that fails without it, including guards on a
+  different name, on a different request parameter, and inside a nested
+  function.
+
+  The guard is deliberately generous in one direction, recorded as a limitation:
+  it does not examine what the branch *does* with the comparison. Deciding
+  whether every path out of it rejects the request or substitutes a default
+  would mean guessing, and a wrong guess calls defensive code a vulnerability.
+
+  **The netbox site is declined by the guard, and that had to be proved
+  separately.** The call is `racks.order_by(sort)`, and `racks` is not a
+  queryset the tracker follows, so the receiver test already drops it — which
+  would have made the guard look effective while never running. The corpus
+  diagnostic therefore evaluates the guard for every tainted argument regardless
+  of the receiver test, and reports `guard_declines 1, guard_admits 0`. Today
+  the corpus is silent either way; the guard is what keeps it silent if the
+  receiver test ever widens, as `queryset_calls` widened in 3.4.5.
+
+  Of the 23 injection defects aimed at this rule, five survived the first run
+  and three were missing tests rather than dead code. `latest`/`earliest` were
+  "declined" only because the tracker rejects terminal calls, so that test now
+  asserts against `arguments()` directly; a tainted positional argument to
+  `values_list` had no test at all; and the starred-argument test never observed
+  the unwrapping, only the flag derived from it.
+
+  *Done when:* 25 tests, 122/135 injection with the thirteen survivors explained
+  as widenings, the netbox site shown declined by the guard rather than by the
+  receiver test, and the "not SQL injection" claim asserted in the message.
 
 ### Step 3.5 — Untrusted input rules
 
-- **3.5.1** — Taint source model: `request.GET`, `POST`, `data`, `body`, `headers`, `COOKIES`, `FILES`, and view kwargs.
+- **3.5.1** — Taint source model: `request.GET`, `POST`, `data`, `body`, `headers`, `COOKIES`, `FILES`, and view kwargs. **Done — built in 3.4.1**, which could not be written without it. `src/djaudit/dataflow/taint.py` carries the three-valued lattice and `src/djaudit/dataflow/strings.py` the composition shapes it propagates through; the design record is in the 3.4.1 entry above.
 - **3.5.2** — `DJI-007` `eval`, `exec`, `pickle.loads`, or `yaml.load` on tainted data.
+  **Done.** The substep title names four sinks and one of them turned out to be
+  wrong, which is the whole story of the entry.
+
+  The sinks divide into three kinds. `eval` and `exec` run what they are given
+  and need no qualification. `pickle`, `cPickle`, `dill`, `marshal` and
+  `jsonpickle` reconstruct objects by calling whatever the payload names, so a
+  pickle is a program rather than data. YAML is the one that had to be measured.
+
+  **"Flag bare `yaml.load`" is obsolete advice.** PyYAML 6's signature is
+  `load(stream, Loader)` with the loader *required*, so `yaml.load(x)` raises
+  `TypeError` and parses nothing; on PyYAML 5.x an omitted loader defaulted to
+  `FullLoader`, which refuses the attack. A missing loader is a crash or a
+  non-event, never the vulnerability it is conventionally reported as. What
+  decides is which loader is named, and that was established by running each one
+  in its own process against `!!python/object/apply:os.system` and checking for
+  a **filesystem side effect the return value could not fake**:
+
+  | loader | side effect | result |
+  |---|---|---|
+  | `Loader` | **yes** | returned the command's exit status |
+  | `UnsafeLoader` | **yes** | returned the command's exit status |
+  | `CLoader` | **yes** | returned the command's exit status |
+  | `FullLoader` | no | `ConstructorError` |
+  | `SafeLoader` | no | `ConstructorError` |
+  | `CSafeLoader` | no | `ConstructorError` |
+  | `CFullLoader` | no | `ConstructorError` |
+  | `BaseLoader` | no | returned the tag's argument as plain strings |
+
+  The sentinel mattered. A first attempt grepped stdout for the marker word and
+  reported `BaseLoader` as executing, because the word appeared in the *repr* of
+  the value it returned. The tool had committed the error it exists to catch.
+
+  **The loader lookup is a condition of shipping, not a refinement.** All three
+  `yaml.load_all` calls in the corpus pass `Loader=yaml.SafeLoader`. Two of them
+  reach the loader lookup and are declined by it — the diagnostic prints
+  `sink=0` for each, so the guard is shown running rather than assumed. The
+  third, netbox's bulk import, is dropped earlier because its file contains no
+  request word at all and its payload is a method parameter, so taint would be
+  `UNKNOWN` regardless. Ignoring the keyword would have given the rule three
+  false positives and no true ones: the same trap `DJI-005` met in the
+  class-based-view idiom and `DJI-006` met in netbox's ordering allowlist, now
+  three substeps running.
+
+  **The corpus is silent, and the funnel says why.** Across 3,091 files there
+  are ten sink-shaped calls: three `exec`, one `compile`, three `yaml.load_all`
+  and three `yaml.safe_load`. Only one survives to taint analysis —
+  `extras/utils.py:139`, whose payload is `UNKNOWN` — and `UNKNOWN` is never
+  reported. That leaves the rule reporting nothing on mature code, which is the
+  correct answer and the reason the differentiator is the taint edge rather than
+  the call name: ruff and bandit already flag these calls without regard to
+  their input, and doing it again would be reinventing under principle 3.
+
+  **The prefilter had to be measured twice, and the second time was the point.**
+  Every sink is either a bare `eval`/`exec` or an attribute whose *immediate*
+  holder is one of the module names, so a file naming none of those words cannot
+  produce a finding and need not be parsed. The first version tested plain
+  substrings and cost a full second on pretix, because `exec` matches `execute`,
+  `eval` matches `retrieval`, `load` matches `payload` and `decode` matches every
+  `.decode()` — 46/83/139 files reached the AST walk for nothing. Matching whole
+  identifiers is *sound* rather than merely tighter: Python names are whole
+  tokens, so a boundary can never hide a real `eval(x)`. That took the walk to
+  0/8/3 files and 0.00s/0.07s/0.01s.
+
+  It also moved the cost rather than removing it. Profiling the stages showed
+  0.464s of pretix's remaining 0.476s was now the *scan itself*: `re`'s
+  eight-way alternation with `\b` cannot use the fast substring path, and even
+  behind a cheap substring pre-gate it still cost 0.20s. A hand-written
+  `str.find` plus a character-class boundary check agreed with the regex on all
+  3,091 files and cost 0.02s/0.12s/0.09s against 0.07s/0.57s/0.46s. The lesson
+  generalises past this rule: a prefilter is on the whole-project path, so it is
+  worth profiling as its own stage rather than assuming the obvious spelling of
+  it is free.
+
+  Of 31 injection defects aimed at the rule, one survivor was a genuinely
+  missing test — dropping the function-name check made `pickle.dumps(request.body)`
+  a finding, and serialising request data is an ordinary thing to do. Two others
+  were *equivalent* mutants that had to be rewritten before they could say
+  anything: a missing loader already fell out of `_tail(None)`, and adding
+  `safe_load` to the loader set changes nothing because it takes no loader. A
+  third was unreachable behind an early return and had to be re-aimed at the
+  branch it was meant to attack. Six more attack the prefilter, since a filter
+  that decides what is analysed at all is the one place a narrowing bug is
+  silent: dropping any single token, stopping the scan at a token's first
+  occurrence, and refusing a token that opens the file are each caught.
+
+  *Done when:* 27 tests, 150/166 injection with every survivor a widening, an
+  equivalent or a dead-by-design branch, the loader table established by
+  side-effect rather than by return value, and the two visible `SafeLoader`
+  calls shown declined by the loader lookup itself.
 - **3.5.3** — `DJI-008` `subprocess` with `shell=True` or `os.system` on tainted data.
-- **3.5.4** — `DJI-009` **SSRF** — outbound HTTP request to a tainted URL.
-- **3.5.5** — `DJI-010` open redirect — `redirect()` or `HttpResponseRedirect` with a tainted target.
-- **3.5.6** — `DJI-011` `mark_safe` or `format_html` applied to tainted data (XSS).
-- **3.5.7** — `DJI-012` path traversal — file open or `FileResponse` on a tainted path.
+  **Done.** The substep title names two shapes. Running each candidate against
+  `hi; touch SENTINEL` and checking the filesystem afterwards found that one of
+  them is not a vulnerability and that the title misses a third shape entirely.
+
+  | shape | second command ran |
+  |---|---|
+  | `os.system(s)`, `os.popen(s)` | **yes** |
+  | `subprocess.getoutput(s)`, `getstatusoutput(s)` | **yes** |
+  | `subprocess.run(s, shell=True)` | **yes** |
+  | `subprocess.Popen(s, shell=True)` | **yes** |
+  | `subprocess.run(["sh", "-c", s])` | **yes** |
+  | `subprocess.run(s)` | no — `FileNotFoundError` |
+  | `subprocess.run(["echo", s])` | no |
+  | `subprocess.run(["echo", s], shell=True)` | **no** |
+
+  **A string command with no shell is a crash, not an injection.**
+  `subprocess.run("wc; touch X")` raises `FileNotFoundError`, because the entire
+  string is taken as one program name and nothing splits it. That is the same
+  shape as PyYAML's missing `Loader` one substep earlier: the conventional
+  advice reports it, and what it reports is a traceback.
+
+  **`shell=True` does not make a list dangerous.** POSIX hands `["echo", s]` to
+  `/bin/sh -c "echo" "s"`, so element 0 is the command and everything after it
+  becomes the shell's own positional parameters. The sentinel is unambiguous —
+  `["echo", payload]` did not run the payload while `[payload, "ignored"]` did.
+  A rule that flags every element of a list because the call also says
+  `shell=True` would be wrong on the common shape and right only on the rare
+  one, so the rule reports element 0 and nothing else. The unit test asserts the
+  *payload it selected* rather than an empty result, because `["wc", tainted]`
+  is still a sink shape — what declines it is taint finding a constant there,
+  and keeping the two questions apart is what makes the test mean anything.
+
+  **The shell can arrive as the program.** `["sh", "-c", s]` carries no `shell`
+  keyword at all, so a rule keyed on that keyword misses it completely. The
+  program name is checked against a set of shells, with the directory stripped,
+  and the argument after `-c` is the payload — while anything after *that* is a
+  positional parameter and is not reported.
+
+  **Quoting is honoured, and it is honoured per value.** `shlex.quote` was
+  measured to neutralise the payload through f-strings, concatenation, `%`
+  formatting and `join`, so it must be a guard or the rule is unusable on any
+  project that already does the right thing — the fourth substep running where
+  the sanitiser decides whether the rule ships at all. It is deliberately *not*
+  added to the taint model's global sanitiser set: quoting makes a string safe
+  as one shell word and says nothing about that string reaching SQL or `eval`.
+  The guard asks only *tainted* parts whether they were quoted, which is what
+  separates `shlex.quote(prefix) + request.GET["f"]` — a quoter present, on the
+  wrong value — from a command that is actually safe. Like `DJI-006`'s
+  allowlist, it follows reaching definitions, because the payload at the call is
+  usually a name and the quoting is written where that name was built.
+
+  **The corpus is silent, and the funnel says why.** Eleven shell calls exist in
+  3,091 files and none is tainted. The only `os.system` is healthchecks' shell
+  integration, which is gated behind `settings.SHELL_ENABLED`, takes its
+  template from admin configuration rather than a request, and passes every
+  user-controlled substitution through `shlex.quote` — so `UNKNOWN` is the right
+  answer for the right reason rather than a rule that cannot see.
+
+  Of 26 injection defects aimed at the rule, three were genuinely missing tests:
+  honouring a `quote()` from any module, calling an unresolved source a direct
+  one, and — the interesting one — letting a quoter anywhere in the payload
+  excuse it, which is the `shlex.quote(prefix) + tainted` shape and a real
+  defect class rather than a test artefact. A fourth mutant was defective, since
+  it called a helper that does not exist in this module and so could only ever
+  raise; it was re-aimed at reading a dotted holder as the module name.
+
+  *Done when:* 39 tests, 173/192 injection with every survivor a widening, the
+  execution table established by filesystem sentinel rather than by return
+  value, and the quoting guard shown declining four shapes that taint analysis
+  had already marked tainted.
+- **3.5.4** — `DJI-009` **SSRF** — outbound HTTP request to a tainted URL. **Done.**
+
+  Two measurements shaped this rule and both contradict the conventional lint.
+
+  The first is what a name-keyed matcher would select. Counting
+  `{client,session}.{get,post}` across the three benchmarks found **over 4,400
+  sites and not one an HTTP request**: `self.client.get(...)`,
+  `token_client.post(...)` and `device_client.get(...)` are Django's *test
+  client*, and `request.session.get("last_project_id")` is a dictionary. This is
+  the sharpest case yet for reading only a call's immediate holder as a module
+  name — the discipline `DJI-007` and `DJI-008` already use — which leaves 14
+  non-constant URLs across 3,091 files.
+
+  The second is that **`urljoin` is a sink and concatenation is not**, which is
+  the opposite of the way the shape is usually flagged. Against a constant base,
+  `urljoin(BASE, p)` resolves to *evil.com* for `http://evil.com/x` and for the
+  protocol-relative `//evil.com/x`, while `BASE + p` keeps the base's host for
+  every payload tried. A constant base is no defence at all, and string building
+  — the thing lints flag — cannot move the authority.
+
+  So the rule asks not "was this URL built from a request" but **"can the request
+  choose the authority"**, walking a concatenation or f-string left to right and
+  stopping at the first constant that reaches past the host. A tainted path on a
+  fixed host is left to 3.5.7 rather than reported here.
+
+  Two defects surfaced during the work rather than after it. Probing whether the
+  low-confidence branch was reachable found it was not — the rule resolves a name
+  to its definition *before* reporting, so every finding has a source to name —
+  and an unreachable branch was removed rather than shipped. And a test asserting
+  `BASE + tainted` was silent turned out to pass for the wrong reason: `BASE` is
+  bound at module level, unreadable, and the rule walked straight past it. An
+  unreadable part is far more often a whole base URL than a bare scheme, so it now
+  ends the reasoning.
+
+  Of 36 injection defects aimed at the rule, nine survived the first pass and one
+  of them was a real bug: **`urljoin` is symmetric and only one argument was being
+  read**. Measured both ways round, `urljoin(TAINTED, "/health")` takes the host
+  from the base while `urljoin(TAINTED, "http://good/x")` takes it from the
+  reference — so which argument chooses depends on the other, and a tainted base
+  with a relative reference was being missed entirely. Two more survivors were
+  equivalent mutants and were re-aimed; the rest were genuine test gaps, including
+  a `?` and a `#` boundary that an earlier test had never isolated because its
+  fixture also contained a `/`, and a `urljoin` test that a mutant deleting the
+  entire `urljoin` handling still passed, because the call is opaque and therefore
+  tainted in its own right. Asserting *which* expression was named is what told
+  them apart.
+
+  *Done when:* 41 tests, 208/228 injection with every survivor a widening,
+  `authority()` shown declining six shapes that taint analysis had already marked
+  `TAINTED`, and the rule shown reaching 32 real fetch sites across the benchmarks
+  so its silence there is measured rather than assumed.
+- **3.5.5** — `DJI-010` **open redirect** — `redirect()` or `HttpResponseRedirect`
+  with a tainted target. **Done.**
+
+  The first question was how much Django already does, and the answer was
+  measured by construction rather than assumed. `HttpResponseRedirectBase`
+  screens `allowed_schemes`, so `javascript:` raises `DisallowedRedirect` — but
+  `//evil.com`, `http://evil.com` and `https:evil.com` are all sent without
+  complaint. `resolve_url` makes it worse: when a string is not a view name it
+  falls back to returning any value containing a `/` or a `.`, which every
+  absolute URL does. Django blocks the scheme and nothing else; the framework
+  ships `url_has_allowed_host_and_scheme` precisely because the response class
+  does not call it.
+
+  The second measurement decided the rule's shape. All three benchmarks guard
+  their redirects, and **no two do it the same way**: pretix calls Django's
+  validator directly at 41 sites, NetBox wraps it in a local `safe_for_redirect`,
+  and healthchecks hand-rolls `_allow_redirect` on `urlparse().netloc`. A rule
+  keyed on Django's function name would have been right on one project of three,
+  so the guard is **resolved** — a call is a check if what it calls forwards to a
+  known validator, or parses the URL *and* reads its authority.
+
+  The third arrived as three pretix false positives on the first benchmark run,
+  and they share one cause: **taint launders provenance through opaque calls**.
+  `redirect(reverse(...))`, a project URL builder, and a redirector whose target
+  is cryptographically signed with `signing.Signer().unsign()` are all `TAINTED`,
+  because a call inherits taint from its arguments — and all three are correct
+  code that cannot be made to name another host. So a call is evidence only when
+  it is the request being *read*, `request.GET.get("next")`, never when it is the
+  project computing something from request data. This is the same conclusion
+  `DJI-009` reached about a part it cannot read, arrived at from the other side.
+
+  Two defects were the rule's own. `validates()` returned true for *any* call to
+  `urlparse`, which made its authority check unreachable and counted 10, 17 and
+  40 project-local validators; requiring a parse **and** an authority read cut
+  that to 3, 3 and 32 without changing a single reported finding — the difference
+  was entirely functions that parse a URL for some other purpose. And an arity
+  guard that skipped `redirect()` calls carrying extra arguments, written to let
+  `redirect("view", pk=1)` reverse a route in peace, would also have skipped
+  `redirect(url, permanent=True)`. The route name declines itself for the better
+  reason that its first argument is a constant, so the guard was removed.
+
+  `scheme` is deliberately not an authority attribute. It is the one thing Django
+  already checks, so honouring a scheme-only test as a guard would excuse a
+  redirect to any host at all.
+
+  *Done when:* 32 tests, **261 of 261 injection defects caught with no survivor
+  and no unapplied mutant** — the first clean sweep of the family probe — and
+  both decline stages shown load-bearing on real code: across 390 reached
+  redirect sites, 7 are declined only by the resolved guard, including
+  healthchecks' hand-rolled one, and 9 only by the read-versus-computed test.
+- **3.5.6** — `DJI-011` **request data marked as trusted HTML** — `mark_safe`, or a
+  `format_html` format string, carrying tainted data. **Done.**
+
+  The first measurement reverses the way this shape is usually flagged.
+  `format_html` maps `conditional_escape` over `*args` and `**kwargs` and then
+  calls `.format()` on a format string it never touches, so the *argument* — the
+  thing a name-keyed lint reports — is the one position that is safe, and the
+  format string is the sink. Confirmed by construction on Django 6.0:
+
+  | call | result |
+  |---|---|
+  | `format_html("<b>{}</b>", payload)` | `<b>&lt;img src=x ...&gt;</b>` |
+  | `format_html(payload + "{}", 1)` | `<img src=x onerror=alert(1)>1` |
+  | `format_html(payload)` | `TypeError: args or kwargs must be provided.` |
+
+  The third line is a rule decision rather than a curiosity: a `format_html`
+  call with no arguments raises before rendering anything on every supported
+  Django, which makes it a crash and not a way to reach the page, so it is not
+  reported.
+
+  The second is where this rule parts company with `DJI-010`. A redirect target
+  is decided from its first character, so that rule reads only the leading part;
+  HTML has no such privilege, and `"<b>" + tainted` and `tainted + "</b>"`
+  inject equally well. This rule therefore asks about **every** part and stops
+  at the first one the request supplies.
+
+  The third is that all three benchmark hits are correct code. A naive rule —
+  any of the 233 sink calls whose arguments are tainted — reports exactly three
+  sites, and two of them have already called `escape()` on the value while the
+  third percent-encodes it with `quote()`. Every one is `DJI-010`'s finding
+  again: a call inherits taint from its arguments, so anything a project
+  computes out of request data comes back tainted. The `reads_request` test
+  those two rules now share is what separates them, and it is why this rule
+  needs **no list of sanitiser names** — `escape(x)` is declined for the same
+  reason a project's own helper is, that neither is the request being read. A
+  name-keyed sanitiser list would have been unreachable code sitting behind that
+  test, which `DJI-009` already established is worse than no code at all.
+
+  `str.format` is the one call the rule looks inside, because unlike `reverse()`
+  it is not opaque: its arguments appear in the result verbatim.
+
+  One defect surfaced only on the corpus, and it is the sharpest instance yet of
+  a guard being undone by a permissive default. netbox assembles a table cell
+  across five assignments ending in `mark_safe(html)`, and the walk reaches the
+  name `button` twice by different paths. On the second visit the recursion
+  guard fired and **fell through to the taint fallback**, which answered
+  `TAINTED` — true about the value, and about a question that had already been
+  settled the other way, because `quote()` had percent-encoded it. A recursion
+  guard that gives up into a permissive default reverses the decision it exists
+  to protect. It now declines instead, and the test for it was shown failing on
+  the old behaviour before the fix was kept.
+
+  *Done when:* 27 tests, **286 of 286 injection defects caught** with no survivor
+  and no unapplied mutant, and the rule shown reaching 233 sink sites across the
+  benchmarks and declining every one — three of them declined *only* by the
+  read-versus-computed test, so that stage is load-bearing on real code rather
+  than on fixtures alone.
+- **3.5.7** — `DJI-012` **path traversal** — the request choosing which file is
+  opened, removed, copied or moved. **Done.**
+
+  Four measurements, all by construction against the installed Django 6.0.7.
+
+  First, **a constant base is no defence**. `os.path.join(BASE, "/etc/passwd")`
+  returns `/etc/passwd` — an absolute later part discards everything before it —
+  and `os.path.join(BASE, "../../etc/passwd")` normalises to the same place.
+  `Path(BASE) / "/etc/passwd"` behaves identically. So the reassuring-looking
+  constant at the front of a join buys nothing, and the rule must not be
+  reassured by it.
+
+  Second, and this is the interesting one, **the answer is the opposite of
+  `DJI-009`'s**. There, `BASE + path` was *safe*: a URL's authority is fixed by
+  the leading characters and nothing appended later can move it, so only the
+  first part mattered. A filesystem path has no authority — `..` climbs out of a
+  concatenation as easily as out of a join — so `DJI-012` asks about **every**
+  part, the way `DJI-011` does for HTML. Two rules, near-identical shapes,
+  opposite answers, and the difference is a property of the target grammar
+  rather than anything visible in the AST.
+
+  Third, **Django already refuses traversal through its storage API**, so
+  reporting it would be a false positive. `django.utils._os.safe_join` raises
+  `SuspiciousFileOperation` on both `..` and an absolute name;
+  `FileSystemStorage.path` is literally `safe_join(self.location, name)`; and
+  `default_storage.open("../../etc/passwd")` and `default_storage.open(
+  "/etc/passwd")` both raise. The rule therefore treats a storage read as no
+  sink at all.
+
+  Fourth, `FileResponse` — which this plan had listed as a sink — **does no name
+  checking of its own, and takes an already-open file object**. There is nothing
+  for it to check. The sink is the `open()` handed to it, which the rule already
+  sees, so naming `FileResponse` too would only have double-reported.
+
+  The corpus then settled the shape of the sink list, and produced the session's
+  sharpest naming lesson: **two names that look alike can need opposite
+  polarity**. `open` is a sink only when **bare** — 97 calls across the three
+  targets, of which 39 are attributes belonging to Django storage, PIL,
+  `tarfile` and `pathlib`, none of them the builtin. `remove`, `copy` and `move`
+  are sinks only when **attributed to `os` or `shutil`** — 209 matches by name,
+  of which exactly **one** is a real filesystem call; 80 are `copy.copy` and most
+  of the remainder are `list.remove()`. A name-keyed rule would have been almost
+  entirely wrong in both directions at once.
+
+  *Done when:* 29 tests, **311 of 311 injection defects caught** with no survivor
+  and no unapplied mutant, and 73 filesystem sinks reached across the benchmarks
+  (2 healthchecks, 30 netbox, 41 pretix) with none tainted and none reported.
+  Stated honestly: unlike `DJI-010` and `DJI-011`, **no corpus site is declined by
+  the walk itself** — every one is declined at the sink or by the request test —
+  so the walk's stages are proven by the mutation probe and not yet by real code.
+  The recall evidence for all four of `DJI-009` through `DJI-012` is owed by the
+  3.6.2 fixture, where each is silent on the corpus by construction.
 
 ### Step 3.6 — Benchmark and document
 
-- **3.6.1** — N+1 fixture project with true positives, correctly prefetched near-misses, and `Prefetch`-object cases. It must also carry a paginated `ModelViewSet` over an unordered model, giving `DJD-003` its first end-to-end case: that rule ends Phase 2 firing in no fixture and on no benchmark target, so its zero is currently unexamined, and the shape it needs is one this fixture builds anyway.
+- **3.6.1** — **N+1 fixture project** with true positives, correctly prefetched
+  near-misses, and `Prefetch`-object cases. **Done**, as `tests/fixtures/orm_project`:
+  15 planted defects, every `DJP` rule from 001 to 010 firing exactly once, and
+  100% precision and recall.
+
+  This is the only place any performance rule has a known answer. The three
+  benchmark corpora measure precision and *cannot* measure recall — they are
+  mature, so almost anything djaudit says about them is a false positive, and
+  nothing there can tell us what it missed.
+
+  The structure carries the argument. Every defect in `inventory/views.py` has a
+  correctly-written twin in `inventory/controls.py`, which the manifest forbids
+  **by file** rather than by line. Detecting that a loop mentions a relation is
+  easy and worthless; the question is whether the fetch that covers it is
+  present, and each control is that same query with the fetch. The pairs include
+  the three shapes a naive rule gets wrong: a `Prefetch` object standing in for
+  a relation name, a `Prefetch` whose inner queryset covers a *second* level, and
+  a `to_attr` prefetch that serves the new name and not the old one — the last
+  two measured in `scripts/prefetch_cache_probe.py` rather than assumed.
+
+  Then the part that matters more than the fixture: **a control passes by being
+  silent, and so does a control the rule can never reach.**
+  `scripts/fixture_controls_probe.py` removes the fix from each control and
+  requires the matching rule to then report it. It immediately found one control
+  that was worthless — `DJP-010` only speaks about models carrying a
+  self-stamping timestamp, its only static evidence that a table accumulates
+  rows, so a control viewset over `Site` passed by being invisible, which is
+  indistinguishable from the rule being broken. It now lists the same growing
+  table as the reported viewset and differs only in which column a caller may
+  sort by. All 11 remaining controls are proven load-bearing.
+
+  Two controls cannot live in the controls file, because their defect and their
+  fix are two classes rather than two functions, so the manifest pins them by
+  line — and a line number rots. One rotted within the hour, by four lines,
+  because a docstring above it grew. The probe therefore also reports *where*
+  each rule would speak and cross-checks every line-numbered manifest entry
+  against it, and that check was shown failing on a deliberately wrong line
+  before it was kept.
+
+  `DJP-008`'s control is the one that cannot be un-fixed, because what guards it
+  is context rather than code: the rule speaks only inside migrations,
+  management commands and scheduled tasks, on the reasoning that a table small
+  enough to render in a response is small enough to hold. So the identical
+  whole-table read appears twice — reported in a management command, silent in a
+  request handler.
+
+  `DJD-003` gets its first end-to-end case here, which is why it was worth
+  building into this fixture rather than a later one: the rule shipped at the end
+  of Phase 2 firing in no fixture and on no benchmark, and **an unexamined zero
+  is not a passing control**. Getting it to fire taught the fixture something
+  about the analyser, too. Written with only a `get_queryset` body, both
+  `DJD-003` and `DJP-010` stayed silent — a view's model is resolved from a
+  class-level `queryset` and from nothing else, neither a `get_queryset` return
+  nor the serializer's `Meta.model` — and they were right to: a rule that cannot
+  name the model cannot name the fix. The fixture was wrong, not the rules.
+
+  One last honesty check, recorded because the temptation was real. The
+  `DJP-010` control pages an unordered model and so `DJD-003` reports it too. A
+  draft turned pagination off to keep the finding count tidy, which silently
+  traded `DJD-003` for `DJA-013`: an endpoint returning every row is not a fix,
+  and **a fixture that hides one rule behind another is lying about both**. The
+  manifest expects both findings instead.
+
+  *Done when:* 15 expectations and 12 controls at 100% precision and recall, 15
+  tests carrying the reasoning the manifest cannot express, the control probe
+  green in CI, and the probe shown failing on a misaimed control line.
 - **3.6.2** — Injection fixture project including sanitised near-misses.
-- **3.6.3** — Performance profiling: dataflow analysis must not push a NetBox-scale run beyond 10 seconds.
 
-  **Entering position, measured at the end of Phase 2:** Healthchecks 2s,
-  NetBox 9s, pretix 16s. pretix is already over budget before any dataflow
-  exists. Profiling attributes roughly three quarters of the time to
-  `build_route_graph`, which walks each module's full AST three times — router
-  variables, `register()` calls, endpoints — so the first move is one walk that
-  collects all three, not a faster dataflow pass.
+  **What the DJI family's recall rested on before this.** All twelve rules had
+  positive evidence from exactly two sources: their own unit tests, and
+  mutation. Fixture coverage was measured first and was **zero** — no fixture
+  project contained a single injection defect. That is a weaker position than
+  it sounds, because a rule whose only positive evidence is its own test file
+  has been checked against the author's idea of the defect rather than against
+  the defect, and both sources were written by the same hand in the same hour.
+  The benchmarks cannot help: the whole family reports nothing on all three
+  corpora, correctly, and for `DJI-009` through `DJI-012` — SSRF, open
+  redirect, unescaped HTML, path traversal — it is nothing by construction,
+  because mature projects do not leave those lying around.
 
-  This substep also builds the CI gate itself, which does not exist: risk 8
+  **`tests/fixtures/injection_project`** is a small shop app: twelve defects in
+  `shop/views.py`, one per rule and no more, so a finding names which rule
+  found it; and for each, its sanitised near-miss in `shop/controls.py`, which
+  the manifest forbids as a whole file. Every control reaches the same sink
+  with the same request value. What differs is that it arrives as a bound
+  parameter, through an allowlist, or after a sanitiser — so a rule that
+  reports one of them has not detected injection, it has detected that request
+  data and a dangerous call share a function, which describes most of every
+  Django project ever written.
+
+  **The fixture found a false positive before it was finished.** `DJI-006`
+  reported its own control: `SORTABLE.get(request.GET["sort"], "name")`, the
+  mapping lookup the documentation recommends. Measured before touching the
+  rule: across the three benchmarks there are **388 `order_by` calls** and
+  **75 `MAPPING.get(x, default)` reads**, and not one site writes the two
+  together — so the rule had learned only the two allowlist shapes the corpora
+  happen to write. **Lesson 70: "the corpus does not write it" is not "nobody
+  writes it."** `DJI-006` reports nothing on any corpus, so its precision had
+  never been measured on real code at all; corpus silence was standing in for
+  evidence. The lookup is a *stronger* guarantee than the membership test the
+  rule already accepted, because it cannot produce an unlisted column, and it
+  is now accepted — resolved through the scope chain to a display the module
+  wrote, not matched on syntax, so `params = request.GET` followed by
+  `params.get("sort")` is still reported. Both allowlist shapes are kept as
+  controls so neither can regress.
+
+  **Then the mutation probe contradicted a number this plan had been
+  carrying.** The DJI probe was recorded at 311 of 311 caught. Re-run at 324
+  defects it caught 285, and the 39 survivors included mutants that had been
+  recorded as caught — one removed `DJI-012`'s restriction that a filesystem
+  verb be held by `os` or `shutil`, and its 29 tests still passed. **Lesson 71:
+  a mutation score carried in prose is not a measurement.** It is a claim about
+  a probe, a rule and a test suite at one instant, and all three move. The
+  probe is now re-run rather than cited. Most survivors are the uninteresting
+  widening class (lesson 45) — file prefilters and `admits()`, which change
+  runtime and not findings — but the `DJI-012` walk survivors are a real gap
+  and are booked as **3.6.6** rather than quietly folded in here.
+
+  **Two of the new guard's own mutants were equivalent, and one branch of it
+  was dead.** A mutant restating a `None` test and one widening the holder to
+  an expression carrying no `id` both resolved to the same behaviour. More
+  usefully, instrumenting the guard showed its `SORTABLE[key]` branch **never
+  executed**: a subscript takes its taint from its base, the base is a dict the
+  module wrote, so the value never arrives tainted and the guard is never
+  asked. The test covering that shape had been passing on a fallback (lesson
+  59). The branch was deleted — **an unreachable branch is worse than a missing
+  one, because it advertises a guarantee it never provides** — and the test now
+  records the real reason. The same instrumentation proved the `get`
+  restriction *is* load-bearing: `SORTABLE.setdefault(key, key)` and
+  `SORTABLE.pop(key, key)` read the same owned dict but hand the caller's own
+  string back, and both stay reported.
+
+  `scripts/fixture_controls_probe.py` now covers both recall fixtures, removing
+  the guard from each control and requiring the matching rule to then report
+  it. Two injection anchors were stale on the first run — written before `ruff
+  format` reflowed the file (lesson 41) — which is exactly what the probe's
+  `UNAPPLIED` state exists to catch.
+
+  *Done when:* 12 expectations and 12 controls at 100% precision and recall, 7
+  tests carrying the reasoning the manifest cannot express, all 24 controls
+  across both fixtures proven load-bearing, and the `DJI-006` guard's mutants
+  at zero non-equivalent survivors.
+- **3.6.3** — Performance profiling: dataflow analysis must not push a NetBox-scale run beyond 10 seconds. **Done.**
+
+  **Entering position, re-measured at the start of Phase 3:** Healthchecks
+  1.52s, NetBox 8.40s, pretix 7.58s — best of five, on the engine's own timer.
+  The 16s recorded for pretix at the end of Phase 2 was measured with a
+  profiler attached, whose overhead here is 2.6–3.5×; unprofiled, pretix was
+  never the slowest target and NetBox always was. Nothing was over budget. The
+  conclusion the number was used to justify survives, because the budget binds
+  the slowest target either way, but the figure itself was wrong and is
+  corrected here rather than quietly dropped.
+
+  Profiling attributed 74% of a run to `build_route_graph`, which walked each
+  module's full AST three times — router variables, `register()` calls,
+  endpoints. Those three passes cannot simply be merged, because router
+  bindings must be known project-wide before any registration resolves; the
+  walk is shared instead. `ast.walk` calls fell 4,887,549 → 1,812,631 and the
+  slowest target went **8.40s → 6.34s**, with output byte-identical on all
+  three targets.
+
+  **Outcome:** Healthchecks 1.09s, NetBox 6.34s, pretix 5.60s.
+
+  This substep also built the CI gate itself, which did not exist: risk 8
   described a 10 s budget "enforced in CI" for the whole of Phase 2 while no
-  workflow step timed anything. The budget applies to the slowest target, not
-  to NetBox — a ceiling that the worst case is allowed to exceed is not a
-  ceiling. A run that exceeds it fails the build; a run that beats it by a wide
-  margin should tighten it, since a budget nothing ever approaches stops
-  measuring anything.
+  workflow step timed anything. `scripts/timing_gate.py` runs on every target,
+  with the budget declared once in `RUN_BUDGET_SECONDS` so the slowest target
+  binds it rather than a chosen one. A run that exceeds it fails the build; a
+  run that beats it by more than half only warns, because failing CI for an
+  improvement would punish the improvement — an asymmetry stated plainly in the
+  script rather than dressed up as a gate.
+
+  It refuses to time a run that emitted a blocking diagnostic or crashed a
+  rule. That is not defensive programming: a project djaudit cannot read
+  finishes in 0.15s and posts the best headroom on the board, so without the
+  check the fastest way to pass a timing gate is to break the analyser.
+
+  The saving is structural, so correctness tests cannot protect it — a reader
+  that walks again returns exactly the right answer, only slower. Both new
+  gates were therefore run against the defect they exist to catch, per risk 12.
+
+  *Revised in 3.2.1, and the single shared budget did not survive it.* Adding
+  whole-project dataflow spread the three targets from 2.3 s to 13.7 s, and the
+  spread tracks how many loops a project writes rather than how many files it
+  has — healthchecks has 653 files and 263 loops, netbox 1,213 files and 2,099.
+  One ceiling then measures only the slowest target while the other two are
+  free to drift by 5x, which is the exact failure the shared number was
+  introduced to prevent, so `budget` moved onto each matrix entry: 6 s for
+  healthchecks, 22 s for netbox and pretix, each set from a measured run with
+  roughly 50% headroom for runner variance. The number went up because the tool
+  now does more, and that is recorded here rather than smoothed away — but per
+  risk 14 these are local timings on a loaded box and CI decides the real
+  position.
+
+  **What the gate found on its first CI run — including a defect in itself.**
+  It reported healthchecks 0.90/1.09/1.39s, NetBox 7.08/11.07/12.99s, pretix
+  5.56/9.64/11.12s. All passed on best-of-three, but every target's three
+  samples rose monotonically, and noise is unordered. Two of NetBox's three
+  samples were over budget; the mean would have failed the build.
+
+  The cause was the gate measuring itself. It took its samples in one process
+  without collecting in between, so each sample ran against the previous one's
+  uncollected garbage and every sample after the first read high. Best-of-N —
+  chosen for runner noise — was quietly concealing a bias in our own harness.
+  `measure()` now collects and drops the previous result before each sample.
+  NetBox's spread fell from 83% (7.08→12.99) to 3% (7.77→8.02), which matters
+  more than the absolute number: a gate whose samples vary by 83% cannot detect
+  any regression smaller than 83%.
+
+  **And the bias was hiding a real cost.** Isolating it showed generation-2
+  collection alone was 19–22% of a run. A run holds every parsed AST live
+  throughout — ~2.3M tracked objects on NetBox — so each full collection
+  traverses the entire working set and frees almost nothing, four or five times
+  per run. `djaudit.gcpolicy` suppresses generation 2 for the span of a run and
+  restores the thresholds on exit, leaving generations 0 and 1 collecting so
+  peak memory stays bounded by the working set.
+
+  | target | gen-2 on | suppressed | gc fully off |
+  |---|---|---|---|
+  | healthchecks | 1.58s | 1.35s | 1.24s |
+  | netbox | 9.22s | 7.43s | 6.43s |
+  | pretix | 8.57s | 6.65s | 5.69s |
+
+  Disabling collection outright is a further 14% and was rejected: it reclaims
+  nothing for the duration, making peak memory a function of total allocation.
+  That is fine for a CLI that exits and wrong for a library embedded in a
+  long-lived host, which is exactly what Phase 6's LLM layer is.
+
+  Checked end-to-end rather than on our own timer, because moving work outside
+  the measured region is the eighth way a number here has lied: total process
+  wall time went NetBox 10.74s→9.12s and pretix 9.60s→8.43s. Of NetBox's 1.79s
+  in-run saving, 1.62s survives to process wall, so ~90% is work removed and
+  ~10% is paid back at teardown. That distinction is recorded rather than
+  rounded away.
+
+  Suppressing collection changes no output at all, so the entire rest of the
+  suite passes identically whether the policy is wired in or ripped out.
+  `tests/test_gcpolicy.py` observes the threshold from inside the audit, which
+  is the only point where "suppressed throughout" and "never touched" differ.
+
+  **Confirmed on the runner, which is the only measurement that counts here.**
+  Every number above is from one loaded 8-core dev box; the defect being fixed
+  was itself a measurement artefact, so it would have been circular to close
+  this out without checking CI. Same workflow, same pinned SHAs, before
+  (`91c1b8f`) and after (`b844dae`):
+
+  | target | before | after | sample spread |
+  |---|---|---|---|
+  | healthchecks | 0.90 / 1.09 / 1.39 | 1.07 / 0.91 / 0.91 | 54% → 18% |
+  | netbox | 7.08 / **11.07** / **12.99** | 5.35 / 5.22 / 5.05 | **83% → 6%** |
+  | pretix | 5.56 / **9.64** / **11.12** | 4.78 / 4.64 / 4.68 | 100% → 3% |
+
+  The monotone rise is gone on all three targets — the samples are now
+  unordered, which is what runner noise actually looks like. Every sample is
+  under budget rather than only the best one, so the gate no longer depends on
+  best-of-N to stay green.
+
+  **The budget is deliberately not being tightened yet, though the gate now
+  asks for it.** At 5.05s against 10s the gate correctly warns that a budget
+  nothing approaches has stopped measuring anything. Substep 3.1.2 measured
+  2.16s of netbox dataflow cost that Step 3.2 will bring into the run path.
+  Tightening now would mean re-loosening in two substeps' time, which trains
+  everyone to treat the budget as advisory. It is tightened when 3.2 lands and
+  the real post-dataflow figure is known.
 - **3.6.4** — Triage pass; publish the N+1 false-positive rate honestly, including in the README.
+
+  **The triage pass found nothing outstanding, which is the point of doing it.**
+  245 findings across the three targets are reviewed, each with a written
+  justification, a reviewer and a date: 194 `true_positive`, 51
+  `accepted_risk`, 0 withdrawn. A first pass at this substep assumed the eight
+  `tentative` `DJP` findings were invisible to the gate, because `djaudit
+  benchmark` has no confidence flag. It has none because it does not need one —
+  `benchmark.py` already runs the engine at `TENTATIVE`, and all eight were
+  triaged. They were re-reviewed independently anyway and every existing
+  verdict was confirmed, which is worth more than the assumption was.
+
+  **One note was wrong and is now corrected.** NetBox's `cables.py:1103` and
+  `:1114` were justified as "repeated evaluation of one queryset". They are
+  not. Read from Django's source rather than reasoned about:
+  `QuerySet._fetch_all` populates `_result_cache` once and re-iteration returns
+  it, and `ForwardManyToOneDescriptor.__get__` consults
+  `field.get_cached_value(instance)` before querying. So the second read of the
+  same relation on the same instances costs nothing, and the finding's "one
+  query per row" is false *at that line*. The defect is still real — the
+  queryset has no `select_related`, and one fix closes both sites — so it stays
+  a true positive on the defect and is booked as a **redundant report** on the
+  cost.
+
+  **The published number.** Of 56 N+1 findings across the three targets, 56
+  name a genuinely unprefetched relation and 2 overstate what they cost: a
+  **3.6% redundant-report rate**, stated in the README and not netted off the
+  precision figure. Measuring it needed care — grouping by rule, file and
+  message alone put the rate at 14.3%, but most of those pairs are distinct
+  querysets that happen to produce an identical sentence, and two lines in
+  `pretix/base/services/notifications.py` that look like one finding twice are
+  two different `NotificationSetting` filters. Only same-relation,
+  same-queryset, same-function repeats count.
+
+  The README also now states the two things the number does not mean: it is not
+  an independent audit, because we triaged our own benchmark, and it is not a
+  recall claim, because a mature project cannot tell us what we walked past.
+
+  *Done when:* 245 findings reviewed with zero untriaged, the corrected
+  mechanism recorded in `benchmarks/netbox.json`, and the redundant-report rate
+  published in the README beside the precision figure rather than instead of it.
 - **3.6.5** — `docs/rules/DJP.md` and `docs/rules/DJI.md`, plus a dataflow design note stating the analysis limits explicitly.
+
+  Both rule pages are generated by `scripts/gen_rule_docs.py` and gate-checked
+  on every commit, so they were current before this substep started; the work
+  here is the design note, `docs/architecture/dataflow.md`.
+
+  **Every limit in it was executed, not asserted.** The temptation in a
+  document like this is to describe the design as intended rather than as
+  built, and the two diverge quietly. So each claimed blind spot was run
+  against the engine with the equivalent inline loop as a control, and each was
+  confirmed silent while the control reported `DJP-001`: a queryset reached
+  through `self.qs`, one reached through `box[0]`, one returned by a helper in
+  another module, and a relation read in a function called from the loop.
+
+  **One claim was wrong and the measurement corrected it.** The note first said
+  that several reaching definitions support a `tentative` finding, which is
+  what `chains.py` describes. Run, the fork — `qs = Book.objects.all()` then a
+  conditional `select_related` — reports *nothing*. The rules are stricter than
+  the substrate's floor, and that is a deliberate false negative worth stating
+  in its own right, because the unprefetched branch really is an N+1.
+
+  The note also publishes the uncertainty rate it is entitled to claim: 26 of
+  245 reported findings are `tentative`, 8 of them `DJP`, all below the default
+  reporting floor.
+
+  *Done when:* the note states every limit with a verified example, the README
+  links it beside the model-graph note, and no claim in it rests on reading the
+  source rather than running it.
+- **3.6.6** — Close the `DJI` mutation gaps 3.6.2 exposed. The re-run measured
+  39 survivors of 324. Most are the widening class and stay documented rather
+  than killed: a mutant that makes a file prefilter or `admits()` admit more
+  code cannot change a finding, only runtime, so a test written to kill it
+  would assert an optimisation rather than a behaviour. The rest are real and
+  concentrated in `DJI-012`'s path walk, where mutants that stop the walk
+  descending into concatenation, f-strings, tuples, `%` interpolation and
+  `pathlib`'s `/` all survive — the composed expression is still tainted, so
+  the rule still reports, just about a coarser node. The tests assert the line
+  and not the node, so an equivalent-looking answer passes. Fixing means
+  asserting *which* expression is blamed, which is what the evidence excerpt
+  shows the reader.
+
+  **Done.** 324 mutants, **299 caught, 25 survivors, none unexplained.** Every
+  survivor was put through a differential harness that applies the mutation and
+  compares findings — rule, line *and* the blamed evidence excerpt — across 57
+  snippets and all 3,091 corpus files. A survivor is only a gap if it changes an
+  answer somewhere, and the harness is what decides that rather than a reading
+  of the diff.
+
+  Twenty are the widening class and stay. One, `ordering.py`'s constant-field
+  early-out, *looked* like a gap and is not: it is reached 415 times across the
+  corpora, and removing it changes no finding anywhere, so it buys time and not
+  correctness. Two more — dropping `DJI-011`'s recursion guard and letting
+  `DJI-012`'s repeat fall through — change nothing across snippets or corpora;
+  they are recorded as equivalent rather than killed with a test that would only
+  be asserting itself. One is self-describing: an alias branch the matcher
+  cannot reach.
+
+  Four were real, and three of those were bugs rather than missing tests.
+
+  `DJI-011` had `DJI-012`'s name-keyed `seen` bug. `label = request.GET["q"]`
+  then `label = "<b>" + label` reported **nothing**, because the guard was keyed
+  on the name, so the inner read looked like a repeat of the outer one when it
+  is a different use with a different definition reaching it — and the only one
+  that sees the request. Re-keyed to `id(node)`, as `taint.py` and `loops.py`
+  already did. `DJI-009` and `DJI-010` share the shape but not the bug: they
+  fall through to a taint default that happens to answer correctly here. That is
+  luck, not design, and it is why the fix is tested by shape rather than assumed
+  from the grep.
+
+  The guard that fix had to preserve was then found untested. `mark_safe(html)`
+  in `netbox/tables/columns.py` builds a cell by appending the same `button` in
+  several branches, so the walk reaches one `quote()`d value twice; declining
+  the second arrival is the decision, and falling through to the taint default
+  reverses it. That mutation survived every test in the file and produced a
+  **false positive on the real netbox file** — found by running the mutants
+  against the corpora, not the fixtures. Reduced to eight lines and asserted
+  both ways.
+
+  `DJI-010` blamed the right argument for a reason nothing checked. Read from
+  `django/shortcuts.py`: `redirect(to, *args, **kwargs)` forwards to
+  `resolve_url` and then `reverse(to, args=args, kwargs=kwargs)`, so every
+  argument after the first lands in a path segment of a URL the project named
+  and cannot move the client to another host. Blaming the last argument instead
+  survived the whole suite while making `redirect('detail', pk)` — the most
+  ordinary call in Django — a false positive.
+
+  The tuple branches in both string walks are the 3.6.2 finding restated with
+  the fix: `"%s" % (value,)` reports either way, because the tuple carries the
+  taint. What changes is the pointing, from `request.GET['q']` to
+  `('ok', request.GET['q'])`. The corpora reached that branch **once between
+  them**, which is an argument about what three projects write, not about what
+  the branch is worth; the tests assert the excerpt.
 
 ---
 
@@ -3024,11 +5368,13 @@ conversation.
 | 5 | Django 6.0 vs 5.2 behavioural drift | Medium | Medium | Version-aware rule gating from the detected version |
 | 6 | Live tier executes hostile code | Low | Critical | Opt-in, sandboxed, timed out, no inherited secrets, explicit consent message |
 | 7 | Model graph wrong on unusual patterns | Medium | Medium | Checked against each target's own migrations by `scripts/graph_coverage.py`; every gap must be attributed or the build fails |
-| 8 | Analysis too slow on large repositories | Medium | Medium | **Unmitigated: nothing in CI times a run.** Measured by hand at the end of Phase 2 — Healthchecks 2 s, NetBox 9 s, pretix 16 s against a 10 s budget, so pretix is over before any dataflow exists. Substep 3.6.3 owns both the single-pass fix and building the gate, with the budget applied to the slowest target rather than to NetBox alone |
+| 8 | Analysis too slow on large repositories | Medium | Medium | **Mitigated in Phase 3.** `scripts/timing_gate.py` runs on every benchmark target in CI and fails the build over a per-target budget carried on each CI matrix entry — 6 s for healthchecks, 22 s for netbox and pretix. It was one shared number until Step 3.2's whole-project dataflow spread the targets from 2.3 s to 13.7 s along how many loops each project writes rather than how large it is, at which point a single ceiling measured only the slowest and let the other two drift by 5x. It takes the best of three runs because runner noise is one-sided, collecting between samples so they do not measure each other, and refuses to time a run that emitted a blocking diagnostic or crashed a rule — an incomplete run is fast for the worst possible reason. Substep 3.6.3's single-pass fix took the slowest target from 8.4 s to 6.3 s, and suppressing generation-2 collection for the span of a run removed a further 19–22% |
 | 9 | LLM layer erodes determinism | Medium | High | Model may never create or suppress a finding; all output labelled |
 | 10 | Benchmark repositories drift | Low | Low | Pinned by commit SHA; updated deliberately |
 | 11 | A project djaudit cannot read scores as a clean one | Medium | High | Discovery emits a blocking diagnostic rather than returning quietly, and `run`, `eval` and `benchmark` all refuse to exit 0 on one. Pinned by tests using a class-configured project, which is the shape we detect and cannot yet parse |
-| 12 | A gate passes because what it checks is absent | High | High | Three found and fixed in Phase 2 alone — a doc generator hardcoded to one family, a triage citation nothing verified, a plan checker that only read the plan. Every new gate must be shown failing on the defect it exists to catch, in the commit that adds it |
+| 12 | A gate passes because what it checks is absent | High | High | Three found and fixed in Phase 2 alone — a doc generator hardcoded to one family, a triage citation nothing verified, a plan checker that only read the plan. Two more in Phase 3: the timing-gate test that asserted a result was dead by end of loop, which rebinding achieves anyway, and 3.1.2's reachability test, which put an unconditional rebind after the branch and so passed with the reachability filter deleted. Every new gate must be shown failing on the defect it exists to catch, in the commit that adds it |
+| 13 | A detector is measured only where it fires, so its noise floor is never seen | Medium | High | **Run the detector with its real signal removed and count what survives.** 3.1.3's queryset tracker was first measured by accident against an empty model graph, where every remaining detection was by construction spurious — which is how a rule claiming `self.get(...)` on a DRF view and `self.update()` on a form as querysets was caught, 33× over-detection on a 12-model project. Precision measured only on a populated graph would have buried it in true positives. The empty-input control is cheap, is now a test, and is run deliberately for each new detector |
+| 14 | A local timing number is quoted as the budget position | High | Medium | The dev box runs at load ~7 on 8 cores, and the same unchanged commit measures NetBox at 7.40 s and 8.96 s an hour apart — a 21% swing from load alone, verified by stashing the working tree and re-running. CI measured the same commit at 5.05 s. **Local timings are only ever valid as a same-session A/B against a stashed tree; CI is the only authoritative budget position.** Commit messages before `3.1.3` quote local figures as though they were the gate's, which overstates the deficit by up to 75% |
 
 ---
 
@@ -3039,18 +5385,19 @@ conversation.
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
 | 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | **Complete** (PR #3) — `DJA-001`…`DJA-015`, `DJD-001`…`DJD-003`, 100% precision on three real targets |
-| 3 | Performance and injection | 6 | 35 | Not started |
+| 3 | Performance and injection | 6 | 36 | In progress |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
 | 5 | Portability and external adapters | 4 | 20 | Not started |
 | 6 | LLM layer | 5 | 17 | Not started |
 | 7 | Distribution | 3 | 10 | Not started |
-| | **Total** | **52** | **232** | |
+| | **Total** | **52** | **233** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **45 rules are
+document specifies, and most of it is still only specified: **67 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, and none introduced after them.
+2, plus the first ten of Phase 3's and the first twelve of its injection
+family.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against
@@ -3064,7 +5411,7 @@ same commit.
 benchmark targets and checked against each target's own migrations by
 `scripts/graph_coverage.py`, which reads `AddField`/`CreateModel` operations as
 an independent oracle — Healthchecks resolves completely, NetBox and pretix
-leave only attributed gaps. 45 rules ship behind 1,634 tests. Six planted-defect
+leave only attributed gaps. 46 rules ship behind 2,039 tests. Six planted-defect
 fixtures score 100% precision and 100% recall over 56 expected findings, with 97
 `must_not_report` assertions pinning the near misses. The three real targets
 report 62 findings, every one triaged with a file and line that the benchmark

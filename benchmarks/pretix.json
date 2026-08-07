@@ -17,46 +17,6 @@
       "note": "InitializeView at api/views/device.py:145. True as read: authentication_classes = () and permission_classes = (), routed for POST. It is pretix's device enrolment endpoint, the point at which a physical point-of-sale device trades a one-time initialization token for a long-lived API token, so it necessarily precedes authentication. The credential is checked in the handler -- Device.objects.get(initialization_token=...) raising ValidationError on an unknown token, with further refusals for tokens already used or revoked -- which is the hand-written check DJA-003 lists as invisible to it. Accepted rather than false positive for the same reason as NetBox's token provisioning: the statement is correct, and an anonymous POST endpoint earning one line of review is the rule working, not misfiring."
     },
     {
-      "fingerprint": "4b54da691ba4ae06",
-      "rule_id": "DJS-006",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/settings.py",
-      "line": 1,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "SECURE_SSL_REDIRECT is never assigned anywhere in src/pretix, so Django itself does not redirect plain HTTP. That is deliberate rather than an oversight: pretix expects TLS to be terminated in front of it, and the reference deployment in deployment/docker/nginx.conf listens on port 80 only and reverse-proxies to gunicorn over a unix socket, which means the Django process legitimately never sees a TLS connection to redirect from. The statement the rule makes is true and the redirect really is absent from this repository; where it happens is the operator's, not the developer's, decision. Recorded as accepted rather than a false positive for the same reason as the NetBox entries: whether the target chooses to handle something elsewhere says nothing about whether we were right to point at it."
-    },
-    {
-      "fingerprint": "6a0747bd68e402a5",
-      "rule_id": "DJS-007",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/settings.py",
-      "line": 1,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "SECURE_HSTS_SECONDS is never assigned, so Django sends no Strict-Transport-Security header. Same layering as DJS-006: pretix does not terminate TLS, and an HSTS header emitted by an application that is only ever reached over plaintext from its own reverse proxy would be both useless and, if the proxy ever forwarded it unchanged for a subdomain, actively harmful. The shipped nginx config does not set the header either, so a site following the reference deployment sends no HSTS at all -- which is a genuine gap, but one that belongs to the TLS terminator the operator supplies rather than to this codebase. Accepted rather than true_positive because there is no line in this repository whose change would fix it."
-    },
-    {
-      "fingerprint": "f51cad9a17a0f0d0",
-      "rule_id": "DJS-012",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/settings.py",
-      "line": 242,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https') at settings.py:242 sits inside `if config.getboolean('pretix', 'trust_x_forwarded_proto', fallback=False):` at line 241, so it is off unless an operator opts in through a config file that is not part of this repository, and the option is named for exactly the trust it establishes. The rule's point stands regardless of the guard -- once enabled, any client that can reach gunicorn directly can assert HTTPS by sending the header, so the proxy must overwrite rather than append it -- which is why this is reported at low/tentative and stays out of a default run. Accepted: the risk is real, opt-in, and named."
-    },
-    {
-      "fingerprint": "cee9e042f437a195",
-      "rule_id": "DJS-013",
-      "verdict": "true_positive",
-      "file": "src/pretix/settings.py",
-      "line": 255,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "ALLOWED_HOSTS = ['*'] at settings.py:255 is unconditional. pretix needs to answer on organizer- and event-specific custom domains, so it cannot enumerate hosts ahead of time, and it resolves them itself in pretix.multidomain.middlewares.MultiDomainMiddleware. But that middleware does not reject an unrecognised host: on KnownDomain.DoesNotExist it sets mode='system' (middlewares.py:101-104) and serves the main site, so Django's host validation is disabled and nothing replaces it. deployment/docker/nginx.conf:89 forwards `Host $http_host` verbatim, so the header arrives unfiltered. That leaves the documented consequence intact -- absolute URLs, including password-reset links, are built from an attacker-supplied Host, and cache keys derived from it can be poisoned. Genuinely mitigable by pinning SITE_URL's host plus the KnownDomain set, so this is a real finding rather than an accepted trade-off."
-    },
-    {
       "fingerprint": "a7625177c741ec2e",
       "rule_id": "DJA-010",
       "verdict": "accepted_risk",
@@ -147,16 +107,6 @@
       "note": "True reading, same shape on the create path. OrderCreateSerializer.positions nests OrderPositionCreateSerializer, whose field list includes secret, so a create response returns the newly generated ticket secrets. This is how a caller learns the secrets for tickets it just created, which is the point of the endpoint. Accepted as designed."
     },
     {
-      "fingerprint": "8f90890443c296e8",
-      "rule_id": "DJA-015",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/api/views/device.py",
-      "line": 145,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "InitializeView sets authentication_classes = () and permission_classes = (), and pretix sets no DEFAULT_THROTTLE_CLASSES, so the reading is right: an anonymous caller can POST to device/initialize as fast as it answers. It looks up Device.objects.get(initialization_token=...) and returns a device API token, so it is a credential exchange, which the rule did not claim -- nothing in the name, module or URL says so, and it was reported at MEDIUM/tentative on the strength of being an unauthenticated write alone. Accepted because the initialization token is generated with high entropy, which makes guessing impractical rather than merely slow; the endpoint is still an unauthenticated write with no rate limit."
-    },
-    {
       "fingerprint": "6340e2eaaeb948a9",
       "rule_id": "DJA-014",
       "verdict": "accepted_risk",
@@ -187,64 +137,14 @@
       "note": "GiftCardFilter.Meta.fields lists 'secret'. GiftCard.secret carries verbose_name 'Gift card code' -- it is the code a customer types in, and looking a card up by it is how a redemption endpoint works. Genuinely bearer credential material, since holding the code is enough to spend the balance, but the lookup is exact and listing gift cards needs organizer API credentials, so a caller cannot read a code they do not already have."
     },
     {
-      "fingerprint": "144c4de2eb7319b6",
-      "rule_id": "DJD-002",
-      "verdict": "true_positive",
-      "file": "src/pretix/base/models/invoices.py",
-      "line": 143,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "Invoice declares fifteen nullable string columns -- invoice_from_name and the rest of the two address blocks -- with no blank=True and no default. Migration 0100_auto_20181023_2300 added them with AddField(..., null=True) and no backfill, so every invoice written before October 2018 holds NULL and every one after holds a string or ''. The cost is visible in the model itself: address_invoice_to reads ((self.invoice_to_zipcode or '') + ' ' + (self.invoice_to_city or '') + ' ' + (state_name or '')).strip() and then filters the assembled parts with `if p and p.strip()`, which is the defensive read Django's documentation warns the pattern will force. True positive."
-    },
-    {
-      "fingerprint": "59ba44e82cbed522",
-      "rule_id": "DJD-002",
+      "fingerprint": "8f90890443c296e8",
+      "rule_id": "DJA-015",
       "verdict": "accepted_risk",
-      "file": "src/pretix/base/models/seating.py",
-      "line": 178,
+      "file": "src/pretix/api/views/device.py",
+      "line": 145,
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
-      "note": "Seat.row_label and Seat.seat_label are nullable with no blank=True. The seating-plan importer at seating.py:125 sets row_label = None explicitly and only assigns when `if r.get('row_label')` is truthy, so NULL is the deliberate spelling of absent while a JSON plan supplying an empty string would store ''. The dual representation is real and the labels are display-only, so a query that misses one population changes a rendered label rather than a total. Accepted."
-    },
-    {
-      "fingerprint": "f8dd87a2e6bca5ad",
-      "rule_id": "DJD-002",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/plugins/banktransfer/models.py",
-      "line": 82,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "BankTransaction.currency is nullable with no blank=True. Migration 0009_banktransaction_currency adds it and runs a set_currency data migration that backfills from the related event, which is exactly the remediation this rule recommends -- but the rows whose event lookup fails keep NULL and the column stays nullable, so new writes can still produce one. The finding is correct and the residue is small. Accepted."
-    },
-    {
-      "fingerprint": "fb5c58545525900a",
-      "rule_id": "DJD-002",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/plugins/banktransfer/models.py",
-      "line": 45,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "BankImportJob.currency, the same nullable currency column as BankTransaction and added by the same series of migrations. An import job is a short-lived record of one upload, so the NULL population ages out rather than accumulating. Correct as stated, accepted."
-    },
-    {
-      "fingerprint": "6cb130f365bafa1c",
-      "rule_id": "DJD-002",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/plugins/banktransfer/models.py",
-      "line": 118,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "RefundExport.currency, third of the banktransfer plugin's nullable currency columns. Same judgement as the other two: the statement is true, the column has both spellings of empty, and the plugin reads it through code that already tolerates the absence. Accepted."
-    },
-    {
-      "fingerprint": "6c9bac354f9e2141",
-      "rule_id": "DJD-002",
-      "verdict": "accepted_risk",
-      "file": "src/pretix/base/models/mail.py",
-      "line": 141,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "OutgoingMail.body_html is a nullable TextField with no blank=True. Here the two values arguably mean different things -- a message with no HTML alternative part at all, versus one carrying an empty part -- and that is a distinction MIME genuinely makes. This is the case the rule's limitation about deliberate absence describes. Accepted."
+      "note": "InitializeView sets authentication_classes = () and permission_classes = (), and pretix sets no DEFAULT_THROTTLE_CLASSES, so the reading is right: an anonymous caller can POST to device/initialize as fast as it answers. It looks up Device.objects.get(initialization_token=...) and returns a device API token, so it is a credential exchange, which the rule did not claim -- nothing in the name, module or URL says so, and it was reported at MEDIUM/tentative on the strength of being an unauthenticated write alone. Accepted because the initialization token is generated with high entropy, which makes guessing impractical rather than merely slow; the endpoint is still an unauthenticated write with no rate limit."
     },
     {
       "fingerprint": "930da2a607c3b984",
@@ -257,6 +157,16 @@
       "note": "Device.security_profile is nullable with no blank=True. Devices enrolled before profiles existed hold NULL, and pretix resolves the profile through a lookup that treats a missing entry as the permissive default, so both spellings already funnel to one branch. Correct as stated, accepted."
     },
     {
+      "fingerprint": "144c4de2eb7319b6",
+      "rule_id": "DJD-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/invoices.py",
+      "line": 143,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Invoice declares fifteen nullable string columns -- invoice_from_name and the rest of the two address blocks -- with no blank=True and no default. Migration 0100_auto_20181023_2300 added them with AddField(..., null=True) and no backfill, so every invoice written before October 2018 holds NULL and every one after holds a string or ''. The cost is visible in the model itself: address_invoice_to reads ((self.invoice_to_zipcode or '') + ' ' + (self.invoice_to_city or '') + ' ' + (state_name or '')).strip() and then filters the assembled parts with `if p and p.strip()`, which is the defensive read Django's documentation warns the pattern will force. True positive."
+    },
+    {
       "fingerprint": "aea1ca3dae8b444d",
       "rule_id": "DJD-002",
       "verdict": "accepted_risk",
@@ -265,6 +175,1246 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "ItemCategory declares two nullable cross-selling columns with no blank=True. Both are recent additions to a long-lived model, so the NULL population is every category created before the feature shipped. Reading them through a truthiness check makes the two spellings equivalent in practice. Correct as stated, accepted."
+    },
+    {
+      "fingerprint": "6c9bac354f9e2141",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/base/models/mail.py",
+      "line": 141,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "OutgoingMail.body_html is a nullable TextField with no blank=True. Here the two values arguably mean different things -- a message with no HTML alternative part at all, versus one carrying an empty part -- and that is a distinction MIME genuinely makes. This is the case the rule's limitation about deliberate absence describes. Accepted."
+    },
+    {
+      "fingerprint": "59ba44e82cbed522",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/base/models/seating.py",
+      "line": 178,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Seat.row_label and Seat.seat_label are nullable with no blank=True. The seating-plan importer at seating.py:125 sets row_label = None explicitly and only assigns when `if r.get('row_label')` is truthy, so NULL is the deliberate spelling of absent while a JSON plan supplying an empty string would store ''. The dual representation is real and the labels are display-only, so a query that misses one population changes a rendered label rather than a total. Accepted."
+    },
+    {
+      "fingerprint": "fb5c58545525900a",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/plugins/banktransfer/models.py",
+      "line": 45,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "BankImportJob.currency, the same nullable currency column as BankTransaction and added by the same series of migrations. An import job is a short-lived record of one upload, so the NULL population ages out rather than accumulating. Correct as stated, accepted."
+    },
+    {
+      "fingerprint": "f8dd87a2e6bca5ad",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/plugins/banktransfer/models.py",
+      "line": 82,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "BankTransaction.currency is nullable with no blank=True. Migration 0009_banktransaction_currency adds it and runs a set_currency data migration that backfills from the related event, which is exactly the remediation this rule recommends -- but the rows whose event lookup fails keep NULL and the column stays nullable, so new writes can still produce one. The finding is correct and the residue is small. Accepted."
+    },
+    {
+      "fingerprint": "6cb130f365bafa1c",
+      "rule_id": "DJD-002",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/plugins/banktransfer/models.py",
+      "line": 118,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "RefundExport.currency, third of the banktransfer plugin's nullable currency columns. Same judgement as the other two: the statement is true, the column has both spellings of empty, and the plugin reads it through code that already tolerates the absence. Accepted."
+    },
+    {
+      "fingerprint": "47b137a8f51f4873",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/event.py",
+      "line": 613,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. A dict comprehension over `SubEventItem.objects.filter(subevent=subevent)` keyed by `item.item`, which is a forward FK the queryset never selected. Runs inside a serializer update, so the query count scales with the number of price overrides on the sub-event."
+    },
+    {
+      "fingerprint": "be60b0deb9b669cf",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/event.py",
+      "line": 622,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. The same shape nine lines later over SubEventItemVariation, keyed by `item.variation`. Both are comprehensions rather than for statements, which is the compact form of this bug and the reason the rule reads a comprehension's result expression as part of the loop body."
+    },
+    {
+      "fingerprint": "3bf4a994e9592180",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0204_orderposition_backfill_is_bundled.py",
+      "line": 27,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. A data migration iterating ItemBundle and reading `ib.base_item` inside a filter. Migrations are where an N+1 hurts most: it runs once, on production data, holding a transaction, and nobody watches its query count until the deploy stalls."
+    },
+    {
+      "fingerprint": "9081e76eff24ce4f",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0204_orderposition_backfill_is_bundled.py",
+      "line": 28,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `ib.bundled_item` on the next line of the same migration loop, a second unselected forward FK on the same row. Reported separately because it is a different relation and needs its own entry in select_related."
+    },
+    {
+      "fingerprint": "730bad4f16413e27",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0204_orderposition_backfill_is_bundled.py",
+      "line": 29,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `ib.bundled_variation`, the third relation traversed on each ItemBundle row in this migration. Three findings on three consecutive lines is the rule behaving correctly: one query per relation per row, and `select_related` needs all three names."
+    },
+    {
+      "fingerprint": "784e46a242efcf55",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/media.py",
+      "line": 70,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. A generator expression inside `any(...)` reading `ks.organizer` on each MediumKeySet. Tentative because the queryset reaches the loop through a `set(...)` around a values_list chain, so the reader cannot state confidently what was selected -- the right confidence for evidence it cannot fully narrate."
+    },
+    {
+      "fingerprint": "d0d74e0f12b9cea8",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/notifications.py",
+      "line": 72,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source, and a good example of the cheapest possible fix. `if logentry.user:` loads the whole related User row purely to test for null, when `logentry.user_id` answers the same question from a column already in hand. The rule does not suggest that fix, but it points at the line where it applies."
+    },
+    {
+      "fingerprint": "0629b68e36e789ac",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/notifications.py",
+      "line": 77,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `(ns.user, ns.method): ns.enabled` in a dict comprehension over an unselected NotificationSetting queryset. Reported high severity because the comprehension sits inside an outer loop over log entries, so the query count is a product rather than a sum."
+    },
+    {
+      "fingerprint": "d4a69b3593665d4b",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/notifications.py",
+      "line": 85,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. The second notification-settings comprehension, the global one, with the same `ns.user` traversal as :77. Distinct loop, distinct queryset, distinct finding."
+    },
+    {
+      "fingerprint": "ea27ed941d71512d",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/shredder.py",
+      "line": 300,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. An OrderPosition queryset with `op.order.code` read per row while building shredder output. Data-export code walks the whole order table by design, so this is the row count of the event, not a handful."
+    },
+    {
+      "fingerprint": "0a5411604d428e92",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/shredder.py",
+      "line": 432,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. Same `op.order.code` traversal in a different shredder. Tentative because the queryset chain includes a call the reader could not fully narrate; the relation hop is unambiguous."
+    },
+    {
+      "fingerprint": "393aea8f8dbfbe88",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/shredder.py",
+      "line": 512,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `ia.order.code` on an InvoiceAddress queryset with no select_related, again inside an export loop over every invoice address for the event."
+    },
+    {
+      "fingerprint": "ca505079319871db",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/plugins/ticketoutputpdf/signals.py",
+      "line": 87,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `tli.layout` on a TicketLayoutItem queryset in a signal handler. Signal handlers are the worst place to hide a per-row query because the cost lands on whatever unrelated operation fired the signal."
+    },
+    {
+      "fingerprint": "d076d9dd7c7c7f3b",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/tests/presale/test_cart.py",
+      "line": 820,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. True by mechanism -- a CartPosition queryset with `obj.item` read per row -- but it is a test, so no production cost. Same reasoning as the NetBox test-file finding: accurate claim, low value, and the question of whether DJP should read test files is a scoping decision rather than a verdict here."
+    },
+    {
+      "fingerprint": "18120e5beb2c5ecb",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/tests/presale/test_cart.py",
+      "line": 821,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `obj.variation` on the same test loop, a second unselected relation. Test code, accurate claim, no production impact."
+    },
+    {
+      "fingerprint": "af2a74ec5335de7d",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/tests/presale/test_cart.py",
+      "line": 837,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `obj.item` in a second test loop seventeen lines below. Test code, accurate claim, no production impact."
+    },
+    {
+      "fingerprint": "9da3df0eb617a6c1",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/tests/presale/test_cart.py",
+      "line": 2222,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `cp.voucher` on a CartPosition queryset in a test assertion. Test code, accurate claim, no production impact."
+    },
+    {
+      "fingerprint": "66317f336cbe7e12",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/tests/presale/test_cart.py",
+      "line": 2236,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. `cp.voucher` on a CartPosition queryset in a neighbouring voucher test, a distinct loop over a distinct queryset rather than a duplicate of :2222. Test code, accurate claim, no production impact."
+    },
+    {
+      "fingerprint": "b20059dacce9275a",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/tests/presale/test_cart.py",
+      "line": 2266,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Verified against source. Third `cp.voucher` traversal in this module, in a third test with its own CartPosition queryset. Test code, accurate claim, no production impact."
+    },
+    {
+      "fingerprint": "adcfd6134d1938ae",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/exporters/orderlist.py",
+      "line": 678,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "The best finding in this set and the only one on a production path. Line 673 does `questions = list(Question.objects.filter(event__in=self.events))` -- no prefetch -- and line 675 loops it, reaching `q.options.all()` at 678 and again at 682. `options` is the reverse of the QuestionOption.question ForeignKey, so it is many rows per question and only `prefetch_related('options')` can fix it. One SELECT per multiple-choice question on every order-list export. Reported once although the accessor is reached twice in the two branches, which is the per-path dedupe working."
+    },
+    {
+      "fingerprint": "7cb4d2ff69c1b1f2",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0076_orderfee_squashed_0082_invoiceaddress_internal_reference.py",
+      "line": 38,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "`for i in Invoice.objects.iterator():` at 37, `for j, l in enumerate(i.lines.all()):` at 38. Reverse of InvoiceLine.invoice, so many rows per invoice and one SELECT per invoice. The `.iterator()` deserves a note: before Django 4.1 it silently ignored `prefetch_related`, which would have made the remediation wrong, but the support matrix here is 5.2 LTS and 6.0, where `prefetch_related` works with `iterator(chunk_size=...)`. True positive, and the fix needs that chunk_size argument."
+    },
+    {
+      "fingerprint": "d282df702c50c8af",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0077_auto_20170829_1126.py",
+      "line": 12,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "`for i in Invoice.objects.iterator():` at 11, `for j, l in enumerate(i.lines.all()):` at 12 -- the unsquashed original of the same `assign_positions` data migration triaged at 0076_orderfee_squashed:38. Reverse FK from InvoiceLine.invoice, many rows per invoice, one SELECT per invoice, fixable only by `prefetch_related('lines')`. Both copies are reported because both files really are in the tree and really would run; deduplicating across a squash is a question for the reporter, not for this rule."
+    },
+    {
+      "fingerprint": "535140be8559069e",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0077_auto_20171124_1629.py",
+      "line": 27,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "`for e in Event.objects.all():` at 19 reaching `e.subevents.all()` at 27, the reverse of SubEvent.event. One SELECT of subevents per event, and this loop is doing real per-row work underneath it, so the count is not theoretical. The sibling `e.checkin_lists.create(...)` at 29 and 33 is deliberately NOT reported: `.create()` is an INSERT that prefetching cannot remove and would only invalidate, so it belongs to a bulk-write rule rather than to this one."
+    },
+    {
+      "fingerprint": "ff2b36551121674d",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0077_auto_20171124_1629_squashed_0088_auto_20180328_1217.py",
+      "line": 29,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "The squashed copy of `create_checkin_lists`, identical in substance to 0077_auto_20171124_1629.py:27: `for e in Event.objects.all():` at 21 reaching `e.subevents.all()` at 29. Reverse of SubEvent.event, many rows per event, one SELECT per event, `prefetch_related('subevents')` is the only fix because there is no single row to join. Counted separately from the unsquashed file on purpose -- both are real files that Django would execute."
+    },
+    {
+      "fingerprint": "9a32538eb79c4c02",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0077_auto_20171124_1629_squashed_0088_auto_20180328_1217.py",
+      "line": 49,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "A second, distinct loop in the same squashed migration: `for q in Question.objects.all():` at 48 reaching `q.options.all()` at 49, the reverse of QuestionOption.question. One SELECT per question. Distinct from the finding at line 29 in both loop and relation, so two findings in one file is correct here rather than a dedupe failure -- the per-path suppression is scoped to a single loop, which is exactly the granularity at which a prefetch is added."
+    },
+    {
+      "fingerprint": "a5569b8fffa06f65",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0084_questionoption_position.py",
+      "line": 11,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-03",
+      "note": "`for q in Question.objects.all():` at 10, `for i, option in enumerate(q.options.all()):` at 11, the standalone version of the `set_position` migration also found in the 0077 squash at line 49. Reverse of QuestionOption.question: many rows per question, one SELECT per question, and `option.save()` inside makes the loop expensive already. `prefetch_related('options')` removes the read half of that cost."
+    },
+    {
+      "fingerprint": "9424547c1917448b",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1460,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "Voucher availability is computed inside the position loop with a `CartPosition.objects.filter(...).exclude(...).count()` per voucher not already in `v_avail`. The `v_avail` dict is a real cache and bounds the damage to one query per distinct voucher, but an order with many distinct vouchers still pays per voucher on a hot API write path. Correct detection; the memo is a partial mitigation rather than a fix."
+    },
+    {
+      "fingerprint": "e32e32575d6b42a6",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/datasync/datasync.py",
+      "line": 201,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`OrderSyncQueue.objects.select_for_update(...).get(pk=queue_item.pk)` once per queued order, inside its own transaction. The re-read under `SELECT FOR UPDATE NOWAIT` is deliberate -- it is how the worker claims an item without blocking -- so the query is load-bearing, but it is still one round trip per iteration and the rule reports it correctly."
+    },
+    {
+      "fingerprint": "86fadeef0d910f44",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/exporters/orderlist.py",
+      "line": 1345,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`GiftCard.objects.get(pk=obj.info_data.get('gift_card'))` per row of an export. Exports run over whole orders tables, so this is one of the clearest production N+1s in the corpus: the gift card ids are all present in the rows being exported, so a single `in_bulk` before the loop would remove the entire per-row cost. Firm, high, and worth fixing."
+    },
+    {
+      "fingerprint": "0ab05c08c8dd76c0",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0077_auto_20171124_1629_squashed_0088_auto_20180328_1217.py",
+      "line": 68,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "Identifier backfill migration: an existence check inside a `while True` retry inside a loop over every `Question`, so the query count is at least one per row and more when a random code collides. Migration scope demotes it; the shape is exactly what makes a backfill on a large table slow."
+    },
+    {
+      "fingerprint": "59459b2863bc4dd3",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0077_auto_20171124_1629_squashed_0088_auto_20180328_1217.py",
+      "line": 78,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The `QuestionOption` half of the same squashed backfill migration, with the same generate-then-check-uniqueness loop. Recorded separately because it is a second loop over a second model, not a re-report of the first."
+    },
+    {
+      "fingerprint": "ea54d1c940c2e643",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0085_auto_20180312_1119.py",
+      "line": 18,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The unsquashed original of the `Question` identifier backfill. Both this and the squashed copy are reported, which is correct -- they are separate files that both exist in the tree -- and is worth knowing when reading the corpus totals."
+    },
+    {
+      "fingerprint": "6ef79acf1e7026e8",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0085_auto_20180312_1119.py",
+      "line": 28,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The unsquashed `QuestionOption` identifier backfill, matching the squashed copy above. Same per-row existence check inside a collision-retry loop, same migration-scope demotion."
+    },
+    {
+      "fingerprint": "26117b6ebfc50193",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0149_order_cancellation_date.py",
+      "line": 22,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`LogEntry.objects.filter(...).first()` per order in a cancellation-date backfill that iterates with `.iterator()` over what can be the entire orders table. Streaming the outer query keeps memory flat but does nothing about the inner one, so this is one query per order on a table sized by the installation. The worst-shaped migration finding in the corpus."
+    },
+    {
+      "fingerprint": "f8c35924c0e5a8fc",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0285_voucher_created.py",
+      "line": 19,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`LogEntry.objects.filter(...).aggregate(Min('datetime'))` once per voucher, again over an `.iterator()` of every voucher with a null `created`. A single grouped aggregate keyed on `object_id` would answer the whole backfill in one statement. Correct, and demoted only because it is a migration."
+    },
+    {
+      "fingerprint": "c8ae65a172430f46",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0305_fixup_eventmetaproperties.py",
+      "line": 22,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "An existence check per cross-organizer `EventMetaValue` in a repair migration. The row set is expected to be tiny -- it exists only to fix a data bug -- so the practical cost is near zero, but the detection is correct and the migration scope already reflects the reduced stakes."
+    },
+    {
+      "fingerprint": "6cf19ab60ac40094",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0305_fixup_eventmetaproperties.py",
+      "line": 23,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The `EventMetaValue.objects.get(...)` immediately following the existence check in the same loop, which is a second round trip fetching exactly what the first proved was there. Collapsing the two into one `.first()` and a null test would halve the query count. Reported as its own finding because it is its own call, which is the behaviour the call-node keying guarantees."
+    },
+    {
+      "fingerprint": "5d8504d4e3c5f63a",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/cart.py",
+      "line": 259,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`redeemed_in_carts.count()` per voucher in `_get_voucher_availability`, on the cart-add path. Vouchers per cart operation are usually few, but this is a request-path loop over user-controlled input, so the bound is not structural. A single grouped count over the vouchers in play would replace it. Firm and correct."
+    },
+    {
+      "fingerprint": "7dbac963f3916874",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/cart.py",
+      "line": 833,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`CartPosition.objects.filter(voucher=..., expires__gte=...).count()` inside the item loop of `add_items_to_cart`, reached when a voucher carries `voucher_ignore_if_redeemed`. One count per affected item, on the request path, with the item list coming from the client. Correct."
+    },
+    {
+      "fingerprint": "5c2cf349224562fb",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/currencies.py",
+      "line": 57,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`ExchangeRate.objects.filter(source=source_name).aggregate(Max('source_date'))` per rate source. The source dict is small and fixed in code, so the query count is bounded at a handful, but both this and the sibling aggregate below it are avoidable with one grouped query. Correct; low practical cost."
+    },
+    {
+      "fingerprint": "0f95f8dcaaf7c45e",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/currencies.py",
+      "line": 62,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The second aggregate in the same loop body, over `Max('updated')` for the same source. Two aggregates per source where one query grouping by source and selecting both maxima would do. Reported separately because it is a distinct round trip."
+    },
+    {
+      "fingerprint": "4f24f54ce176a360",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/mail.py",
+      "line": 350,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`CachedFile.objects.get(pk=cf)` once per attachment when mail is sent with cached-file attachments passed by primary key. Attachment counts are small, so the loop is bounded, but the ids are all known up front and `in_bulk` would serve them in one query. Correct detection on a production path."
+    },
+    {
+      "fingerprint": "2fddbed078a13829",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/mail.py",
+      "line": 823,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The same per-attachment `CachedFile.objects.get`, in the second mail-sending entry point. Same shape, same remediation, separate call site -- another case where the pattern was duplicated between two functions and automated detection finds both."
+    },
+    {
+      "fingerprint": "7d461942dc821169",
+      "rule_id": "DJP-004",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/base/services/media.py",
+      "line": 51,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`MediumKeySet.objects.get(...)` inside `for i in range(20)`, but the loop is a bounded retry: the body returns on success and only reaches the `get` after an `IntegrityError` from a colliding random public id. In practice it executes once. The rule is right that the query is written inside a loop and cannot see that the body returns, which is a documented limitation -- loop bounds and control flow are not modelled. Recorded as accepted risk rather than a false positive because the reading of the code is accurate."
+    },
+    {
+      "fingerprint": "fb716692505f3103",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/orders.py",
+      "line": 249,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`GiftCard.objects.select_for_update(of=OF_SELF).get(pk=gc.pk)` inside a nested loop over each position's issued gift cards, so the cost is positions times gift cards per order. The re-read is deliberate -- it takes a row lock before mutating the balance -- but it is still per-iteration, and `select_for_update` over the whole set before the loop would take the same locks in one statement. Escalated to critical by nesting, which is the right ranking for an order-mutation path."
+    },
+    {
+      "fingerprint": "de429580fd7642f9",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/orders.py",
+      "line": 552,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The same locking re-read in the order-cancellation path, again nested inside a loop over positions. Same reasoning and same available remediation. Reported separately because it is a distinct call site in a distinct function."
+    },
+    {
+      "fingerprint": "5e36e1a9bc9d41b6",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/orders.py",
+      "line": 834,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`redeemed_in_carts.count()` per cart position during availability checking, memoised in `v_avail` so the real bound is distinct vouchers rather than positions. Still a per-voucher round trip on the checkout path, and the same grouped-count remediation applies as in `services/cart.py`."
+    },
+    {
+      "fingerprint": "0767665f0d7319e6",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/orders.py",
+      "line": 972,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`GiftCard.objects.get(pk=p['info_data']['gift_card'])` once per gift-card payment request while building an order. The ids are all available from `payment_requests` before the loop, so `in_bulk` would collapse it to one query. Small bound in practice, correct detection."
+    },
+    {
+      "fingerprint": "d0307b89a1b4a475",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/orders.py",
+      "line": 1466,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`Order.objects.select_related('event').select_for_update(of=OF_SELF).get(pk=o.pk)` per order in the expiry-reminder task, which iterates every pending order in the installation. The re-read inside `transaction.atomic()` is a deliberate lock-and-recheck against a race, and the code says so, but the query count still scales with the pending-order table on a scheduled task."
+    },
+    {
+      "fingerprint": "6dac54ab44ea6af7",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/orders.py",
+      "line": 1530,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The same lock-and-recheck `Order.objects.select_for_update(...).get(pk=o.pk)` in the download-reminder task. Identical structure to the expiry-reminder finding, identical trade-off, separate call site."
+    },
+    {
+      "fingerprint": "3f375c9f95ba2125",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/orders.py",
+      "line": 2489,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "Gift-card locking re-read nested inside the cancel-operation branch of `OrderChangeManager`, so the cost multiplies across operations and their gift cards. Critical by nesting. The same `select_for_update` over the full set before the loop would serve it."
+    },
+    {
+      "fingerprint": "7f4b966a84230d81",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/orders.py",
+      "line": 2516,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The deepest finding in the whole corpus at depth 3: operations, then add-on positions, then issued gift cards, with a locking `get` at the innermost level. The cost is the product of three bounds. That the rule attributes it to the innermost loop and escalates it to critical is exactly the behaviour the depth handling is for."
+    },
+    {
+      "fingerprint": "78ed27f7c76acee5",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/orders.py",
+      "line": 2623,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "An `OrderPosition.objects.filter(...).exists()` reached inside the very long operation loop in `OrderChangeManager._perform_operations`, so it runs once per operation applied to the order. Correct, on a write path, and the surrounding loop is already the hottest part of order editing."
+    },
+    {
+      "fingerprint": "f8874fa363e298b5",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/tickets.py",
+      "line": 153,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`CachedCombinedTicket.objects.filter(...).last()` per order while generating combined tickets, one query per order in a batch job. The orders are known before the loop, so a single query grouped by order would answer all of them. Firm and correct."
+    },
+    {
+      "fingerprint": "7419b6063cdbf35a",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/tickets.py",
+      "line": 160,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The `CachedCombinedTicket.objects.get(...)` that follows the `.last()` in the same loop body, a second round trip per order. Two queries per order where the first could have returned the row. Separate finding because it is a separate call."
+    },
+    {
+      "fingerprint": "d5810a1aa382fdee",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/tickets.py",
+      "line": 176,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`CachedTicket.objects.filter(...).last()` nested one level deeper, inside the per-position loop of ticket generation, so the total is orders times positions. Escalated to critical by nesting, which is appropriate for a batch job that runs over whole events."
+    },
+    {
+      "fingerprint": "a110dc8e7883e3e4",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/tickets.py",
+      "line": 183,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The paired `CachedTicket.objects.get(...)` in the same nested loop, doubling the per-position cost. Same remediation as the `CachedCombinedTicket` pair one level up: one query can return the row that the `.last()` proved exists."
+    },
+    {
+      "fingerprint": "92ede25025fee11a",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/views/mixins.py",
+      "line": 140,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`AttendeeProfile.objects.filter(...).first()` per form in the questions-form mixin, so a cart with many positions costs one profile query per position on a page render. This is a presale request path, which makes it one of the more expensive findings in the corpus by request frequency."
+    },
+    {
+      "fingerprint": "460b22dd42980c52",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/views/mixins.py",
+      "line": 217,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`QuestionAnswer.objects.get(...)` nested inside the per-form, per-field loops of the same mixin, so the cost is positions times questions on every render of the questions step. Critical by nesting and genuinely so: this is the checkout page, not a batch job."
+    },
+    {
+      "fingerprint": "14795d541407f791",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/views/tasks.py",
+      "line": 261,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`CachedFile.objects.get(...)` nested in the async-task result handling. Bounded by the number of files a task produces, so the practical cost is small, but the nesting escalation is correct given the rule cannot know that bound."
+    },
+    {
+      "fingerprint": "9650596e97745b65",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/control/sysreport.py",
+      "line": 234,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`Order.objects.filter(...).aggregate(...)` inside the per-event loop of the system report, one aggregate per event. An installation with thousands of events pays thousands of round trips to produce one report. Nested, so critical. The whole block could be a single grouped aggregate."
+    },
+    {
+      "fingerprint": "e0f2c30b49f30dd6",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/control/sysreport.py",
+      "line": 240,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The second of four aggregates in the same system-report loop body. Each is a separate round trip per event, which is why they are four findings rather than one: fixing one does not fix the others, and the remediation is to replace all four with a single grouped query."
+    },
+    {
+      "fingerprint": "5fe1d219f9f95955",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/control/sysreport.py",
+      "line": 246,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The third `Order` aggregate in the system-report loop. Recorded individually so the benchmark reflects the true number of avoidable round trips per event, which is what a maintainer reading the report needs to see."
+    },
+    {
+      "fingerprint": "bd5a578c57b496fd",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/control/sysreport.py",
+      "line": 251,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The fourth aggregate in the same loop, this one over `Transaction` rather than `Order`. Different model, same per-event cost, and it is the reason the block cannot be collapsed into a single annotate without care -- two tables are involved. Correct and useful."
+    },
+    {
+      "fingerprint": "feb4b4687c5fa5b3",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/control/views/checkin.py",
+      "line": 265,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`Checkin.objects.filter(...).first()` per position in the check-in control view, so the page costs one query per row displayed. Classic list-view N+1 on an operator-facing page that is refreshed constantly during an event. Among the highest-value findings here."
+    },
+    {
+      "fingerprint": "96c34a2a714d305e",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/control/views/orders.py",
+      "line": 2079,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`Item.objects.get(...)` per row while processing an order-change form, one query per submitted position. The submitted item ids are all available before the loop, so a single `in_bulk` would serve the whole form. Correct, on a control-panel write path."
+    },
+    {
+      "fingerprint": "dd05dd99d2d791b6",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/control/views/orders.py",
+      "line": 2081,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The paired `ItemVariation.objects.get(...)` two lines below, a second query per submitted position. Same remediation and same form-processing path; reported separately because it is a distinct round trip against a distinct model."
+    },
+    {
+      "fingerprint": "93a824150340fb02",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/control/views/orders.py",
+      "line": 2135,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The same per-row `Item.objects.get(...)` in the second order-change form handler in this file. Duplicated logic, independently detected, which is the case where a static rule beats review."
+    },
+    {
+      "fingerprint": "1fef3daa2493755c",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/control/views/orders.py",
+      "line": 2137,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The matching `ItemVariation.objects.get(...)` in that second handler. Four findings across two handlers, all the same shape, all fixable by one `in_bulk` per model hoisted above each loop."
+    },
+    {
+      "fingerprint": "06e277e687befd7d",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/plugins/banktransfer/migrations/0009_banktransaction_currency.py",
+      "line": 17,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`Event.objects.get(...)` per row in the bank-transfer currency backfill migration. One query per transaction row on a table that is large in any installation that takes bank transfers. Demoted by the migrations scope, but this is the shape that makes an upgrade take hours."
+    },
+    {
+      "fingerprint": "c17592e5f55a57cb",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/plugins/banktransfer/migrations/0009_banktransaction_currency.py",
+      "line": 40,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The second per-row `Event.objects.get` in the same migration, in the reverse operation. Both directions have the same cost, which matters because the reverse is the one run under time pressure during a rollback."
+    },
+    {
+      "fingerprint": "71362698803b1549",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/plugins/sendmail/signals.py",
+      "line": 207,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`ScheduledMail.objects.filter(...).first()` per rule inside the sendmail plugin's signal handler, so the cost scales with configured scheduled mails on an event-save path. Correct; the ids involved are known before the loop."
+    },
+    {
+      "fingerprint": "974a5a1e6953693b",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/plugins/ticketoutputpdf/signals.py",
+      "line": 70,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`TicketLayoutItem.objects.get(...)` per item in the PDF-ticket plugin's layout resolution, one query per product when rendering. A single fetch keyed on item id would replace the loop. Firm, and on a path that runs whenever tickets are produced."
+    },
+    {
+      "fingerprint": "6e890661a5ee9687",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/pretix/presale/views/order.py",
+      "line": 369,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`GiftCard.objects.get(...)` per payment in the presale order view, so a customer-facing page issues one query per gift-card payment on the order. Small bound, but it is a public request path and the ids are already in hand."
+    },
+    {
+      "fingerprint": "61b45c3ad2544f67",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/tests/base/test_checkin.py",
+      "line": 831,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "`OrderPosition.objects.filter(...).exists()` asserted inside a loop in the check-in tests. True by mechanism, demoted by the tests scope, and cheap in practice because the loop runs over a short literal sequence against a test database."
+    },
+    {
+      "fingerprint": "c23f7f33d915e99e",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "src/tests/base/test_checkin.py",
+      "line": 834,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "The second existence assertion in the same test loop, three lines below the first. Two round trips per iteration. Recorded separately because they are two calls, which keeps the corpus count consistent with how the rule keys findings."
+    },
+    {
+      "fingerprint": "4b54da691ba4ae06",
+      "rule_id": "DJS-006",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/settings.py",
+      "line": 1,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "SECURE_SSL_REDIRECT is never assigned anywhere in src/pretix, so Django itself does not redirect plain HTTP. That is deliberate rather than an oversight: pretix expects TLS to be terminated in front of it, and the reference deployment in deployment/docker/nginx.conf listens on port 80 only and reverse-proxies to gunicorn over a unix socket, which means the Django process legitimately never sees a TLS connection to redirect from. The statement the rule makes is true and the redirect really is absent from this repository; where it happens is the operator's, not the developer's, decision. Recorded as accepted rather than a false positive for the same reason as the NetBox entries: whether the target chooses to handle something elsewhere says nothing about whether we were right to point at it."
+    },
+    {
+      "fingerprint": "6a0747bd68e402a5",
+      "rule_id": "DJS-007",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/settings.py",
+      "line": 1,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "SECURE_HSTS_SECONDS is never assigned, so Django sends no Strict-Transport-Security header. Same layering as DJS-006: pretix does not terminate TLS, and an HSTS header emitted by an application that is only ever reached over plaintext from its own reverse proxy would be both useless and, if the proxy ever forwarded it unchanged for a subdomain, actively harmful. The shipped nginx config does not set the header either, so a site following the reference deployment sends no HSTS at all -- which is a genuine gap, but one that belongs to the TLS terminator the operator supplies rather than to this codebase. Accepted rather than true_positive because there is no line in this repository whose change would fix it."
+    },
+    {
+      "fingerprint": "f51cad9a17a0f0d0",
+      "rule_id": "DJS-012",
+      "verdict": "accepted_risk",
+      "file": "src/pretix/settings.py",
+      "line": 242,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https') at settings.py:242 sits inside `if config.getboolean('pretix', 'trust_x_forwarded_proto', fallback=False):` at line 241, so it is off unless an operator opts in through a config file that is not part of this repository, and the option is named for exactly the trust it establishes. The rule's point stands regardless of the guard -- once enabled, any client that can reach gunicorn directly can assert HTTPS by sending the header, so the proxy must overwrite rather than append it -- which is why this is reported at low/tentative and stays out of a default run. Accepted: the risk is real, opt-in, and named."
+    },
+    {
+      "fingerprint": "cee9e042f437a195",
+      "rule_id": "DJS-013",
+      "verdict": "true_positive",
+      "file": "src/pretix/settings.py",
+      "line": 255,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "ALLOWED_HOSTS = ['*'] at settings.py:255 is unconditional. pretix needs to answer on organizer- and event-specific custom domains, so it cannot enumerate hosts ahead of time, and it resolves them itself in pretix.multidomain.middlewares.MultiDomainMiddleware. But that middleware does not reject an unrecognised host: on KnownDomain.DoesNotExist it sets mode='system' (middlewares.py:101-104) and serves the main site, so Django's host validation is disabled and nothing replaces it. deployment/docker/nginx.conf:89 forwards `Host $http_host` verbatim, so the header arrives unfiltered. That leaves the documented consequence intact -- absolute URLs, including password-reset links, are built from an attacker-supplied Host, and cache keys derived from it can be poisoned. Genuinely mitigable by pinning SITE_URL's host plus the KnownDomain set, so this is a real finding rather than an accepted trade-off."
+    },
+    {
+      "fingerprint": "1c36732ba3a42bfb",
+      "rule_id": "DJP-006",
+      "verdict": "true_positive",
+      "file": "src/pretix/control/views/item.py",
+      "line": 1683,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "ItemUpdate.get_context_data at control/views/item.py:1683 runs ctx['item'].bundled_with.count() > 0 to decide whether to show one advisory message. Read the surrounding code to confirm it: ctx['item'] comes from get_object(), which is a plain super().get_object(queryset) with no prefetch_related anywhere in the view, and bundled_with is the related_name of a ForeignKey on ItemBundle (base/models/items.py:1516), so the accessor is a real manager and the call is a real query. Django emits SELECT COUNT(*) with no bound where .exists() emits SELECT 1 ... LIMIT 1 -- both one query, but only one of them stops at the first row, which is measured by the EMPTINESS section of scripts/prefetch_cache_probe.py. Reported tentative rather than firm because the rule cannot type a subscript expression and so cannot rule out a prefetch it does not see; here there is none, and the fix is a one-word edit."
+    },
+    {
+      "fingerprint": "4feeb115a6b398fe",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1031,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "Event.copy_data_from() clones ItemMetaValue rows with the pk=None + force_insert idiom. The rule reads that pair correctly and suggests bulk_create rather than bulk_update, which is the distinction that matters: these are inserts, not updates. Measured at 20 rows, create-in-a-loop is 20 queries against 1. Copying an event with many items is exactly when this loop is longest, so the cost lands on the largest events."
+    },
+    {
+      "fingerprint": "dbc81b898f6ac6ba",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1037,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The ItemVariationMetaValue arm of Event.copy_data_from(), same pk=None + force_insert clone as the ItemMetaValue loop above it. Reported as bulk_create, correctly. The remediation is mechanical here because nothing in the loop body needs the new pk: the property and variation are both remapped from dictionaries built before the loop."
+    },
+    {
+      "fingerprint": "16f23f21b3c9a815",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1043,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The ItemAddOn arm of Event.copy_data_from(). Same clone idiom, correctly reported as bulk_create. The loop already carries prefetch_related('base_item', 'addon_category'), so the reads are handled and the per-row insert is the only remaining round trip."
+    },
+    {
+      "fingerprint": "3b97f2cc7db06801",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1051,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The ItemBundle arm of Event.copy_data_from(). Clone idiom again, bulk_create is right. A conditional remap of bundled_variation sits inside the loop, which changes nothing: the instances can still be collected and inserted in one statement afterwards."
+    },
+    {
+      "fingerprint": "7e1f95f726b2479c",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1057,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The ItemProgramTime arm of Event.copy_data_from(), guarded by a has_subevents check. Clone idiom, correctly reported as bulk_create. Nothing in the body needs the new pk, so collecting the instances and inserting them once is a direct substitution."
+    },
+    {
+      "fingerprint": "7ec6c897918c6203",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1087,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The Discount arm of Event.copy_data_from(). Correctly identified as an insert via pk=None + force_insert. Worth recording that the remediation is not free here: the loop calls d.log_action() straight after the save and then attaches three M2M sets, all of which need the new primary key. bulk_create does return pks on Postgres, so it remains possible, but this one needs restructuring rather than a one-line swap."
+    },
+    {
+      "fingerprint": "766d19372300e73c",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/checkin.py",
+      "line": 1212,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A periodic task advancing exit_all_at on every CheckinList due for an automatic exit. cl.save(update_fields=['exit_all_at']) in a loop over a queryset of CheckinLists, and CheckinList has no save() override, no save signal and no auto_now column. update_fields already names precisely the column bulk_update would be given, so the fix is to collect the lists and issue one bulk_update(lists, ['exit_all_at']) after the loop."
+    },
+    {
+      "fingerprint": "7144f84465676e62",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/export.py",
+      "line": 511,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The scheduled-export runner stamps schedule_next_run on every due ScheduledEventExport. True as read. The loop also dispatches a Celery task per row, so it is inherently per-row work, but the write is still one UPDATE per schedule and update_fields already names the column. Note the queryset holds select_for_update(skip_locked=True): the rows are locked for the transaction either way, so bulk_update does not widen the lock."
+    },
+    {
+      "fingerprint": "2338f700b0f7c426",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/services/export.py",
+      "line": 522,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "The ScheduledOrganizerExport half of the same runner, identical in shape to the event half above: apply_async per row, compute_next_run(), then a per-row save naming one column. Same verdict and same remediation -- collect and issue a single bulk_update."
+    },
+    {
+      "fingerprint": "420c66d045f4d258",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0071_auto_20170729_1616_squashed_0075_auto_20170828_0901.py",
+      "line": 61,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking pretixbase.InvoiceLine and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. This loop is also a read N+1: tax_rules.get() runs per line inside a try. The write is the part this rule owns."
+    },
+    {
+      "fingerprint": "70dc44e3c3c4df46",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0073_auto_20170716_1333.py",
+      "line": 56,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking pretixbase.InvoiceLine and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. The unsquashed twin of the 0071 loop, with the same per-row tax_rules lookup."
+    },
+    {
+      "fingerprint": "34dc0e456a7c71ff",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0097_auto_20180722_0804.py",
+      "line": 91,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A data migration cloning NotificationSetting rows onto a new action_type using pk=None followed by save(). The rule reads the pk=None assignment and suggests bulk_create rather than bulk_update, which is the correct call -- these rows are inserted, not updated. Historical models carry no overrides or signals, so the swap is equivalent."
+    },
+    {
+      "fingerprint": "7cdfff23863dad77",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0250_eventmetaproperty_filter_public.py",
+      "line": 15,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking pretixbase.EventMetaProperty and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. save(update_fields=['choices']) already names the one column bulk_update needs."
+    },
+    {
+      "fingerprint": "19bbbb5a8f795572",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0266_saleschannel_migrate_data.py",
+      "line": 60,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking pretixbase.Discount and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. The queryset uses .iterator(), which keeps memory flat while leaving the write count untouched -- so the remediation is bulk_update in batches, not one statement."
+    },
+    {
+      "fingerprint": "83ef066e5f4b89ce",
+      "rule_id": "DJP-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/plugins/ticketoutputpdf/migrations/0003_auto_20180710_1321.py",
+      "line": 16,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "A RunPython data migration walking ticketoutputpdf.TicketLayout and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. A plugin migration, reported the same way as the core ones."
+    },
+    {
+      "fingerprint": "1a7a22803e09b8cc",
+      "rule_id": "DJP-008",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0159_mails_by_sales_channel.py",
+      "line": 16,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-06",
+      "note": "A data migration that builds one Event_SettingsStore per Event, in a list comprehension over Event.objects.all() handed straight to bulk_create. The batch_size=1000 on the bulk_create is the tell: the author already knew the row count was large enough to need batching, but the comprehension is fully evaluated before bulk_create sees a single row, so every Event and every constructed settings row is resident at once and the batching only bounds the SQL. Measured over 20000 rows, holding them costs 11.0 MB against 1.2 MB streamed. Passing a generator expression instead of a list, with Event.objects.all().iterator(), lets bulk_create consume it in batches."
+    },
+    {
+      "fingerprint": "4f46a285fce9ea69",
+      "rule_id": "DJP-008",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0159_mails_by_sales_channel.py",
+      "line": 23,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-06",
+      "note": "The second bulk_create in the same migration, identical in shape to the first: a list comprehension over the whole Event table, evaluated in full before bulk_create begins. Same verdict and same remediation -- drop the brackets and stream the outer queryset with .iterator(), which lets the existing batch_size actually bound memory instead of only bounding statement size. Worth noting this migration is unusual in reaching Event by direct import rather than apps.get_model(), which is precisely why djaudit can name the model here and stays silent on most other data migrations."
+    },
+    {
+      "fingerprint": "ed2a84d5b0994009",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1392,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "api/serializers/order.py:1392. CartPosition.objects.filter(event=..., cart_id__in=..., expires__gt=...) selects no relations, and the body then follows five distinct foreign keys per row -- subevent here, plus variation, item, voucher and seat below. This is the cart-consumption path of order creation, so the row count is the size of the carts being consumed and every one of them costs five extra queries. select_related('subevent', 'variation', 'item', 'voucher', 'seat') would collapse all five into the original query."
+    },
+    {
+      "fingerprint": "b2a37849f0e76b5b",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1393,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "api/serializers/order.py:1393. cp.variation is read as the condition of a conditional expression and again as cp.variation.quotas, following the variation foreign key once per cart position on a queryset that selected no relations. Same loop and same fix as the subevent finding on the previous line: one select_related covering all five relations removes the whole cluster. Reported separately because each relation is an independent query the database runs."
+    },
+    {
+      "fingerprint": "2bcc64df77ecd485",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1393,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "api/serializers/order.py:1393. cp.item.quotas.filter(...) is the else arm of the same conditional, following the item foreign key per row. It is a true positive independently of the variation arm: whichever branch is taken, one of the two relations is fetched on every iteration, and neither is covered by the queryset. Note the .quotas.filter() beyond it is a further per-row query that DJP-002 declines to report because a filtered related manager cannot be served from a prefetch cache."
+    },
+    {
+      "fingerprint": "3754f6c72f7fc83e",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1398,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "api/serializers/order.py:1398. cp.voucher is read as a truth test and then twice more inside the branch, following the voucher foreign key once per cart position. Reading the column rather than the object -- if cp.voucher_id -- would answer the truth test for free, and the two uses inside the branch need the instance only as a dict key, so voucher_id would serve there too. Part of the same five-relation cluster; select_related is the single fix."
+    },
+    {
+      "fingerprint": "a2c7ae5fa2d4ee00",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1402,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "api/serializers/order.py:1402. cp.seat follows the seat foreign key per row, again as a truth test followed by two uses as a dict key. Identical shape to the voucher finding four lines above and identically fixable, either by select_related on the queryset or by testing cp.seat_id. The fifth and last of the relation follows in this loop."
+    },
+    {
+      "fingerprint": "4ba7791c013f4472",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 936,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "base/models/event.py:936. emv.property.name is a genuine read -- it is the argument to meta_properties.get(name=...) -- on rows from EventMetaValue.objects.filter(event=other), which selects no relations. One query per meta value to fetch the property, purely to read its name. Worth noting that the same loop assigns emv.property twice; those are stores and are correctly not reported, so this finding is the read discrimination working rather than a leak of the assignment case."
+    },
+    {
+      "fingerprint": "d113d3dd41d2a32c",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 994,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "base/models/event.py:994. if i.grant_membership_type and is_cross_organizer follows the grant_membership_type foreign key on every item being cloned, to learn only whether it is set. The surrounding lines make the case by themselves: this same body writes if i.category_id: and if i.tax_rule_id:, using the column exactly as this line should. Testing i.grant_membership_type_id is free because the column is already loaded, so this is one avoidable query per item in a clone of an entire event."
+    },
+    {
+      "fingerprint": "701dba29c4f7bcc5",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1030,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "base/models/event.py:1030. imv.item.pk fetches the whole Item row to read the primary key that is already present on imv as item_id. One query per item meta value during an event clone. The line directly above it is imv.property = item_meta_properties_map[imv.property_id], which reads the column form of the neighbouring relation, so the fix here is item_map[imv.item_id] and it is a single character short of what the file already does elsewhere."
+    },
+    {
+      "fingerprint": "b758e21aca188f82",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/shredder.py",
+      "line": 551,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "base/shredder.py:551. The queryset prefetches answers and answers__question but reaches the order relation, which filter(order__event=self.event) only joins against and never selects. op.order.code is then read twice per position, once for the file name and once for the dict key, costing one query per order position in a shred of an entire event. Adding order to a select_related alongside the existing prefetch_related is the fix; the prefetch already present shows the author was optimising this loop and missed one edge."
+    },
+    {
+      "fingerprint": "5a5bd58feddde9df",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0273_remove_checkinlist_auto_checkin_sales_channels.py",
+      "line": 12,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "migrations/0273_remove_checkinlist_auto_checkin_sales_channels.py:12. cl.event.organizer.sales_channels.all() reaches a multi-row relation, which the queryset's select_related('event', 'event__organizer') cannot cover -- select_related is join-based and stops at single-valued relations, so sales_channels needs prefetch_related('event__organizer__sales_channels'). The author clearly considered the traversal cost, having written select_related for the two single-valued hops, which makes this a precise illustration of the distinction the rule encodes. Impact is bounded because a data migration runs once, but the per-row query is real."
+    },
+    {
+      "fingerprint": "750d4e3fefac69a3",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0305_fixup_eventmetaproperties.py",
+      "line": 18,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "migrations/0305_fixup_eventmetaproperties.py:18. The queryset is filter(...).order_by(...) with no select_related, and the log line reads emv.event.organizer.slug, traversing two relations per row. Reported as event__organizer rather than as two separate findings because the chain is one path. Both this and the event.slug finding on the same line are avoidable with select_related('event__organizer'). A one-off repair migration, so the cost is paid once, but the traversal is exactly what the rule describes."
+    },
+    {
+      "fingerprint": "1a09fbcb7bf56799",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0305_fixup_eventmetaproperties.py",
+      "line": 18,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "migrations/0305_fixup_eventmetaproperties.py:18. emv.event.slug follows the event foreign key on each row of an unselected queryset. Distinct from the event__organizer finding on the same line in that it terminates one hop earlier; both are served by the same select_related('event__organizer'), which Django resolves as a single join covering event as well. Bounded impact for a data migration, correct as a detection."
+    },
+    {
+      "fingerprint": "f6be6d703acc65fa",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0305_fixup_eventmetaproperties.py",
+      "line": 19,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "migrations/0305_fixup_eventmetaproperties.py:19. emv.property.name follows the property foreign key per row for a log message, on a queryset that selected no relations. The same line also reads emv.property.id and emv.property.organizer.slug, so a single select_related('property__organizer') removes this finding and the one beside it. Correct detection; the run-once nature of a migration limits the damage but not the accuracy."
+    },
+    {
+      "fingerprint": "ca7bedfc60a23962",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0305_fixup_eventmetaproperties.py",
+      "line": 19,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "migrations/0305_fixup_eventmetaproperties.py:19. emv.property.organizer.slug traverses two relations per row in the same log call, and is reported as the property__organizer path. Together with the three other findings in this loop it makes eight extra queries per cross-organizer meta value, all removable by select_related('event__organizer', 'property__organizer'). A repair migration, so the total row count is small by construction, but the shape is a textbook N+1."
+    },
+    {
+      "fingerprint": "aaafec0c8873027e",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/cart.py",
+      "line": 53,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/cart.py:53. CartPositionViewSet exposes ordering on datetime, which is CartPosition's auto_now_add stamp and carries no index; the model indexes cart_id and other columns explicitly, so the omission is specific rather than a project that never indexes anything. Cart positions accumulate for every checkout attempt including abandoned ones, which on a busy shop is the highest-volume table in the schema, and the endpoint is reachable by any client holding an event token. Confirmed by reading the model: no db_index on the field and no Meta.indexes on the model at all."
+    },
+    {
+      "fingerprint": "e7a71ec2c9a1760b",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/checkin.py",
+      "line": 1234,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/checkin.py:1234. CheckinViewSet allows sorting by created and datetime, neither indexed, on a table with one row per ticket scan. The model's own Meta.ordering is ('-datetime',), so the unindexed sort is not merely permitted but is what every unparameterised list request already does -- the finding names the client-controllable surface, and the default is the same plan. Checkin has no Meta.indexes. For a large festival this is hundreds of thousands of rows sorted in full to return fifty."
+    },
+    {
+      "fingerprint": "6d0da09985cfb916",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/media.py",
+      "line": 71,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/media.py:71. ReusableMediaViewSet exposes ordering on created and type. Worth recording why type counts: the model declares unique_together = (('identifier','type','organizer'),), and a composite index serves its leading column only, so it answers a sort on identifier and does nothing for one on type. The only Meta.indexes entry leads with updated. Both reported columns are therefore genuinely unindexed, and created is the auto_now_add stamp that identifies the table as accumulating."
+    },
+    {
+      "fingerprint": "93cdab990cb1de77",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/order.py",
+      "line": 1959,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/order.py:1959. InvoiceViewSet allows sorting by date, declared as DateField(default=today) with no index, on a table that gains a row per invoice issued and never loses one for legal reasons. Invoice indexes six other columns with explicit db_index=True, so this is an oversight rather than a policy. Meta.ordering is ('date','invoice_no'), meaning the unindexed sort is also the default for every list request. unique_together leads with organizer and does not help."
+    },
+    {
+      "fingerprint": "f45705d58e226dfd",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/order.py",
+      "line": 2114,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/order.py:2114. RevokedSecretViewSet exposes ordering on created, an auto_now_add column with no index. The neighbouring secret field carries db_index=True, which is the same file demonstrating the idiom one line away. Revoked ticket secrets are append-only by definition -- the table exists to record that a secret must never be honoured again -- so it grows monotonically with ticket reissues and is exactly the case where an unindexed sort degrades over the life of a deployment."
+    },
+    {
+      "fingerprint": "2e7390d47143720b",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/voucher.py",
+      "line": 63,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/voucher.py:63. VoucherViewSet allows sorting by max_usages and value, neither indexed. Voucher carries created as auto_now_add, which is what identifies it as accumulating; the sortable columns themselves are a PositiveIntegerField and a DecimalField. The code column has db_index=True, so the model indexes what it looks up by and not what the API sorts by. Large organisers generate vouchers in bulk campaigns, so the row count tracks marketing activity rather than being bounded by configuration."
+    },
+    {
+      "fingerprint": "9c740b79c8737f12",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/waitinglist.py",
+      "line": 52,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/waitinglist.py:52. WaitingListViewSet exposes ordering on created and email, neither indexed, on a model with no Meta.indexes at all. created is auto_now_add. Meta.ordering is ('-priority','created','pk'), so the default list plan already sorts on an unindexed column and a client may additionally request email. Waiting lists accumulate for the lifetime of an event and are precisely the table that is small in staging and large for a sold-out show, which is the failure mode this rule exists to catch."
     }
   ]
 }

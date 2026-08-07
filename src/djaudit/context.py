@@ -12,6 +12,10 @@ from djaudit.models import Location
 
 if TYPE_CHECKING:
     from djaudit.api.discovery import ApiSurface
+    from djaudit.dataflow.chains import DefUse
+    from djaudit.dataflow.inventory import LoopSite
+    from djaudit.dataflow.querysets import QuerysetValue
+    from djaudit.dataflow.scopes import Scope
     from djaudit.graph.nodes import ModelGraph
 
 MAX_SNIPPET_LENGTH = 240
@@ -97,10 +101,15 @@ class ProjectContext:
     """Whether the target's virtualenv is available for live-tier rules."""
 
     _trees: dict[Path, ast.Module | None] = field(default_factory=dict, repr=False)
+    _source: dict[Path, str | None] = field(default_factory=dict, repr=False)
     _lines: dict[Path, list[str]] = field(default_factory=dict, repr=False)
     _model_graph: ModelGraph | None = field(default=None, repr=False)
     _api_surface: ApiSurface | None = field(default=None, repr=False)
+    _loops: tuple[LoopSite, ...] | None = field(default=None, repr=False)
     _modules: dict[str, Path] | None = field(default=None, repr=False)
+    _scopes: dict[Path, Scope | None] = field(default_factory=dict, repr=False)
+    _def_use: dict[int, DefUse] = field(default_factory=dict, repr=False)
+    _tracked: dict[int, dict[int, QuerysetValue]] = field(default_factory=dict, repr=False)
     parse_errors: dict[Path, str] = field(default_factory=dict, repr=False)
 
     @property
@@ -133,6 +142,71 @@ class ProjectContext:
 
             self._api_surface = build_api_surface(self, self.model_graph)
         return self._api_surface
+
+    @property
+    def loops(self) -> tuple[LoopSite, ...]:
+        """Every loop in the project, resolved once and shared by all `DJP` rules.
+
+        Lazy for the same reason the model graph is, and more so: a run that
+        asks only about settings never builds a def-use chain at all.
+        """
+        if self._loops is None:
+            from djaudit.dataflow.inventory import build_loop_inventory  # noqa: PLC0415
+
+            self._loops = build_loop_inventory(self)
+        return self._loops
+
+    def scopes(self, path: Path) -> Scope | None:
+        """The lexical scope tree for ``path``, built once per run.
+
+        Three separate consumers need it -- the loop inventory, `DJP-003` and
+        `DJP-005` -- and each was rebuilding it. The trees are read-only once
+        built, so one copy serves them all, and the cache keeps a
+        whole-repository run from paying for the same walk three times.
+        """
+        if path not in self._scopes:
+            from djaudit.dataflow.scopes import build_scopes  # noqa: PLC0415  (cycle)
+
+            tree = self.parse(path)
+            self._scopes[path] = build_scopes(tree) if tree is not None else None
+        return self._scopes[path]
+
+    def def_use(self, scope: Scope) -> DefUse:
+        """Def-use chains for one scope, built once per run.
+
+        Keyed on ``id(scope.node)``, which is stable because :meth:`parse` and
+        :meth:`scopes` both hold their results for the lifetime of the run, so
+        no tree an id refers to can be collected and its address reused.
+        """
+        key = id(scope.node)
+        if key not in self._def_use:
+            from djaudit.dataflow.chains import def_use  # noqa: PLC0415  (cycle)
+
+            self._def_use[key] = def_use(scope)
+        return self._def_use[key]
+
+    def tracked(self, path: Path, scope: Scope) -> dict[int, QuerysetValue]:
+        """Queryset-valued expressions in one scope, resolved once per run.
+
+        Four consumers wanted this for overlapping scopes -- the loop
+        inventory, `DJP-002`, `DJP-003` and `DJP-005` -- and each was
+        recomputing it. The answer depends only on the scope, the model graph
+        and the app label, and the latter two are fixed for a given path, so
+        one result serves them all.
+
+        Returned by reference rather than copied. Callers read the mapping and
+        none of them mutate it, and copying a dict per scope would give back
+        much of what the cache is here to save.
+        """
+        key = id(scope.node)
+        if key not in self._tracked:
+            from djaudit.dataflow.querysets import track  # noqa: PLC0415  (cycle)
+            from djaudit.graph.builder import app_label_for  # noqa: PLC0415  (cycle)
+
+            self._tracked[key] = track(
+                scope, self.def_use(scope), self.model_graph, app_label=app_label_for(path, self)
+            )
+        return self._tracked[key]
 
     def module_path(self, dotted: str) -> Path | None:
         """The file a dotted module name refers to, or ``None`` if it is not ours.
@@ -170,6 +244,23 @@ class ProjectContext:
         except ValueError:
             return path.as_posix()
 
+    def source(self, path: Path) -> str | None:
+        """File text, read once and shared by parsing, snippets and pre-checks.
+
+        Reading was previously done separately by :meth:`parse` and
+        :meth:`lines`, so any rule that needed both paid for two reads of every
+        file it touched. One cache also lets a caller ask a cheap textual
+        question -- "could this file contain a loop at all" -- without paying
+        for a parse to find out.
+        """
+        if path not in self._source:
+            try:
+                self._source[path] = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                self.parse_errors[path] = str(exc)
+                self._source[path] = None
+        return self._source[path]
+
     def parse(self, path: Path) -> ast.Module | None:
         """Parse a file, caching the tree. Returns ``None`` on syntax errors.
 
@@ -178,22 +269,21 @@ class ProjectContext:
         """
         if path in self._trees:
             return self._trees[path]
-        tree: ast.Module | None
-        try:
-            source = path.read_text(encoding="utf-8")
-            tree = ast.parse(source, filename=str(path))
-        except (SyntaxError, UnicodeDecodeError, OSError, ValueError) as exc:
-            self.parse_errors[path] = str(exc)
-            tree = None
+        tree: ast.Module | None = None
+        source = self.source(path)
+        if source is not None:
+            try:
+                tree = ast.parse(source, filename=str(path))
+            except (SyntaxError, ValueError) as exc:
+                self.parse_errors[path] = str(exc)
+                tree = None
         self._trees[path] = tree
         return tree
 
     def lines(self, path: Path) -> list[str]:
         if path not in self._lines:
-            try:
-                self._lines[path] = path.read_text(encoding="utf-8").splitlines()
-            except (OSError, UnicodeDecodeError):
-                self._lines[path] = []
+            source = self.source(path)
+            self._lines[path] = source.splitlines() if source is not None else []
         return self._lines[path]
 
     def snippet(self, path: Path, line: int, end_line: int | None = None) -> str:

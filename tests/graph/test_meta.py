@@ -416,3 +416,80 @@ class TestMetaInheritance:
 
     def test_a_model_without_meta_has_none(self, make_project) -> None:
         assert one(make_project, "").meta_bases == ()
+
+
+class TestIndexesDjangoCreatesWithoutBeingAsked:
+    """Three defaults that differ from the blanket one, all measured.
+
+    Building the tables for these fields emits `CREATE INDEX` for a plain
+    `ForeignKey`, a `OneToOneField` and a `SlugField`, and nothing for a
+    `ForeignKey(db_index=False)`. Reporting them as unindexed would make
+    `indexed_fields` accuse every foreign-key filter of a table scan.
+    """
+
+    def test_a_foreign_key_is_indexed_without_saying_so(self, make_project):
+        graph = project(
+            make_project,
+            """
+            from django.db import models
+
+            class Author(models.Model):
+                name = models.CharField(max_length=50)
+
+            class Book(models.Model):
+                author = models.ForeignKey(Author, on_delete=models.CASCADE)
+            """,
+        )
+        book = model(graph, "shop.Book")
+        assert book.all_fields["author"].db_index is True
+        assert "author" in book.indexed_fields
+
+    def test_an_opted_out_foreign_key_is_not_indexed(self, make_project):
+        graph = project(
+            make_project,
+            """
+            from django.db import models
+
+            class Author(models.Model):
+                name = models.CharField(max_length=50)
+
+            class Book(models.Model):
+                author = models.ForeignKey(
+                    Author, on_delete=models.CASCADE, db_index=False
+                )
+            """,
+        )
+        book = model(graph, "shop.Book")
+        assert book.all_fields["author"].db_index is False
+        assert "author" not in book.indexed_fields
+
+    def test_a_one_to_one_is_unique_without_saying_so(self, make_project):
+        graph = project(
+            make_project,
+            """
+            from django.db import models
+
+            class Author(models.Model):
+                name = models.CharField(max_length=50)
+
+            class Profile(models.Model):
+                author = models.OneToOneField(Author, on_delete=models.CASCADE)
+            """,
+        )
+        author = model(graph, "shop.Profile").all_fields["author"]
+        assert author.unique is True
+        assert author.db_index is True
+
+    def test_a_slug_is_indexed_and_a_char_is_not(self, make_project):
+        graph = project(
+            make_project,
+            """
+            from django.db import models
+
+            class Book(models.Model):
+                slug = models.SlugField()
+                title = models.CharField(max_length=50)
+            """,
+        )
+        book = model(graph, "shop.Book")
+        assert book.indexed_fields == {"slug"}

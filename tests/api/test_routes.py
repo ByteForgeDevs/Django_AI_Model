@@ -13,10 +13,26 @@ from another module and registered on from a dozen plugins.
 
 from __future__ import annotations
 
+import ast
+
 from djaudit.api import build_api_surface
 from djaudit.api.discovery import ApiSurface
-from djaudit.api.routes import DETAIL_MAPPING, LIST_MAPPING, Endpoint
+from djaudit.api.routes import (
+    DETAIL_MAPPING,
+    EMPTY_SCAN,
+    LIST_MAPPING,
+    Endpoint,
+    ModuleScan,
+    _register_calls,
+    build_route_graph,
+    endpoints_in,
+    registrations_in,
+    router_mappings,
+    router_variables,
+    scan_project,
+)
 from djaudit.graph.builder import build_model_graph
+from djaudit.graph.inheritance import ClassIndex
 
 DRF_VIEWS = """
 class APIView:
@@ -533,3 +549,132 @@ class TestSurface:
         found = surface(make_project, "", "")
         assert not found.routes.endpoints
         assert not found.routes.registrations
+
+
+class TestOneWalkPerModule:
+    """The route graph used to traverse each module's AST three times.
+
+    Router bindings, ``register()`` calls and urlconf entries were each read by
+    a separate ``ast.walk``, which on pretix came to 4.9 million walk steps and
+    roughly three quarters of the whole run. They share one scan now, and these
+    tests exist so that a later reader cannot quietly put a second pass back:
+    the saving is structural, so only a structural assertion protects it.
+    """
+
+    def test_the_readers_never_walk_the_tree(self, monkeypatch, make_project):
+        """Each reader consumes the shared scan rather than traversing again.
+
+        The patch is undone before asserting because pytest renders tracebacks
+        with ``ast.walk`` itself, so a counter that outlived the call would
+        report the failure by causing a different one.
+        """
+        ctx = make_project(
+            {
+                "rest_framework/__init__.py": "",
+                "rest_framework/serializers.py": "class ModelSerializer:\n    pass\n",
+                "rest_framework/views.py": DRF_VIEWS,
+                "rest_framework/generics.py": DRF_VIEWS,
+                "rest_framework/viewsets.py": DRF_VIEWSETS,
+                "rest_framework/mixins.py": DRF_MIXINS,
+                "rest_framework/decorators.py": DRF_DECORATORS,
+                "rest_framework/routers.py": DRF_ROUTERS,
+                "shop/__init__.py": "",
+                "shop/models.py": MODELS,
+                "shop/api.py": MODEL_VIEWSET,
+                "shop/urls.py": ROUTED,
+            }
+        )
+        found = build_api_surface(ctx, build_model_graph(ctx))
+        index = ClassIndex(ctx)
+        scans = scan_project(ctx)
+        urls = next(p for p in scans if p.name == "urls.py")
+        mappings = frozenset(router_mappings(index))
+
+        walks = 0
+        original = ast.walk
+
+        def counting(node):
+            nonlocal walks
+            walks += 1
+            return original(node)
+
+        monkeypatch.setattr(ast, "walk", counting)
+        routers = router_variables(scans, index, mappings)
+        registrations = list(registrations_in(scans[urls], urls, index, found, routers))
+        list(endpoints_in(scans[urls], urls, index, found))
+        monkeypatch.undo()
+
+        assert walks == 0, "a reader walked the tree instead of using the scan"
+        # Without this the test would pass on a project where nothing was
+        # found, which is the shape it is meant to protect.
+        assert routers, "no router was discovered, so the readers were never exercised"
+        assert [r.view for r in registrations] == ["shop.api.ProjectViewSet"]
+
+    def test_the_graph_is_built_from_one_scan_per_module(self, monkeypatch, make_project):
+        """``build_route_graph`` scans each module once and no more."""
+        ctx = make_project(
+            {
+                "rest_framework/__init__.py": "",
+                "rest_framework/serializers.py": "class ModelSerializer:\n    pass\n",
+                "rest_framework/views.py": DRF_VIEWS,
+                "rest_framework/generics.py": DRF_VIEWS,
+                "rest_framework/viewsets.py": DRF_VIEWSETS,
+                "rest_framework/mixins.py": DRF_MIXINS,
+                "rest_framework/decorators.py": DRF_DECORATORS,
+                "rest_framework/routers.py": DRF_ROUTERS,
+                "shop/__init__.py": "",
+                "shop/models.py": MODELS,
+                "shop/api.py": MODEL_VIEWSET,
+                "shop/urls.py": ROUTED,
+            }
+        )
+        found = build_api_surface(ctx, build_model_graph(ctx))
+
+        scanned: list[object] = []
+        original = ModuleScan.of
+
+        def counting(tree):
+            scanned.append(tree)
+            return original(tree)
+
+        monkeypatch.setattr(ModuleScan, "of", staticmethod(counting))
+        graph = build_route_graph(ctx, found, ClassIndex(ctx))
+
+        modules = [p for p in ctx.python_files if ctx.parse(p) is not None]
+        assert len(scanned) == len(modules)
+        assert len(scanned) == len({id(t) for t in scanned})
+        assert graph.registrations, "nothing was routed, so the count proves nothing"
+
+
+class TestModuleScan:
+    """What the shared scan collects, and what it deliberately does not."""
+
+    def test_it_keeps_assignments_that_call_something(self):
+        scan = ModuleScan.of(ast.parse("router = DefaultRouter()\nname = 'x'\n"))
+        assert len(scan.assigns) == 1
+        assert isinstance(scan.assigns[0].value, ast.Call)
+
+    def test_it_keeps_only_calls_that_could_be_a_route(self):
+        """A route and a registration both take at least two arguments."""
+        scan = ModuleScan.of(
+            ast.parse("path('x/', View.as_view())\nrouter.register('y', V)\nnoop()\n")
+        )
+        assert len(scan.calls) == 2
+
+    def test_a_registration_still_excludes_the_admin(self):
+        """The coarser bucket must not widen what a reader accepts.
+
+        ``admin.site.register(Model, ModelAdmin)`` has the arity of a router
+        registration and is not one; the string-prefix test is what separates
+        them, and it still runs on the scanned calls.
+        """
+        scan = ModuleScan.of(
+            ast.parse("admin.site.register(Project, ProjectAdmin)\nrouter.register('p', V)\n")
+        )
+        assert len(scan.calls) == 2
+        kept = [ast.unparse(c.args[0]) for c in _register_calls(scan)]
+        assert kept == ["'p'"]
+
+    def test_an_empty_module_scans_to_nothing(self):
+        scan = ModuleScan.of(ast.parse(""))
+        assert scan == EMPTY_SCAN

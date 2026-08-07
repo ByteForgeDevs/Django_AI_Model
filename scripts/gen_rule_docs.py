@@ -99,6 +99,53 @@ BLURBS: dict[Family, Blurb] = {
             "how many rows actually hold the value it is describing."
         ),
     ),
+    Family.DJI: Blurb(
+        heading="injection and untrusted input",
+        summary=(
+            "{count} rules on the boundary between text the project wrote and text the\n"
+            "client sent. Every one of them is about the same mistake in a different\n"
+            "costume: a value that should have travelled beside a command ends up inside\n"
+            "it, and something that was meant to be data is read as syntax."
+        ),
+        scope=(
+            "Every rule here is **static**, and each one reports *reach* rather than shape.\n"
+            "Composing a SQL string is not a defect — a table name cannot be a query\n"
+            "parameter, so interpolating one is sometimes the only way to write the query.\n"
+            "What these rules look for is a spliced value that can be traced back to\n"
+            "something Django filled from the request.\n"
+            "\n"
+            "That tracing is a three-valued analysis, and the third value is the point.\n"
+            "Besides *safe* and *tainted* there is *unknown*: a helper's own parameter\n"
+            "holds whatever its caller passed, and this analysis does not read callers.\n"
+            "Unknown is not reported. It is the most common shape of a real defect of this\n"
+            "kind and also the most common shape of perfectly correct code, and nothing in\n"
+            "one function's text distinguishes them — so a rule that reported it would be\n"
+            "reporting its own ignorance, once per helper."
+        ),
+    ),
+    Family.DJP: Blurb(
+        heading="performance and ORM efficiency",
+        summary=(
+            "{count} rules on the queries a Django project makes without meaning to. The ORM\n"
+            "makes the expensive thing and the cheap thing look identical: `book.author.name`\n"
+            "is an attribute access whether the author arrived with the book or costs its own\n"
+            "round trip, and the source gives no indication which. Every rule here reports a\n"
+            "*query count*, not a slow query -- a slow query shows up in monitoring with its\n"
+            "SQL attached, while a thousand fast ones show up as a view that got slower for\n"
+            "no visible reason."
+        ),
+        scope=(
+            "Every rule here is **static**, and each one needs two things to agree: the model\n"
+            "graph, to know that an attribute crosses a relation rather than reading a column\n"
+            "already in the row, and local dataflow, to know that the name being read is a row\n"
+            "of a queryset and which model that queryset holds. Where either is unavailable\n"
+            "the rule stays silent rather than guessing -- with the model graph emptied, this\n"
+            "family reports nothing at all on any of the three benchmark projects. The\n"
+            "analysis is confined to a single function, so a queryset built in one function\n"
+            "and iterated in another is not followed: what is reported here is a floor and\n"
+            "never a total."
+        ),
+    ),
 }
 
 HEADER = """<!--

@@ -1,0 +1,139 @@
+{
+  "description": "The injection recall fixture, and the whole recall story for the DJI family. Before it existed, all twelve rules had their recall measured only by their own unit tests and by mutation -- and a rule whose only evidence is its own test file has been checked against the author's idea of the defect rather than against the defect. Four of them, DJI-009 through DJI-012, report nothing on any of the three benchmark corpora by construction, because mature projects do not leave SSRF, open redirects, unescaped HTML or path traversal lying around. So for those four this project is the only positive evidence that exists. Twelve defects in shop/views.py, one per rule and no more, so a finding here names exactly which rule found it. Each one's sanitised near-miss lives in shop/controls.py, which the manifest forbids entirely rather than by line. The tainted value reaches the same sink in every control; what differs is that it arrives as a parameter, through an allowlist, or after a sanitiser. A rule that reports these has not detected injection, it has detected that request data and a dangerous call appear in the same function, which describes most of every Django project ever written. This fixture immediately earned its keep. DJI-006 reported its own control -- the SORTABLE.get(request.GET[...], default) mapping lookup, which is the idiom the documentation recommends. The rule knew only the two allowlist shapes the benchmark corpora happen to write, and since it reports nothing on any corpus, its precision had never been measured on real code at all: 'the corpus does not write it' was standing in for 'nobody writes it'. The mapping lookup is a strictly stronger guarantee than the membership test the rule already accepted, since it cannot produce an unlisted column, and it is now recognised. Both shapes are kept as controls here so neither can regress. Reachability is measured rather than assumed by scripts/fixture_controls_probe.py, which removes the guard from each control and requires the matching rule to then report it.",
+  "expected": [
+    {
+      "rule_id": "DJI-001",
+      "file": "shop/views.py",
+      "line": 36,
+      "severity": "critical",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJI-002",
+      "file": "shop/views.py",
+      "line": 44,
+      "severity": "critical",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJI-003",
+      "file": "shop/views.py",
+      "line": 51,
+      "severity": "critical",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJI-004",
+      "file": "shop/views.py",
+      "line": 58,
+      "severity": "critical",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJI-005",
+      "file": "shop/views.py",
+      "line": 64,
+      "severity": "high",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJI-006",
+      "file": "shop/views.py",
+      "line": 70,
+      "severity": "medium",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJI-007",
+      "file": "shop/views.py",
+      "line": 77,
+      "severity": "critical",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJI-008",
+      "file": "shop/views.py",
+      "line": 84,
+      "severity": "critical",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJI-009",
+      "file": "shop/views.py",
+      "line": 90,
+      "severity": "high",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJI-010",
+      "file": "shop/views.py",
+      "line": 96,
+      "severity": "medium",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJI-011",
+      "file": "shop/views.py",
+      "line": 101,
+      "severity": "high",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJI-012",
+      "file": "shop/views.py",
+      "line": 110,
+      "severity": "high",
+      "confidence": "certain"
+    }
+  ],
+  "must_not_report": [
+    {
+      "rule_id": "DJI-001",
+      "file": "shop/controls.py"
+    },
+    {
+      "rule_id": "DJI-002",
+      "file": "shop/controls.py"
+    },
+    {
+      "rule_id": "DJI-003",
+      "file": "shop/controls.py"
+    },
+    {
+      "rule_id": "DJI-004",
+      "file": "shop/controls.py"
+    },
+    {
+      "rule_id": "DJI-005",
+      "file": "shop/controls.py"
+    },
+    {
+      "rule_id": "DJI-006",
+      "file": "shop/controls.py"
+    },
+    {
+      "rule_id": "DJI-007",
+      "file": "shop/controls.py"
+    },
+    {
+      "rule_id": "DJI-008",
+      "file": "shop/controls.py"
+    },
+    {
+      "rule_id": "DJI-009",
+      "file": "shop/controls.py"
+    },
+    {
+      "rule_id": "DJI-010",
+      "file": "shop/controls.py"
+    },
+    {
+      "rule_id": "DJI-011",
+      "file": "shop/controls.py"
+    },
+    {
+      "rule_id": "DJI-012",
+      "file": "shop/controls.py"
+    }
+  ]
+}
