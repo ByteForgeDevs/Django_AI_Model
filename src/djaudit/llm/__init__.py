@@ -41,8 +41,19 @@ from djaudit.llm.provider import (
     SchemaViolationError,
     Usage,
 )
+from djaudit.llm.triage import (
+    CORPUS_PRIOR,
+    MINIMUM_OBSERVATIONS,
+    Judgement,
+    Source,
+    TriageRun,
+    askable_rules,
+    triage,
+)
 
 __all__ = [
+    "CORPUS_PRIOR",
+    "MINIMUM_OBSERVATIONS",
     "TRIAGE_SCHEMA",
     "Answer",
     "Budget",
@@ -52,6 +63,7 @@ __all__ = [
     "Declined",
     "Field",
     "FieldKind",
+    "Judgement",
     "LLMConfig",
     "Metered",
     "NullProvider",
@@ -63,9 +75,12 @@ __all__ = [
     "ReviewedFinding",
     "SchemaViolationError",
     "Score",
+    "Source",
+    "TriageRun",
     "Triager",
     "Usage",
     "Verdict",
+    "askable_rules",
     "baselines",
     "build_triage_prompt",
     "contested_rules",
@@ -75,5 +90,6 @@ __all__ = [
     "redact",
     "render_finding",
     "score",
+    "triage",
     "worth_asking",
 ]

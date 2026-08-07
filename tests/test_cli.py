@@ -1,6 +1,7 @@
 """CLI contract: exit codes and output routing are what CI depends on."""
 
 import json
+import shutil
 from dataclasses import replace
 
 import pytest
@@ -365,3 +366,63 @@ class TestJobSummary:
         out = tmp_path / "nested" / "deeper" / "summary.md"
         runner.invoke(app, ["eval", str(vulnerable_project), "--summary", str(out)])
         assert out.is_file()
+
+
+class TestTriageCommand:
+    """The command must be useful with no model, and honest that it had none."""
+
+    def test_it_ranks_the_orm_fixture_without_a_model(self, orm_project):
+        result = runner.invoke(app, ["triage", str(orm_project)])
+
+        assert result.exit_code == EXIT_OK
+        assert "no model was consulted" in result.output
+
+    def test_settled_rules_are_labelled_as_borrowed(self, orm_project):
+        result = runner.invoke(app, ["triage", str(orm_project)])
+
+        # DJP-001 ships in the corpus prior, so it must be judged without a
+        # call and marked as coming from the corpus rather than from a model.
+        assert "corpus" in result.output
+        assert "true_positive" in result.output
+
+    def test_unsettled_findings_are_undecided_rather_than_dismissed(self, orm_project):
+        """The failure that would matter.
+
+        With no model, a finding the corpus cannot settle must surface as
+        undecided. Rendering it as an accepted risk would be the tool quietly
+        telling someone to ignore a defect nobody looked at.
+        """
+        result = runner.invoke(app, ["triage", str(orm_project)])
+
+        assert "abstained" in result.output
+        assert "unavailable" in result.output
+        assert "0 judged acceptable" in result.output
+
+    def test_no_llm_overrides_a_config_that_enables_one(self, tmp_path, orm_project):
+        project = tmp_path / "proj"
+        shutil.copytree(orm_project, project)
+        project.joinpath("pyproject.toml").write_text(
+            '[tool.djaudit.llm]\nenabled = true\nprovider = "openai"\napi_key_env = "NOPE_KEY"\n'
+        )
+
+        result = runner.invoke(app, ["triage", str(project), "--no-llm"])
+
+        assert result.exit_code == EXIT_OK
+        assert "no model was consulted" in result.output
+
+    def test_a_missing_path_is_a_tool_error(self, tmp_path):
+        result = runner.invoke(app, ["triage", str(tmp_path / "nope")])
+        assert result.exit_code == EXIT_ERROR
+
+    def test_it_refuses_an_incomplete_run(self, tmp_path):
+        root = tmp_path / "proj"
+        (root / "conf").mkdir(parents=True)
+        (root / "manage.py").write_text("import os\n")
+        (root / "conf" / "settings.py").write_text(
+            "from configurations import Configuration\n\n"
+            "class Base(Configuration):\n    SECRET_KEY = 'x'\n    DEBUG = True\n"
+        )
+
+        result = runner.invoke(app, ["triage", str(root)])
+
+        assert result.exit_code == EXIT_ERROR

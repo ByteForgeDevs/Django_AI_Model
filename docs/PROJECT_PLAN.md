@@ -5588,7 +5588,60 @@ remove from them, and `6.5.3` asserts that by trying.
   nothing to add should be able to say so rather than guess.
 
   Measured: 15 mutations, **15 caught** by 39 tests.
-- **6.2.2** — `djaudit triage`: rank findings by exploitability in this codebase's context.
+- **6.2.2** — **`djaudit triage`: rank findings by whether they are worth a
+  reviewer's time, and spend a call only where the answer is in doubt.**
+  `src/djaudit/llm/triage.py`, `scripts/gen_triage_prior.py`, a CI gate, and the
+  `triage` command. **Done.**
+
+  **This substep corrects `6.1.5`.** That measurement found 22 of 29 rules
+  unanimous and concluded a model need only be asked about the other seven.
+  Building the runtime path made the 22 look thinner than they read: most were
+  unanimous across **one or two** findings. "Every reviewer who saw this agreed"
+  and "the one reviewer who saw it once agreed with himself" are the same
+  sentence when n is 1, and only one of them is evidence.
+
+  So the threshold was measured. Fitting the prior on two targets and applying
+  it to the third:
+
+  | minimum n | findings covered | agreement | downgrades | calls saved |
+  |---|---|---|---|---|
+  | 1 | 120 | 94.2% | **4** | 49.0% |
+  | 2 | 110 | 99.1% | **1** | 44.9% |
+  | 3 | 96 | 99.0% | **1** | 39.2% |
+  | **5** | **94** | **100.0%** | **0** | **38.4%** |
+  | 8 | 86 | 100.0% | 0 | 35.1% |
+  | 10 | 77 | 100.0% | 0 | 31.4% |
+
+  Five is the knee: the smallest floor that makes no mistakes on a codebase it
+  was not fitted on. Dropping to one buys eleven more points of savings and pays
+  with four downgrades — four real defects the table would have waved through on
+  its own authority, without anyone asking anything. That is the error this
+  layer exists to prevent and it is not for sale at eleven percent.
+
+  The shipped prior is therefore **five rules covering 109 reviewed findings**,
+  not twenty-two, and triage asks about 136 of the 245 rather than 110. On
+  pretix: 131 findings, 67 settled without a call, 64 undecided.
+
+  **Provenance is in every row.** A verdict borrowed from three other codebases
+  renders as `corpus` and carries the count it rests on; one produced by reading
+  this code renders as `model`. A run that asked and got nothing says *"no model
+  was consulted"* in as many words, because a table of verdicts looks equally
+  authoritative either way. A declined call becomes `abstained`, never
+  `accepted_risk` — the offline default must not quietly tell anyone to ignore a
+  defect nobody examined.
+
+  `scripts/gen_triage_prior.py --check` runs in CI so retriaging a finding
+  cannot leave a stale table suppressing questions, and it is shown failing on
+  exactly that defect.
+
+  Measured: 22 mutations, **22 caught** by 40 tests. The first round reported
+  1 of 22 — the harness copied the tree but the editable install pointed
+  `djaudit` back at the original `src`, so every mutant ran against unmutated
+  source. It now proves the copy is the code under test before believing any
+  verdict. Two genuine survivors followed: the ranking tests named their
+  fixtures `"c"` and `"m"`, which sort into the expected answer alphabetically,
+  so zeroing severity outright still passed; and nothing exercised the new
+  gate's failure path at all.
 - **6.2.3** — False-positive suggestion — proposes suppressions, never applies them.
 - **6.2.4** — Grouping of related findings into a single reviewable theme.
 

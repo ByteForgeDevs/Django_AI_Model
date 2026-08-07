@@ -25,6 +25,15 @@ from rich.table import Table
 
 from djaudit import __version__, engine
 from djaudit.baseline import Baseline, BaselineError
+from djaudit.llm import config as llm_config
+from djaudit.llm.budget import Budget, Metered
+from djaudit.llm.cache import Cache, Cached
+from djaudit.llm.evaluate import Verdict
+from djaudit.llm.provider import NullProvider, Provider
+
+# Imported by name rather than as a module: `djaudit.llm` re-exports a `triage`
+# function, which shadows the submodule of the same name.
+from djaudit.llm.triage import TriageRun, triage
 from djaudit.models import Confidence, Family, Severity
 from djaudit.registry import all_rules
 from djaudit.reporters import OutputFormat, json_reporter, sarif, terminal
@@ -282,6 +291,127 @@ def evaluate_command(
     if not report.passed:
         raise typer.Exit(EXIT_FINDINGS)
     console.print("[green]evaluation passed[/green]")
+
+
+@app.command(name="triage")
+def triage_command(
+    path: Annotated[
+        Path,
+        typer.Argument(help="Path to the Django project to audit."),
+    ] = Path(),
+    min_severity: Annotated[
+        Severity,
+        typer.Option("--min-severity", help="Hide findings below this severity."),
+    ] = Severity.LOW,
+    min_confidence: Annotated[
+        Confidence,
+        typer.Option("--min-confidence", help="Hide findings below this confidence."),
+    ] = Confidence.FIRM,
+    enable_llm: Annotated[
+        bool | None,
+        typer.Option(
+            "--llm/--no-llm",
+            help="Consult a configured model on findings the corpus does not settle. "
+            "Off unless both this and [tool.djaudit.llm] enable it.",
+        ),
+    ] = None,
+) -> None:
+    """Rank findings by whether they are worth a reviewer's time.
+
+    Findings under a rule that three real Django projects judged unanimously are
+    settled from that record. Everything else is put to a model if one is
+    configured, and reported as undecided if not -- which is the default, and a
+    useful answer: it is the shortlist of findings that actually need a human.
+    """
+    if not path.is_dir():
+        _fail(f"path is not a directory: {path}")
+
+    result = engine.run(path, min_severity=min_severity, min_confidence=min_confidence)
+
+    try:
+        config = llm_config.resolve(path / "pyproject.toml", enable=enable_llm)
+    except llm_config.ConfigError as exc:
+        _fail(str(exc))
+        return
+
+    provider = _build_provider(config)
+    run = triage(result.findings, provider)
+    _print_triage(Console(), run, provider_name=provider.name)
+
+    if any(d.blocking for d in result.context.diagnostics):
+        Console(stderr=True).print(
+            "[bold red]error:[/bold red] analysis was incomplete; "
+            "this ranking does not cover the whole project"
+        )
+        raise typer.Exit(EXIT_ERROR)
+    raise typer.Exit(EXIT_OK)
+
+
+def _build_provider(config: llm_config.LLMConfig) -> Provider:
+    """Assemble the provider stack, which is a null one unless told otherwise.
+
+    The cache goes outermost so a repeat question never reaches the meter at
+    all -- `Metered` also refuses to charge for a cached answer, but not
+    consulting the budget is cheaper than consulting it and forgiving it, and
+    it leaves the cache able to tag each entry with its finding's fingerprint.
+
+    There is no branch here that reaches a third party. No such provider is
+    implemented, and this returns a declining one saying so, because a stack
+    that silently does nothing is indistinguishable from one that is broken.
+    """
+    allowed, reason = config.usable
+    if not allowed:
+        return NullProvider(reason)
+    unimplemented = NullProvider(f"provider {config.provider!r} is not implemented yet")
+    metered = Metered(
+        inner=unimplemented,
+        budget=Budget(max_tokens=config.max_tokens, max_calls=config.max_calls),
+    )
+    return Cached(inner=metered, cache=Cache(directory=config.cache_dir))
+
+
+def _print_triage(console: Console, run: TriageRun, *, provider_name: str) -> None:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("verdict")
+    table.add_column("source")
+    table.add_column("rule")
+    table.add_column("severity")
+    table.add_column("location")
+
+    styles = {
+        Verdict.TRUE_POSITIVE: "bold red",
+        Verdict.ABSTAINED: "yellow",
+        Verdict.ACCEPTED_RISK: "dim",
+    }
+    for judgement in run.ranked:
+        finding = judgement.finding
+        table.add_row(
+            f"[{styles[judgement.verdict]}]{judgement.verdict.value}[/]",
+            judgement.source.value,
+            finding.rule_id,
+            finding.severity.value,
+            f"{finding.location.file}:{finding.location.line}",
+        )
+    console.print(table)
+
+    console.print(
+        f"{len(run.judgements)} findings · "
+        f"{run.counting(Verdict.TRUE_POSITIVE)} worth fixing · "
+        f"{run.counting(Verdict.ACCEPTED_RISK)} judged acceptable · "
+        f"{run.counting(Verdict.ABSTAINED)} undecided"
+    )
+    console.print(
+        f"{run.skipped} settled from the recorded corpus, "
+        f"{run.asked} put to [bold]{provider_name}[/bold], "
+        f"{run.declined} unanswered"
+    )
+    if not run.consulted_a_model:
+        # Said plainly, because a table of verdicts looks equally authoritative
+        # either way and the undecided rows are the ones a human still owns.
+        console.print(
+            "[yellow]no model was consulted[/yellow]: every undecided finding above is "
+            "one this corpus cannot settle, and needs a person."
+        )
 
 
 @app.command()

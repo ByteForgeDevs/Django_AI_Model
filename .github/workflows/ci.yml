@@ -69,6 +69,13 @@ jobs:
       - name: triage baselines still discriminate
         run: uv run python scripts/triage_baselines.py
 
+      # The shipped prior lets djaudit skip asking about five rules on the
+      # authority of verdicts recorded here. Retriaging a finding must not
+      # leave that table behind: a stale entry keeps suppressing a question
+      # using evidence that has since changed its mind.
+      - name: triage prior matches the recorded verdicts
+        run: uv run python scripts/gen_triage_prior.py --check
+
       # The rule reference is generated from the registry, so an edit to a
       # rule's grade or wording that never reaches the page turns published
       # security documentation into a description of a tool we no longer ship.
