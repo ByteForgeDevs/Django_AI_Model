@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJI` — injection and untrusted input
 
-2 rules on the boundary between text the project wrote and text the
+3 rules on the boundary between text the project wrote and text the
 client sent. Every one of them is about the same mistake in a different
 costume: a value that should have travelled beside a command ends up inside
 it, and something that was meant to be data is read as syntax.
@@ -52,6 +52,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 |---|---|---|---|
 | [`DJI-001`](#dji-001--request-data-interpolated-into-a-sql-statement) | Request data interpolated into a SQL statement | critical | firm |
 | [`DJI-002`](#dji-002--request-data-interpolated-into-a-raw-query) | Request data interpolated into a .raw() query | critical | firm |
+| [`DJI-003`](#dji-003--request-data-interpolated-into-a-extra-clause) | Request data interpolated into a .extra() clause | critical | firm |
 
 ---
 
@@ -94,5 +95,27 @@ $ djaudit run . --min-severity info --min-confidence tentative
 **References**
 
 - <https://docs.djangoproject.com/en/stable/topics/db/sql/#passing-parameters-into-raw>
+- <https://owasp.org/www-community/attacks/SQL_Injection>
+- <https://cwe.mitre.org/data/definitions/89.html>
+
+---
+
+### DJI-003 — Request data interpolated into a .extra() clause
+
+**Severity** critical · **Confidence** firm · **Tier** static
+
+**What it means.** QuerySet.extra() splices its select, where, tables and order_by arguments into the generated SQL as written. A value built into one of them is syntax by the time the driver sees it, so a quote in client input ends the literal the author intended. The params and select_params arguments exist to carry values and are sent separately, where nothing in them can change what the statement means.
+
+**How to fix it.** Put a placeholder in the clause and the value in params: extra(where=['title = %s'], params=[value]). Django's documentation advises against extra() altogether -- filter(), annotate() and Func/Value expressions cover almost every use and are parameterised by construction, so replacing the call outright is usually the better fix.
+
+**What this rule cannot see.**
+
+- Taint is tracked within one function. A value that reaches the clause through a helper's parameter is reported as unknown rather than tainted, so an injection assembled across two functions is not seen.
+- The receiver must be an expression the model graph recognises as a queryset, so an extra() call on a manager reached through an unresolved import, or on a queryset returned by an unrecognised helper, is skipped.
+- No call to extra() appears in any of the three benchmark corpora, so this rule's precision is measured against fixtures alone and not against the real-world code the other rules in this family were tuned on.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#extra>
 - <https://owasp.org/www-community/attacks/SQL_Injection>
 - <https://cwe.mitre.org/data/definitions/89.html>

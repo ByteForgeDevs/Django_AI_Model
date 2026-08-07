@@ -59,6 +59,14 @@ class Candidate:
     argument: ast.expr
     """The expression in the statement position, composed or not."""
 
+    slot: str | None = None
+    """Which SQL-bearing argument this came from, where a call has several.
+
+    ``.extra()`` takes SQL in ``select``, ``where``, ``tables`` and
+    ``order_by`` at once, and a reader given only the line number would have to
+    work out which of them the finding is about.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class Composed:
@@ -68,6 +76,7 @@ class Composed:
     receiver: ast.expr | None
     surface: str
     spliced: Interpolation
+    slot: str | None = None
     through: str | None = None
     """The local the statement was built into, where it was not built in place.
 
@@ -157,12 +166,15 @@ class SqlSurface(Rule):
     method or callable names the surface is written with.
     """
 
-    def candidate(self, node: ast.AST) -> Candidate | None:
-        """The statement-passing call this node is, if it is one.
+    def candidates(self, node: ast.AST) -> Iterator[Candidate]:
+        """The SQL-bearing arguments of this call, if it has any.
 
-        Deliberately says nothing about how the statement was built, because it
-        is called once per node of every admitted file as a prefilter, long
-        before there are def-use chains to answer that with.
+        Deliberately says nothing about how each was built, because it is
+        called once per node of every admitted file as a prefilter, long before
+        there are def-use chains to answer that with.
+
+        Plural because one call can hand over several statements: ``.extra()``
+        takes SQL in four different arguments, and each is its own finding.
         """
         raise NotImplementedError
 
@@ -181,7 +193,7 @@ class SqlSurface(Rule):
         """
         spliced = interpolation(found.argument)
         if spliced is not None:
-            return Composed(found.call, found.receiver, found.surface, spliced)
+            return Composed(found.call, found.receiver, found.surface, spliced, found.slot)
         if not isinstance(found.argument, ast.Name) or chains is None:
             return None
         use = chains.of(found.argument)
@@ -195,7 +207,12 @@ class SqlSurface(Rule):
         if not built:
             return None
         return Composed(
-            found.call, found.receiver, found.surface, built[0], through=found.argument.id
+            found.call,
+            found.receiver,
+            found.surface,
+            built[0],
+            slot=found.slot,
+            through=found.argument.id,
         )
 
     def accepts(self, found: Composed, frame: Frame) -> bool:
@@ -208,6 +225,18 @@ class SqlSurface(Rule):
         """
         return True
 
+    def admits(self, tree: ast.AST) -> bool:
+        """Whether this file holds any call worth building a scope tree for.
+
+        Written as a loop rather than ``any(self.candidates(node) ...)``
+        because a generator object is always truthy, and that spelling would
+        admit every file while looking like it filtered.
+        """
+        for node in ast.walk(tree):
+            for _ in self.candidates(node):
+                return True
+        return False
+
     def check(self, ctx: ProjectContext) -> Iterator[Finding]:
         for path in ctx.python_files:
             source = ctx.source(path)
@@ -216,7 +245,7 @@ class SqlSurface(Rule):
             tree = ctx.parse(path)
             if tree is None:
                 continue
-            if not any(self.candidate(node) for node in ast.walk(tree)):
+            if not self.admits(tree):
                 continue
             root = ctx.scopes(path)
             if root is None:
@@ -234,21 +263,19 @@ class SqlSurface(Rule):
     def sites(self, frame: Frame) -> Iterator[Site]:
         """Composed statements in this scope whose parts reach the request."""
         for node in own_calls(frame.scope):
-            candidate = self.candidate(node)
-            if candidate is None:
-                continue
-            found = self.compose(candidate, frame.chains)
-            if found is None or not self.accepts(found, frame):
-                continue
-            tainted = tuple(
-                part
-                for part, taint in tainted_parts(
-                    found.spliced.node, found.spliced.parts, frame.chains
+            for candidate in self.candidates(node):
+                found = self.compose(candidate, frame.chains)
+                if found is None or not self.accepts(found, frame):
+                    continue
+                tainted = tuple(
+                    part
+                    for part, taint in tainted_parts(
+                        found.spliced.node, found.spliced.parts, frame.chains
+                    )
+                    if taint is Taint.TAINTED
                 )
-                if taint is Taint.TAINTED
-            )
-            if tainted:
-                yield Site(found, tainted)
+                if tainted:
+                    yield Site(found, tainted)
 
     def report(self, ctx: ProjectContext, path: Path, site: Site) -> Finding:
         """Turn one site into a finding, in the rule's own words."""

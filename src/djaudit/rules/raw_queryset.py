@@ -27,6 +27,7 @@ declines ``cursor.raw``, ``response.raw`` and a bare parameter, structurally.
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 from djaudit.models import (
@@ -157,8 +158,10 @@ class RawQuerysetInterpolation(SqlSurface):
         ),
     )
 
-    def candidate(self, node: ast.AST) -> Candidate | None:
-        return statement_call(node)
+    def candidates(self, node: ast.AST) -> Iterator[Candidate]:
+        found = statement_call(node)
+        if found is not None:
+            yield found
 
     def accepts(self, found: Composed, frame: Frame) -> bool:
         """The receiver must be something the tracker calls a queryset.

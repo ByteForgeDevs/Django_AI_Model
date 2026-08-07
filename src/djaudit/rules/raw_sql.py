@@ -33,6 +33,7 @@ cursors would look identical from the outside.
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 from djaudit.models import (
@@ -198,8 +199,10 @@ class RawSqlInterpolation(SqlSurface):
     from being built for the other 3,086.
     """
 
-    def candidate(self, node: ast.AST) -> Candidate | None:
-        return statement_call(node)
+    def candidates(self, node: ast.AST) -> Iterator[Candidate]:
+        found = statement_call(node)
+        if found is not None:
+            yield found
 
     def accepts(self, found: Composed, frame: Frame) -> bool:
         """``.execute`` is a method on plenty of things that are not cursors."""

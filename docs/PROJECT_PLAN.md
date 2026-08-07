@@ -4075,7 +4075,79 @@ We therefore build the dataflow foundation first, and we default this family to
   *Done when:* 54/57 injection with the three survivors explained, 31 tests,
   the receiver table measured, and the corpus silence shown to be taint's.
 
-- **3.4.3** — `DJI-003` `.extra()` with untrusted input.
+- **3.4.3** — `DJI-003` `.extra()` with untrusted input. **DONE.**
+
+  `.extra()` is Django's oldest and widest raw-SQL door: it takes SQL in four
+  of its six arguments at once — `select`, `where`, `tables`, `order_by` — and
+  the two that are not SQL, `params` and `select_params`, are the fix sitting
+  next to the defect. `extra(where=["title = '%s'" % request.GET["q"]])` is the
+  textbook Django injection.
+
+  **The one number that shapes this rule: `.extra(` appears in 0 of the 3,091
+  files across all three benchmark corpora.** Not rare — absent. So this rule
+  can never have corpus evidence, and its diagnostic says so in full: 0 files
+  contain the word, 0 admitted, 0 SQL slots, 0 reported, on each of
+  healthchecks, NetBox and pretix. Its fixtures are the whole of its evidence,
+  which is recorded as a limitation on the rule itself rather than left for a
+  reader to infer. It is still worth shipping, because the codebases that
+  still call `.extra()` are exactly the old ones nobody has audited.
+
+  **The signature was read, not remembered.** An earlier draft listed a
+  `having` argument. `inspect.signature(QuerySet.extra)` on Django 6.0.7 has no
+  such parameter and has not for years; it was removed from four places. Two
+  minutes of reading beat a confident memory — lesson 13 applied to our own
+  framework rather than someone else's library.
+
+  **Four SQL slots in one call made the shared base grow a dimension.**
+  `candidate()` became `candidates()`, returning an iterator, with a `slot`
+  field naming which argument each came from, so `extra(where=[...],
+  select={...})` is two findings that each name their own clause. `elements()`
+  unwraps the container — dict values (the keys are aliases, not SQL), list,
+  tuple and set elements — because composition happens per element, and that is
+  where a reader needs pointing.
+
+  **A generator object is always truthy.** The file-level second stage was
+  nearly written `any(self.candidates(node) for node in ast.walk(tree))`, which
+  would have admitted every file while looking exactly like a filter. It is an
+  explicit loop with a docstring saying why.
+
+  **The rule's tests found a bug in shared machinery instead.**
+  `extra(where=[f"...{term}"])` resolved to `unknown` while the byte-identical
+  shape in a positional argument resolved to `tainted`. Cause: `ast.keyword` is
+  not an `ast.expr`, and both the def-use engine and the scope builder filtered
+  their generic child walk on `isinstance(child, ast.expr)`, stepping over
+  every keyword argument whole. Fixed in commit `f0cb2c5`, separately, because
+  it is shared machinery: 35,694 name reads gained def-use chains (2.0% / 7.5%
+  / 6.6% of all reads) and 670 lambdas and comprehensions gained scope objects
+  that had none. Corpus findings were unchanged by both halves — measured on
+  all three benchmarks, not assumed — so the value is entirely in what the next
+  rule can see. Cost, interleaved A/B on pretix: +0.42s on ~19.3s against a
+  base spread of 1.21s.
+
+  **The mutation probe found dead code I had written myself.** `admits()` was
+  built as an explicit loop precisely to avoid the truthy-generator trap — and
+  then `check()` grew its own inline spelling of the same filter, leaving the
+  careful version unreachable. The tell was a mutant that made `admits()`
+  return `False` for every file and *survived*: a change that should have
+  silenced every finding in the family changed nothing, because nothing called
+  it. Behaviour was correct throughout; the guard with the docstring explaining
+  the subtlety was protecting nothing. `check()` now calls `admits()`.
+
+  Three further survivors were missing tests, each a shape nobody writes until
+  someone does: seven positional arguments walking off the end of `POSITIONS`
+  (an `IndexError` in a rule is swallowed into `rule_errors`, silently
+  disabling it for the whole file); a `where=` keyword on a method that is not
+  `extra`, which no fixture had because every fixture reaching that check was
+  already an `.extra()` call; and a message that hardcoded the word `where`,
+  invisible while every message test used the `where` clause. The remaining
+  four survivors all *widen* a prefilter and so cannot change output, a
+  direction already asserted by a test that runs the rule with both prefilter
+  stages disabled.
+
+  *Done when:* 24 tests covering all six arguments, 69/73 injection with four
+  survivors explained, and the corpus silence shown to be the surface's absence
+  rather than the rule's.
+
 - **3.4.4** — `DJI-004` `RawSQL` or `Func` with an interpolated template.
 - **3.4.5** — `DJI-005` queryset kwargs expanded from request data (`filter(**request.GET)`).
 - **3.4.6** — `DJI-006` `order_by` driven by a request parameter with no allowlist.
@@ -4454,9 +4526,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **57 rules are
+document specifies, and most of it is still only specified: **58 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first ten of Phase 3's and the first of its injection family.
+2, plus the first ten of Phase 3's and the first three of its injection family.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against
