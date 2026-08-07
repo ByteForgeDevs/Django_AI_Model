@@ -308,6 +308,183 @@ class TestTheAllowlistGuard:
         assert len(found) == 1
 
 
+class TestTheMappingLookupGuard:
+    """The idiom the docs recommend, which the rule shipped without.
+
+    It was missed for a defensible-sounding reason and a bad one: the two
+    shapes above are the only ones the three benchmark corpora use. But this
+    rule reports nothing on any of those corpora, so "the corpus does not
+    write it" was standing in for "nobody writes it". The injection fixture
+    wrote it and the rule called it a defect.
+    """
+
+    def test_a_get_through_a_module_dict(self, make_project):
+        assert (
+            findings(
+                make_project,
+                """
+                from library.models import Book
+
+                SORTABLE = {"title": "title", "newest": "-id"}
+
+                def listing(request):
+                    column = SORTABLE.get(request.GET.get("sort"), "title")
+                    return Book.objects.order_by(column)
+                """,
+            )
+            == []
+        )
+
+    def test_a_subscript_through_a_module_dict(self, make_project):
+        """Silent, but not because of this guard -- and that distinction cost a branch.
+
+        `from_owned_container` shipped with a branch for `SORTABLE[key]`. It
+        never ran. A subscript takes its taint from its base, the base is a
+        dict this module wrote, so the value never arrives tainted and the
+        guard is never consulted. The branch was removed: one that cannot run
+        is worse than a missing one, because it advertises a guarantee it does
+        not provide, and the test that "covered" it passed on a fallback.
+        """
+        assert (
+            findings(
+                make_project,
+                """
+                from library.models import Book
+
+                SORTABLE = {"title": "title", "newest": "-id"}
+
+                def listing(request):
+                    return Book.objects.order_by(SORTABLE[request.GET["sort"]])
+                """,
+            )
+            == []
+        )
+
+    def test_only_get_reads_the_container_safely(self, make_project):
+        """`setdefault` and `pop` read the same owned dict and are still defects.
+
+        Both take the caller's own string as the fallback and hand it straight
+        back when the key is absent, so the dict constrains nothing. Restricting
+        the guard to `get` is what separates them, and without this the
+        restriction is untested -- the mutant that widened it to any method
+        survived the whole suite.
+        """
+        for method in ("setdefault", "pop"):
+            assert (
+                len(
+                    findings(
+                        make_project,
+                        f"""
+                        from library.models import Book
+
+                        SORTABLE = {{"title": "title"}}
+
+                        def listing(request):
+                            chosen = SORTABLE.{method}(request.GET["sort"], request.GET["sort"])
+                            return Book.objects.order_by(chosen)
+                        """,
+                    )
+                )
+                == 1
+            ), method
+
+    def test_the_lookup_may_be_written_inline(self, make_project):
+        """No intermediate name, so nothing for def-use to resolve."""
+        assert (
+            findings(
+                make_project,
+                """
+                from library.models import Book
+
+                SORTABLE = {"title": "title"}
+
+                def listing(request):
+                    return Book.objects.order_by(SORTABLE.get(request.GET["sort"], "title"))
+                """,
+            )
+            == []
+        )
+
+    def test_a_local_container_counts_too(self, make_project):
+        """The allowlist is usually a module constant, but need not be."""
+        assert (
+            findings(
+                make_project,
+                """
+                from library.models import Book
+
+                def listing(request):
+                    sortable = {"title": "title", "newest": "-id"}
+                    return Book.objects.order_by(sortable.get(request.GET["sort"], "title"))
+                """,
+            )
+            == []
+        )
+
+    def test_a_get_on_the_query_dict_is_not_an_allowlist(self, make_project):
+        """The hole this guard has to avoid falling into.
+
+        `params.get("sort")` is a `Name.get(...)` exactly like the allowlist
+        is. What separates them is what the name resolves to: a dict the module
+        wrote, or an attribute of the request. Checking the shape rather than
+        the binding would excuse every request read that was assigned to a
+        local first.
+        """
+        assert (
+            len(
+                findings(
+                    make_project,
+                    """
+                from library.models import Book
+
+                def listing(request):
+                    params = request.GET
+                    return Book.objects.order_by(params.get("sort", "title"))
+                """,
+                )
+            )
+            == 1
+        )
+
+    def test_a_lookup_through_something_unresolvable_is_not_an_allowlist(self, make_project):
+        """An imported name has no display for the rule to read."""
+        assert (
+            len(
+                findings(
+                    make_project,
+                    """
+                from library.models import Book
+                from library.constants import SORTABLE
+
+                def listing(request):
+                    return Book.objects.order_by(SORTABLE.get(request.GET["sort"], "title"))
+                """,
+                )
+            )
+            == 1
+        )
+
+    def test_a_local_rebinding_wins_over_the_module_constant(self, make_project):
+        """The name the reader sees is the nearest one bound."""
+        assert (
+            len(
+                findings(
+                    make_project,
+                    """
+                from library.models import Book
+
+                SORTABLE = {"title": "title"}
+
+                def listing(request):
+                    SORTABLE = request.GET
+                    return Book.objects.order_by(SORTABLE.get("sort", "title"))
+                """,
+                )
+            )
+            == 1
+        )
+
+
 class TestWhatItDeclines:
     def test_a_literal_ordering(self, make_project):
         assert (

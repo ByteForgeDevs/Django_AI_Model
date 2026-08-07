@@ -23,11 +23,16 @@ from djaudit import engine
 from djaudit.models import Confidence, Severity
 
 ROOT = Path(__file__).resolve().parent.parent
-FIXTURE = ROOT / "tests/fixtures/orm_project"
-CONTROLS = FIXTURE / "inventory/controls.py"
-VIEWS = FIXTURE / "inventory/views.py"
+ORM = ROOT / "tests/fixtures/orm_project"
+CONTROLS = ORM / "inventory/controls.py"
+VIEWS = ORM / "inventory/views.py"
 
-UNFIXES: tuple[tuple[str, str, Path, str, str], ...] = (
+INJECTION = ROOT / "tests/fixtures/injection_project"
+ICONTROLS = INJECTION / "shop/controls.py"
+
+Unfix = tuple[str, str, Path, str, str]
+
+ORM_UNFIXES: tuple[Unfix, ...] = (
     (
         "DJP-001",
         "drop select_related from the fetched loop",
@@ -118,53 +123,172 @@ UNFIXES: tuple[tuple[str, str, Path, str, str], ...] = (
     ),
 )
 
+INJECTION_UNFIXES: tuple[Unfix, ...] = (
+    (
+        "DJI-001",
+        "interpolate the term instead of passing it as a parameter",
+        ICONTROLS,
+        '        cursor.execute("SELECT id, name FROM shop_product WHERE name LIKE %s", '
+        '[f"%{term}%"])',
+        "        cursor.execute(f\"SELECT id, name FROM shop_product WHERE name LIKE '%{term}%'\")",
+    ),
+    (
+        "DJI-002",
+        "interpolate the sku into the raw query",
+        ICONTROLS,
+        "    found = Product.objects.raw(\n"
+        '        "SELECT * FROM shop_product WHERE sku = %s", [request.GET["sku"]]\n'
+        "    )",
+        "    found = Product.objects.raw(\n"
+        '        "SELECT * FROM shop_product WHERE sku = \'%s\'" % request.GET["sku"]\n'
+        "    )",
+    ),
+    (
+        "DJI-003",
+        "drop extra()'s params and build the clause by hand",
+        ICONTROLS,
+        "    found = Product.objects.extra(\n"
+        '        where=["price > %s"], params=[request.GET["min_price"]]\n'
+        "    )",
+        '    found = Product.objects.extra(where=["price > " + request.GET["min_price"]])',
+    ),
+    (
+        "DJI-004",
+        "interpolate the weight into the RawSQL text",
+        ICONTROLS,
+        "    found = Product.objects.annotate(\n"
+        '        rank=RawSQL("price * %s", (request.GET["weight"],))\n'
+        "    )",
+        "    found = Product.objects.annotate(\n"
+        "        rank=RawSQL(f\"price * {request.GET['weight']}\", ())\n"
+        "    )",
+    ),
+    (
+        "DJI-005",
+        "expand the query string instead of choosing the lookups",
+        ICONTROLS,
+        "    found = Product.objects.filter(**criteria)",
+        "    found = Product.objects.filter(**request.GET.dict())",
+    ),
+    (
+        "DJI-006",
+        "order by the parameter instead of the mapping's value",
+        ICONTROLS,
+        '    column = SORTABLE.get(request.GET.get("sort", "name"), "name")',
+        '    column = request.GET.get("sort", "name")',
+    ),
+    (
+        "DJI-006",
+        "drop the membership test from the checked ordering",
+        ICONTROLS,
+        '    column = request.GET.get("sort", "name")\n'
+        "    if column not in SORTABLE:\n"
+        '        column = "name"',
+        '    column = request.GET.get("sort", "name")',
+    ),
+    (
+        "DJI-007",
+        "deserialise with a loader that executes",
+        ICONTROLS,
+        '    cart = json.loads(request.POST["cart"])',
+        '    cart = pickle.loads(bytes.fromhex(request.POST["cart"]))',
+    ),
+    (
+        "DJI-008",
+        "hand the command to a shell as one string",
+        ICONTROLS,
+        "    subprocess.run(\n"
+        '        ["convert", f"/srv/shop/media/{name}", "-resize", "100x100", "/tmp/out.png"],\n'
+        "        check=True,\n"
+        "    )",
+        "    subprocess.run(\n"
+        '        f"convert /srv/shop/media/{name} -resize 100x100 /tmp/out.png", shell=True\n'
+        "    )",
+    ),
+    (
+        "DJI-009",
+        "let the request choose the host rather than the query",
+        ICONTROLS,
+        "    answer = requests.get("
+        "f\"{FEED_HOST}/feeds?{urlencode({'id': request.GET['feed']})}\", timeout=5)",
+        '    answer = requests.get(request.GET["feed"], timeout=5)',
+    ),
+    (
+        "DJI-010",
+        "redirect without the host check",
+        ICONTROLS,
+        "    if url_has_allowed_host_and_scheme(target, allowed_hosts={request.get_host()}):\n"
+        "        return redirect(target)\n"
+        '    return redirect("/")',
+        "    return redirect(target)",
+    ),
+    (
+        "DJI-011",
+        "mark the unescaped label as trusted HTML",
+        ICONTROLS,
+        '    return HttpResponse(format_html("<b>{}</b> {}", request.GET["label"], label))',
+        "    return HttpResponse(mark_safe(f\"<b>{request.GET['label']}</b> {label}\"))",
+    ),
+    (
+        "DJI-012",
+        "open the path directly instead of through storage",
+        ICONTROLS,
+        '    with default_storage.open(request.GET["file"]) as handle:',
+        '    with open(os.path.join("/srv/shop/media", request.GET["file"])) as handle:',
+    ),
+)
 
-def findings() -> list[tuple[str, str, int]]:
+FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...]], ...] = (
+    ("orm_project", ORM, ORM_UNFIXES),
+    ("injection_project", INJECTION, INJECTION_UNFIXES),
+)
+
+
+def findings(fixture: Path) -> list[tuple[str, str, int]]:
     """Every finding as (rule, file, line). Re-read from disk on each call."""
-    result = engine.run(FIXTURE, min_severity=Severity.INFO, min_confidence=Confidence.TENTATIVE)
+    result = engine.run(fixture, min_severity=Severity.INFO, min_confidence=Confidence.TENTATIVE)
     if result.rule_errors:
         raise SystemExit(f"rules crashed: {result.rule_errors}")
     return [(f.rule_id, f.location.file, f.location.line) for f in result.findings]
 
 
-def main() -> int:
-    baseline = findings()
+def probe(name: str, fixture: Path, unfixes: tuple[Unfix, ...]) -> list[str]:
+    """Un-fix every control in one fixture. Returns the failures."""
+    baseline = findings(fixture)
     base_keys = set(baseline)
     leaked = [f for f in baseline if "controls.py" in f[1]]
     assert not leaked, leaked
-    print(f"baseline: {len(baseline)} findings, none of them in controls.py")
+    print(f"{name}: {len(baseline)} findings, none of them in controls.py")
 
     failures: list[str] = []
     reached: list[tuple[str, str, int]] = []
-    for rule_id, label, path, old, new in UNFIXES:
+    for rule_id, label, path, old, new in unfixes:
         original = path.read_text()
         if original.count(old) != 1:
             failures.append(f"UNAPPLIED {rule_id}: {label} -- anchor matched {original.count(old)}")
             continue
         path.write_text(original.replace(old, new, 1))
         try:
-            after = findings()
+            after = findings(fixture)
         finally:
             path.write_text(original)
-        new_keys = set(after) - base_keys
-        gained = sorted(k for k in new_keys if k[0] == rule_id)
+        gained = sorted(k for k in set(after) - base_keys if k[0] == rule_id)
         if gained:
             reached.extend(gained)
             where = ", ".join(f"{k[1]}:{k[2]}" for k in gained)
             print(f"  REACHED {rule_id:8} {label:56} -> {where}")
         else:
-            others = sorted({k[0] for k in new_keys})
+            others = sorted({k[0] for k in set(after) - base_keys})
             failures.append(f"UNREACHED {rule_id}: {label} -- gained {others or 'nothing'} instead")
 
     # Second job: every line-numbered control in the manifest must still point
     # at the line the un-fix proved the rule speaks on.
-    manifest = json.loads((FIXTURE / "expected.json").read_text())
+    manifest = json.loads((fixture / "expected.json").read_text())
     pinned = {
         (e["rule_id"], e["file"]): e["line"]
         for e in manifest["must_not_report"]
         if e.get("line") is not None
     }
-    print()
     for rule_id, file, line in sorted(reached):
         if file.endswith("controls.py"):
             continue
@@ -182,11 +306,20 @@ def main() -> int:
                 f"UNPROVEN {rule_id}: manifest forbids {file}:{line}, "
                 "which no un-fix showed the rule reaching"
             )
-
+    print(f"  {len(unfixes) - len(failures)} of {len(unfixes)} controls proven load-bearing")
     print()
+    return failures
+
+
+def main() -> int:
+    failures: list[str] = []
+    total = 0
+    for name, fixture, unfixes in FIXTURES:
+        total += len(unfixes)
+        failures.extend(probe(name, fixture, unfixes))
     for failure in failures:
         print(failure)
-    print(f"{len(UNFIXES) - len(failures)} of {len(UNFIXES)} controls proven load-bearing")
+    print(f"{total - len(failures)} of {total} controls proven load-bearing across all fixtures")
     return 1 if failures else 0
 
 

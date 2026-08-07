@@ -116,6 +116,86 @@ def arguments(node: ast.AST) -> Iterator[Ordering]:
         yield Ordering(call=node, argument=inner, starred=starred)
 
 
+CONTAINERS = (ast.Dict, ast.Set, ast.List, ast.Tuple)
+"""Displays whose contents the project wrote, element by element.
+
+A name bound to one of these cannot yield a value the module does not contain,
+which is what makes a lookup through it a stronger guarantee than the
+membership test below -- that one does not examine what the branch then does,
+while this one cannot produce an unlisted column at all.
+"""
+
+
+def _bound_values(name: str, scope: Scope | None) -> Iterator[ast.expr]:
+    """Every value bound to ``name``, looking outward through enclosing scopes.
+
+    The allowlist is nearly always a module constant read inside a view, so the
+    walk has to leave the function to find it. It stops at the first scope that
+    binds the name, because a local rebinding is what the reader sees.
+    """
+    while scope is not None:
+        bindings = scope.own_all(name)
+        if bindings:
+            for binding in bindings:
+                if binding.value is not None:
+                    yield binding.value
+            return
+        scope = scope.parent
+
+
+def _lookups(value: ast.expr, chains: DefUse | None) -> Iterator[ast.expr]:
+    """``value`` itself, and anything a name it stands for was defined as."""
+    yield value
+    if isinstance(value, ast.Name) and chains is not None:
+        for binding in chains.reaching(value):
+            if binding.value is not None:
+                yield binding.value
+
+
+def from_owned_container(value: ast.expr, scope: Scope, chains: DefUse | None) -> bool:
+    """Whether the ordering value came *out of* a container the project wrote.
+
+    This is the idiom Django documentation and DRF both push towards::
+
+        SORTABLE = {"name": "name", "newest": "-id"}
+        column = SORTABLE.get(request.GET.get("sort"), "name")
+        products.order_by(column)
+
+    The caller still chooses the sort, so a rule keyed on "the request
+    influences ``order_by``" reports it -- but nothing the caller sends can
+    produce a column that is not in the dict, which is a stronger guarantee
+    than the membership test this rule shipped with.
+
+    It is checked by resolving the *holder* to a display, not by trusting the
+    shape. ``params = request.GET`` followed by ``params.get("sort")`` is a
+    ``Name.get(...)`` too, and it is not an allowlist -- ``params`` resolves to
+    an attribute of ``request`` rather than to a dict the module wrote, so it
+    is correctly refused.
+
+    Only ``get`` qualifies. ``SORTABLE.setdefault(key, key)`` and
+    ``SORTABLE.pop(key, key)`` read the same owned dict but can hand back the
+    caller's own string, and both stay reported.
+
+    ``SORTABLE[key]`` needs no branch here, and one written for it was measured
+    to be unreachable: a subscript takes its taint from its base, the base is a
+    container this module wrote, so the value never arrives tainted and this
+    function is never asked. A branch that cannot run is worse than a missing
+    one, because it advertises a guarantee it never provides.
+    """
+    for candidate in _lookups(value, chains):
+        if not (
+            isinstance(candidate, ast.Call)
+            and isinstance(candidate.func, ast.Attribute)
+            and candidate.func.attr == "get"
+            and isinstance(candidate.func.value, ast.Name)
+        ):
+            continue
+        holder = candidate.func.value.id
+        if any(isinstance(v, CONTAINERS) for v in _bound_values(holder, scope)):
+            return True
+    return False
+
+
 def allowlisted(value: ast.expr, scope: Scope, chains: DefUse | None) -> bool:
     """Whether this scope tests the ordering value for membership of a set.
 
@@ -136,7 +216,13 @@ def allowlisted(value: ast.expr, scope: Scope, chains: DefUse | None) -> bool:
     request or substitutes a default, and a rule that guessed wrong would call
     correct defensive code a vulnerability -- the failure this rule exists to
     avoid.
+
+    A value that came out of a container the module wrote is accepted before
+    any of this, by :func:`from_owned_container`, which is a stronger guarantee
+    than the membership test and does not need a branch to examine.
     """
+    if from_owned_container(value, scope, chains):
+        return True
     names, parameters = identity(value, chains)
     if not names and not parameters:
         return False

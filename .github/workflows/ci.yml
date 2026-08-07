@@ -126,11 +126,13 @@ jobs:
             --summary "$GITHUB_STEP_SUMMARY"
           uv run djaudit eval tests/fixtures/orm_project \
             --summary "$GITHUB_STEP_SUMMARY"
+          uv run djaudit eval tests/fixtures/injection_project \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       # The manifest above proves the controls are silent. It cannot prove they
       # are reachable, and a control the rule never looks at is silent for the
       # wrong reason -- which is how a fixture comes to certify a broken rule.
-      - name: prove the ORM fixture's controls are load-bearing
+      - name: prove the recall fixtures' controls are load-bearing
         run: uv run python scripts/fixture_controls_probe.py
 
   false_positives:

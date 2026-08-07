@@ -48,6 +48,11 @@ def orm_project() -> Path:
     return FIXTURES / "orm_project"
 
 
+@pytest.fixture
+def injection_project() -> Path:
+    return FIXTURES / "injection_project"
+
+
 def make_finding(
     rule_id: str = "DJS-001",
     file: str = "app/views.py",

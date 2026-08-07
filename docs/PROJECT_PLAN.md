@@ -4828,6 +4828,81 @@ We therefore build the dataflow foundation first, and we default this family to
   tests carrying the reasoning the manifest cannot express, the control probe
   green in CI, and the probe shown failing on a misaimed control line.
 - **3.6.2** — Injection fixture project including sanitised near-misses.
+
+  **What the DJI family's recall rested on before this.** All twelve rules had
+  positive evidence from exactly two sources: their own unit tests, and
+  mutation. Fixture coverage was measured first and was **zero** — no fixture
+  project contained a single injection defect. That is a weaker position than
+  it sounds, because a rule whose only positive evidence is its own test file
+  has been checked against the author's idea of the defect rather than against
+  the defect, and both sources were written by the same hand in the same hour.
+  The benchmarks cannot help: the whole family reports nothing on all three
+  corpora, correctly, and for `DJI-009` through `DJI-012` — SSRF, open
+  redirect, unescaped HTML, path traversal — it is nothing by construction,
+  because mature projects do not leave those lying around.
+
+  **`tests/fixtures/injection_project`** is a small shop app: twelve defects in
+  `shop/views.py`, one per rule and no more, so a finding names which rule
+  found it; and for each, its sanitised near-miss in `shop/controls.py`, which
+  the manifest forbids as a whole file. Every control reaches the same sink
+  with the same request value. What differs is that it arrives as a bound
+  parameter, through an allowlist, or after a sanitiser — so a rule that
+  reports one of them has not detected injection, it has detected that request
+  data and a dangerous call share a function, which describes most of every
+  Django project ever written.
+
+  **The fixture found a false positive before it was finished.** `DJI-006`
+  reported its own control: `SORTABLE.get(request.GET["sort"], "name")`, the
+  mapping lookup the documentation recommends. Measured before touching the
+  rule: across the three benchmarks there are **388 `order_by` calls** and
+  **75 `MAPPING.get(x, default)` reads**, and not one site writes the two
+  together — so the rule had learned only the two allowlist shapes the corpora
+  happen to write. **Lesson 70: "the corpus does not write it" is not "nobody
+  writes it."** `DJI-006` reports nothing on any corpus, so its precision had
+  never been measured on real code at all; corpus silence was standing in for
+  evidence. The lookup is a *stronger* guarantee than the membership test the
+  rule already accepted, because it cannot produce an unlisted column, and it
+  is now accepted — resolved through the scope chain to a display the module
+  wrote, not matched on syntax, so `params = request.GET` followed by
+  `params.get("sort")` is still reported. Both allowlist shapes are kept as
+  controls so neither can regress.
+
+  **Then the mutation probe contradicted a number this plan had been
+  carrying.** The DJI probe was recorded at 311 of 311 caught. Re-run at 324
+  defects it caught 285, and the 39 survivors included mutants that had been
+  recorded as caught — one removed `DJI-012`'s restriction that a filesystem
+  verb be held by `os` or `shutil`, and its 29 tests still passed. **Lesson 71:
+  a mutation score carried in prose is not a measurement.** It is a claim about
+  a probe, a rule and a test suite at one instant, and all three move. The
+  probe is now re-run rather than cited. Most survivors are the uninteresting
+  widening class (lesson 45) — file prefilters and `admits()`, which change
+  runtime and not findings — but the `DJI-012` walk survivors are a real gap
+  and are booked as **3.6.6** rather than quietly folded in here.
+
+  **Two of the new guard's own mutants were equivalent, and one branch of it
+  was dead.** A mutant restating a `None` test and one widening the holder to
+  an expression carrying no `id` both resolved to the same behaviour. More
+  usefully, instrumenting the guard showed its `SORTABLE[key]` branch **never
+  executed**: a subscript takes its taint from its base, the base is a dict the
+  module wrote, so the value never arrives tainted and the guard is never
+  asked. The test covering that shape had been passing on a fallback (lesson
+  59). The branch was deleted — **an unreachable branch is worse than a missing
+  one, because it advertises a guarantee it never provides** — and the test now
+  records the real reason. The same instrumentation proved the `get`
+  restriction *is* load-bearing: `SORTABLE.setdefault(key, key)` and
+  `SORTABLE.pop(key, key)` read the same owned dict but hand the caller's own
+  string back, and both stay reported.
+
+  `scripts/fixture_controls_probe.py` now covers both recall fixtures, removing
+  the guard from each control and requiring the matching rule to then report
+  it. Two injection anchors were stale on the first run — written before `ruff
+  format` reflowed the file (lesson 41) — which is exactly what the probe's
+  `UNAPPLIED` state exists to catch.
+
+  *Done when:* 12 expectations and 12 controls at 100% precision and recall, 7
+  tests carrying the reasoning the manifest cannot express, all 24 controls
+  across both fixtures proven load-bearing, and the `DJI-006` guard's mutants
+  at zero non-equivalent survivors.
 - **3.6.3** — Performance profiling: dataflow analysis must not push a NetBox-scale run beyond 10 seconds. **Done.**
 
   **Entering position, re-measured at the start of Phase 3:** Healthchecks
@@ -4952,6 +5027,18 @@ We therefore build the dataflow foundation first, and we default this family to
   the real post-dataflow figure is known.
 - **3.6.4** — Triage pass; publish the N+1 false-positive rate honestly, including in the README.
 - **3.6.5** — `docs/rules/DJP.md` and `docs/rules/DJI.md`, plus a dataflow design note stating the analysis limits explicitly.
+- **3.6.6** — Close the `DJI` mutation gaps 3.6.2 exposed. The re-run measured
+  39 survivors of 324. Most are the widening class and stay documented rather
+  than killed: a mutant that makes a file prefilter or `admits()` admit more
+  code cannot change a finding, only runtime, so a test written to kill it
+  would assert an optimisation rather than a behaviour. The rest are real and
+  concentrated in `DJI-012`'s path walk, where mutants that stop the walk
+  descending into concatenation, f-strings, tuples, `%` interpolation and
+  `pathlib`'s `/` all survive — the composed expression is still tainted, so
+  the rule still reports, just about a coarser node. The tests assert the line
+  and not the node, so an equivalent-looking answer passes. Fixing means
+  asserting *which* expression is blamed, which is what the evidence excerpt
+  shows the reader.
 
 ---
 
@@ -5179,12 +5266,12 @@ conversation.
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
 | 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | **Complete** (PR #3) — `DJA-001`…`DJA-015`, `DJD-001`…`DJD-003`, 100% precision on three real targets |
-| 3 | Performance and injection | 6 | 35 | In progress |
+| 3 | Performance and injection | 6 | 36 | In progress |
 | 4 | Migration safety and live tier | 6 | 28 | Not started |
 | 5 | Portability and external adapters | 4 | 20 | Not started |
 | 6 | LLM layer | 5 | 17 | Not started |
 | 7 | Distribution | 3 | 10 | Not started |
-| | **Total** | **52** | **232** | |
+| | **Total** | **52** | **233** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
