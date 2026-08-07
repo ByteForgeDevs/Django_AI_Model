@@ -42,9 +42,10 @@ from djaudit.llm.suggest import render, suggest
 
 # Imported by name rather than as a module: `djaudit.llm` re-exports a `triage`
 # function, which shadows the submodule of the same name.
-from djaudit.llm.triage import TriageRun, triage
+from djaudit.llm.triage import TriageRun, provenance_of, triage, verdicts_for
 from djaudit.llm.verify import Level, explain_rejection, verified
 from djaudit.models import Confidence, Family, Severity
+from djaudit.provenance import describe
 from djaudit.registry import all_rules
 from djaudit.reporters import OutputFormat, json_reporter, sarif, terminal
 
@@ -350,6 +351,14 @@ def triage_command(
             "Nothing is written; the diffs are for you to apply.",
         ),
     ] = False,
+    output_format: Annotated[
+        OutputFormat,
+        typer.Option(
+            "--format",
+            help="terminal for review; json or sarif to carry the verdicts and "
+            "their provenance to another tool.",
+        ),
+    ] = OutputFormat.TERMINAL,
 ) -> None:
     """Rank findings by whether they are worth a reviewer's time.
 
@@ -371,6 +380,16 @@ def triage_command(
 
     provider = _build_provider(config)
     run = triage(result.findings, provider)
+
+    if output_format is not OutputFormat.TERMINAL:
+        # Every verdict carries where it came from, so a tool downstream can
+        # hold a model's opinion to a different standard than a rule's. The
+        # model is named only when one actually answered.
+        labels = verdicts_for(run, model=provider.name if run.consulted_a_model else "")
+        renderer = json_reporter.render if output_format is OutputFormat.JSON else sarif.render
+        sys.stdout.write(renderer(result, labels))
+        raise typer.Exit(EXIT_OK)
+
     console = Console()
     if grouped:
         _print_themes(console, run, provider_name=provider.name)
@@ -423,7 +442,7 @@ def _print_triage(console: Console, run: TriageRun, *, provider_name: str) -> No
         finding = judgement.finding
         table.add_row(
             f"[{_VERDICT_STYLES[judgement.verdict]}]{judgement.verdict.value}[/]",
-            judgement.source.value,
+            describe(provenance_of(judgement, model=provider_name)),
             finding.rule_id,
             finding.severity.value,
             f"{finding.location.file}:{finding.location.line}",

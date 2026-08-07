@@ -51,6 +51,8 @@ from djaudit.llm.evaluate import Verdict
 from djaudit.llm.prompts import build_triage_prompt, worth_asking
 from djaudit.llm.provider import Answer, Provider
 from djaudit.models import Finding
+from djaudit.provenance import Authorship, Provenance
+from djaudit.provenance import Verdict as LabelledVerdict
 
 # The evidence a rule needs before its corpus verdict is allowed to stand in
 # for a reviewer. Measured, not chosen -- see the table above.
@@ -243,3 +245,46 @@ def _verdict_of(answer: Answer) -> Verdict:
     if raw == Verdict.ACCEPTED_RISK.value:
         return Verdict.ACCEPTED_RISK
     return Verdict.ABSTAINED
+
+
+#: `Source` and `Authorship` are the same distinction seen from two sides:
+#: one names where a *verdict* came from, the other where any statement came
+#: from. Mapping explicitly rather than relying on the string values matching
+#: means renaming either enum is a type error rather than a silent mislabel.
+_AUTHORSHIP = {
+    Source.CORPUS: Authorship.CORPUS,
+    Source.MODEL: Authorship.MODEL,
+    Source.UNAVAILABLE: Authorship.UNAVAILABLE,
+}
+
+
+def provenance_of(judgement: Judgement, model: str = "") -> Provenance:
+    """Label one verdict.
+
+    The finding itself is always deterministic; this describes the *verdict*
+    attached to it, which is the only part a model can have touched. The model
+    name is carried only when a model actually answered -- naming it on a
+    corpus hit would imply an involvement that did not happen.
+    """
+    authorship = _AUTHORSHIP[judgement.source]
+    return Provenance(
+        authorship=authorship,
+        detail=judgement.reason,
+        model=model if authorship is Authorship.MODEL else "",
+    )
+
+
+def verdicts_for(run: TriageRun, model: str = "") -> dict[str, LabelledVerdict]:
+    """Label a whole run, keyed by fingerprint for the reporters.
+
+    Findings with no fingerprint are skipped rather than keyed on the empty
+    string, which would collapse all of them onto one label.
+    """
+    return {
+        j.finding.fingerprint: LabelledVerdict(
+            label=j.verdict.value,
+            provenance=provenance_of(j, model),
+        )
+        for j in run.judgements
+        if j.finding.fingerprint
+    }

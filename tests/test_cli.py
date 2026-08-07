@@ -398,7 +398,7 @@ class TestTriageCommand:
         result = runner.invoke(app, ["triage", str(orm_project)])
 
         assert "abstained" in result.output
-        assert "unavailable" in result.output
+        assert "no model answered" in result.output
         assert "0 judged acceptable" in result.output
 
     def test_no_llm_overrides_a_config_that_enables_one(self, tmp_path, orm_project):

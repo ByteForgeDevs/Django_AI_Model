@@ -5978,7 +5978,48 @@ remove from them, and `6.5.3` asserts that by trying.
 
 ### Step 6.5 — Guardrails
 
-- **6.5.1** — Provenance labelling: every model-authored artefact marked as such in output and SARIF.
+- **6.5.1** — Provenance labelling: every model-authored artefact marked as such in output and SARIF. **Done** — `src/djaudit/provenance.py`, `triage --format json|sarif`, 20 tests, mutation **28/28**.
+
+  **The dangerous case is no label, not a wrong one.** An unlabelled SARIF
+  result is indistinguishable from a labelled one to any consumer that does not
+  know to look, so "no model was involved" and "nobody said" collapse into the
+  same silence. Everything therefore carries provenance, including the
+  deterministic findings that are the overwhelming majority and appear not to
+  need it. `DETERMINISTIC` exists so that absence can never be read as a claim.
+
+  **A finding and a verdict about it are two statements, and merging them lied.**
+  The first implementation stamped one label per result. Running it produced
+  twenty-four findings marked `authorship: unavailable, reproducible: false` —
+  because the run was offline and no verdict was available. Every one of those
+  findings came from an AST rule and would reproduce byte for byte; a consumer
+  believing the label would have discarded solid results on the grounds that a
+  model had not spoken. A result now carries `provenance` (always
+  deterministic) *and*, when triage ran, `triage.verdict` with its own separate
+  provenance.
+
+  **`Authorship` is deliberately not a boolean.** "A model answered" and "a
+  model was asked and nothing came back" are different facts. So is "a recorded
+  human corpus settled it", which is `reproducible` without being
+  `deterministic` — the answer is fixed, but it was a person's, not a rule's.
+  A model may be *named*; nothing else may, since naming one on a corpus hit
+  implies an involvement that did not happen, and `Provenance.__post_init__`
+  raises rather than allowing it.
+
+  **`provenance.py` does not import the LLM layer.** Reporters need the
+  vocabulary, not the machinery, and pointing the dependency this way means
+  `djaudit report --format sarif` stamps provenance without the report path
+  being able to reach a provider at all.
+
+  **Mutation, 28 mutants — 23 on the first pass.** Two survivor clusters, both
+  instructive. `describe()` was **dead code**: written, tested, and called from
+  nowhere (**#89**), so it now backs the terminal's `source` column and the
+  substep's "in output" half is real rather than notional. And
+  `test_every_authorship_describes_differently` asserted only that the four
+  sentences were *distinct* — four wrong sentences are also four (**#91**
+  again, one level up: asserting shape, not value). Each rendering is now
+  pinned to its meaning. The second cluster: nothing asserted the verdict
+  *label*, only its provenance, so `label=""` shipped a provenance attached to
+  nothing.
 - **6.5.2** — Evaluation set for triage quality, measured against human triage from Phases 1–5. **Moved to `6.1.5`** — it is the measurement, and it goes first.
 - **6.5.3** — Documented failure modes and a written statement of what the model is never permitted to do.
 - **6.5.4** — **Prove the structural guarantee by attacking it.** A hostile
