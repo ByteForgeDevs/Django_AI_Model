@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJI` — injection and untrusted input
 
-10 rules on the boundary between text the project wrote and text the
+11 rules on the boundary between text the project wrote and text the
 client sent. Every one of them is about the same mistake in a different
 costume: a value that should have travelled beside a command ends up inside
 it, and something that was meant to be data is read as syntax.
@@ -60,6 +60,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJI-008`](#dji-008--request-data-used-to-build-a-shell-command) | Request data used to build a shell command | critical | firm |
 | [`DJI-009`](#dji-009--request-data-chooses-the-host-of-an-outbound-request) | Request data chooses the host of an outbound request | high | certain |
 | [`DJI-010`](#dji-010--redirect-target-chosen-by-request-data-with-no-host-check) | Redirect target chosen by request data with no host check | medium | firm |
+| [`DJI-011`](#dji-011--request-data-marked-as-trusted-html) | Request data marked as trusted HTML | high | certain |
 
 ---
 
@@ -286,7 +287,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 - A target is reported only when taint analysis proves it came from the request. One read from a model field or a session is not reported, though a stored redirect is a real attack.
 - A validator is recognised by what it does, not by what it returns. A function that parses a URL and reads its host is taken to be checking it, so one that reads the host for another purpose entirely would be honoured as a guard.
 - What the guarding branch does with its answer is not examined, because deciding whether every path out of a check rejects the request or substitutes a default is how a rule begins reporting correct defensive code as a defect.
-- Only the first argument is read, and only when it is the sole argument. A redirect given a route name and arguments reverses a URL, which cannot be made to name another host.
+- Only the first argument is read. A redirect given a route name reverses a URL and cannot be made to name another host, which the constant in that position is what establishes.
 
 **References**
 
@@ -294,3 +295,27 @@ $ djaudit run . --min-severity info --min-confidence tentative
 - <https://docs.djangoproject.com/en/stable/ref/request-response/#django.http.HttpResponseRedirect>
 - <https://docs.djangoproject.com/en/stable/topics/http/shortcuts/#redirect>
 - <https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html>
+
+---
+
+### DJI-011 — Request data marked as trusted HTML
+
+**Severity** high · **Confidence** certain · **Tier** static
+
+**What it means.** Django escapes template variables by default, and mark_safe is how that default is switched off for one value. Handing it request data turns the escaping off for exactly the string an attacker controls, which is cross-site scripting in its plainest form. format_html is the safe alternative only when the untrusted part is one of its arguments: its format string is never escaped, so building that string out of request data reopens the same hole through the function meant to close it.
+
+**How to fix it.** Let the template escape it. Where a fragment really must be built in Python, pass the untrusted value as a format_html argument rather than splicing it into the format string, and reserve mark_safe for markup the project wrote itself.
+
+**What this rule cannot see.**
+
+- A value is reported only when taint analysis proves it came from the request. HTML built from a model field is not reported, though stored cross-site scripting is a real attack.
+- A call the project wrote is never treated as the request being read, so a helper that returns request data unescaped is missed. This is the same trade that keeps the rule silent on three correct benchmark sites whose taint is real.
+- Templates are not parsed, so the safe filter and an autoescape off block are outside what this rule can see. It reads Python source only, which is where mark_safe is written.
+- A format_html call given no arguments is not reported, because Django raises TypeError before rendering anything and the call is therefore a crash rather than a way to reach the page.
+
+**References**
+
+- <https://cwe.mitre.org/data/definitions/79.html>
+- <https://docs.djangoproject.com/en/stable/ref/utils/#django.utils.html.format_html>
+- <https://docs.djangoproject.com/en/stable/topics/templates/#automatic-html-escaping>
+- <https://docs.djangoproject.com/en/stable/ref/utils/#django.utils.safestring.mark_safe>

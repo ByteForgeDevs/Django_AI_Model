@@ -64,7 +64,13 @@ from djaudit.models import (
     Tier,
 )
 from djaudit.registry import Rule, RuleMeta, register
-from djaudit.rules._injection import identity, names_read, own_nodes, parameters_read
+from djaudit.rules._injection import (
+    identity,
+    names_read,
+    own_nodes,
+    parameters_read,
+    reads_request,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -197,10 +203,7 @@ def chosen(node: ast.expr, chains: DefUse | None, seen: set[str] | None = None) 
         seen = set()
 
     if isinstance(node, ast.Call):
-        receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
-        if receiver is None or request_source(receiver) is None:
-            return None
-        return node if taint_of(node, chains) is Taint.TAINTED else None
+        return node if reads_request(node, chains) else None
 
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _leads((node.left, node.right), chains, seen)
@@ -337,9 +340,9 @@ class OpenRedirect(Rule):
             "because deciding whether every path out of a check rejects the "
             "request or substitutes a default is how a rule begins reporting "
             "correct defensive code as a defect.",
-            "Only the first argument is read, and only when it is the sole "
-            "argument. A redirect given a route name and arguments reverses a "
-            "URL, which cannot be made to name another host.",
+            "Only the first argument is read. A redirect given a route name "
+            "reverses a URL and cannot be made to name another host, which the "
+            "constant in that position is what establishes.",
         ),
     )
 

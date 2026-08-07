@@ -32,6 +32,7 @@ from djaudit.dataflow.taint import (
     REQUEST_NAMES,
     Taint,
     request_source,
+    taint_of,
     tainted_parts,
 )
 from djaudit.models import Confidence, Finding
@@ -209,6 +210,25 @@ def parameters_read(node: ast.expr) -> frozenset[str]:
         for inner in ast.walk(node)
         if isinstance(inner, ast.Constant) and isinstance(inner.value, str)
     )
+
+
+def reads_request(node: ast.Call, chains: DefUse | None) -> bool:
+    """Whether this call is the request being *read*, not the project computing.
+
+    Taint launders provenance through opaque calls: anything built out of
+    request data comes back ``TAINTED``, so ``reverse(...)``,
+    ``signing.Signer().unsign(...)`` and a project's own URL builder are all
+    indistinguishable from the request itself by taint alone. `DJI-010` found
+    three such calls on pretix and every one was correct code.
+
+    A call is evidence only when the thing it is called on is a request, as
+    ``request.GET.get("next")`` is. Anything else the project wrote is beyond
+    what a rule can read, and the family declines what it cannot read.
+    """
+    receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+    if receiver is None or request_source(receiver) is None:
+        return False
+    return taint_of(node, chains) is Taint.TAINTED
 
 
 def identity(value: ast.expr, chains: DefUse | None) -> tuple[frozenset[str], frozenset[str]]:

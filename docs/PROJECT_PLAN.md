@@ -4649,7 +4649,63 @@ We therefore build the dataflow foundation first, and we default this family to
   both decline stages shown load-bearing on real code: across 390 reached
   redirect sites, 7 are declined only by the resolved guard, including
   healthchecks' hand-rolled one, and 9 only by the read-versus-computed test.
-- **3.5.6** — `DJI-011` `mark_safe` or `format_html` applied to tainted data (XSS).
+- **3.5.6** — `DJI-011` **request data marked as trusted HTML** — `mark_safe`, or a
+  `format_html` format string, carrying tainted data. **Done.**
+
+  The first measurement reverses the way this shape is usually flagged.
+  `format_html` maps `conditional_escape` over `*args` and `**kwargs` and then
+  calls `.format()` on a format string it never touches, so the *argument* — the
+  thing a name-keyed lint reports — is the one position that is safe, and the
+  format string is the sink. Confirmed by construction on Django 6.0:
+
+  | call | result |
+  |---|---|
+  | `format_html("<b>{}</b>", payload)` | `<b>&lt;img src=x ...&gt;</b>` |
+  | `format_html(payload + "{}", 1)` | `<img src=x onerror=alert(1)>1` |
+  | `format_html(payload)` | `TypeError: args or kwargs must be provided.` |
+
+  The third line is a rule decision rather than a curiosity: a `format_html`
+  call with no arguments raises before rendering anything on every supported
+  Django, which makes it a crash and not a way to reach the page, so it is not
+  reported.
+
+  The second is where this rule parts company with `DJI-010`. A redirect target
+  is decided from its first character, so that rule reads only the leading part;
+  HTML has no such privilege, and `"<b>" + tainted` and `tainted + "</b>"`
+  inject equally well. This rule therefore asks about **every** part and stops
+  at the first one the request supplies.
+
+  The third is that all three benchmark hits are correct code. A naive rule —
+  any of the 233 sink calls whose arguments are tainted — reports exactly three
+  sites, and two of them have already called `escape()` on the value while the
+  third percent-encodes it with `quote()`. Every one is `DJI-010`'s finding
+  again: a call inherits taint from its arguments, so anything a project
+  computes out of request data comes back tainted. The `reads_request` test
+  those two rules now share is what separates them, and it is why this rule
+  needs **no list of sanitiser names** — `escape(x)` is declined for the same
+  reason a project's own helper is, that neither is the request being read. A
+  name-keyed sanitiser list would have been unreachable code sitting behind that
+  test, which `DJI-009` already established is worse than no code at all.
+
+  `str.format` is the one call the rule looks inside, because unlike `reverse()`
+  it is not opaque: its arguments appear in the result verbatim.
+
+  One defect surfaced only on the corpus, and it is the sharpest instance yet of
+  a guard being undone by a permissive default. netbox assembles a table cell
+  across five assignments ending in `mark_safe(html)`, and the walk reaches the
+  name `button` twice by different paths. On the second visit the recursion
+  guard fired and **fell through to the taint fallback**, which answered
+  `TAINTED` — true about the value, and about a question that had already been
+  settled the other way, because `quote()` had percent-encoded it. A recursion
+  guard that gives up into a permissive default reverses the decision it exists
+  to protect. It now declines instead, and the test for it was shown failing on
+  the old behaviour before the fix was kept.
+
+  *Done when:* 27 tests, **286 of 286 injection defects caught** with no survivor
+  and no unapplied mutant, and the rule shown reaching 233 sink sites across the
+  benchmarks and declining every one — three of them declined *only* by the
+  read-versus-computed test, so that stage is load-bearing on real code rather
+  than on fixtures alone.
 - **3.5.7** — `DJI-012` path traversal — file open or `FileResponse` on a tainted path.
 
 ### Step 3.6 — Benchmark and document
@@ -5016,9 +5072,10 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **65 rules are
+document specifies, and most of it is still only specified: **66 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first ten of Phase 3's and the first ten of its injection family.
+2, plus the first ten of Phase 3's and the first eleven of its injection
+family.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against
