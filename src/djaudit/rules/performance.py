@@ -136,6 +136,29 @@ def traversal(graph: ModelGraph, model: str, parts: list[str]) -> Traversal:
     return Traversal(tuple(steps), tuple(edges))
 
 
+def binds(target: ast.expr, name: str) -> bool:
+    """Whether assigning to ``target`` rebinds ``name`` itself.
+
+    The distinction is between `b = other`, which replaces the row, and
+    `b.field = other`, which mutates it and leaves `b` pointing at the same
+    instance. Walking the target for any matching `Name` conflates the two,
+    and treating a field write as a rebinding silently discards every loop
+    that updates the rows it reads -- which is a common enough shape that
+    `for b in books: b.slug = b.author.name` was invisible to DJP-001.
+
+    Only the positions Python actually binds count: a bare name, or one
+    reached through the tuple and list unpacking of a multiple assignment.
+    Under `Attribute` or `Subscript` the name is being *read*.
+    """
+    if isinstance(target, ast.Name):
+        return target.id == name
+    if isinstance(target, ast.Starred):
+        return binds(target.value, name)
+    if isinstance(target, ast.Tuple | ast.List):
+        return any(binds(element, name) for element in target.elts)
+    return False
+
+
 def reassigned(body: tuple[ast.AST, ...], name: str) -> bool:
     """Whether ``body`` rebinds the name holding the row.
 
@@ -147,12 +170,14 @@ def reassigned(body: tuple[ast.AST, ...], name: str) -> bool:
             targets: list[ast.expr] = []
             if isinstance(child, ast.Assign):
                 targets = list(child.targets)
-            elif isinstance(child, ast.AugAssign | ast.AnnAssign | ast.For | ast.AsyncFor):
+            elif isinstance(
+                child, ast.AugAssign | ast.AnnAssign | ast.For | ast.AsyncFor | ast.NamedExpr
+            ):
                 targets = [child.target]
-            for target in targets:
-                for named in ast.walk(target):
-                    if isinstance(named, ast.Name) and named.id == name:
-                        return True
+            elif isinstance(child, ast.withitem) and child.optional_vars is not None:
+                targets = [child.optional_vars]
+            if any(binds(target, name) for target in targets):
+                return True
     return False
 
 
@@ -161,25 +186,48 @@ def _per_iteration(site: LoopSite) -> tuple[ast.AST, ...]:
     return (*site.loop.body, *site.loop.per_iteration)
 
 
+def read_chain(node: ast.Attribute) -> ast.Attribute | None:
+    """The part of a chain that is actually *read*.
+
+    Assignment is not traversal. `device.site = self.site` sets a foreign key
+    and follows nothing, so a rule that counted it as a relation access would
+    report a query the database never runs -- which is exactly what netbox's
+    `Device.save` and pretix's bulk assignments produced once loops that write
+    to their rows stopped being discarded wholesale by `reassigned`.
+
+    A *longer* chain is different: `device.site.name = x` has to fetch `site`
+    before it can set anything on it, so the read is everything up to the last
+    segment. That is what this returns, leaving the single-hop store to be
+    dropped by the caller.
+    """
+    if isinstance(node.ctx, ast.Load):
+        return node
+    return node.value if isinstance(node.value, ast.Attribute) else None
+
+
 def accesses(body: tuple[ast.AST, ...], root: str) -> Iterator[tuple[ast.Attribute, list[str]]]:
     """Attribute chains on the row, outermost first.
 
     Only the longest chain at each site is yielded: `b.author.name` contains
     `b.author` as a sub-expression, and reporting both would charge one query
-    twice.
+    twice. Where the outermost node is being assigned to, the chain below it is
+    yielded instead, since that part still has to be fetched.
     """
     seen: set[int] = set()
     for node in body:
         for child in ast.walk(node):
             if not isinstance(child, ast.Attribute) or id(child) in seen:
                 continue
-            parts = attribute_path(child, root)
+            read = read_chain(child)
+            if read is None:
+                continue
+            parts = attribute_path(read, root)
             if parts is None:
                 continue
-            for inner in ast.walk(child):
+            for inner in ast.walk(read):
                 if isinstance(inner, ast.Attribute):
                     seen.add(id(inner))
-            yield child, parts
+            yield read, parts
 
 
 class LoopRule(Rule):

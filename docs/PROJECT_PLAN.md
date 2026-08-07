@@ -3694,7 +3694,144 @@ We therefore build the dataflow foundation first, and we default this family to
   the function is defined in another one. It was deleted, not decorated with a
   test.
 
-- **3.3.5** — `DJP-009` field accessed after being excluded by `.only()` or `.defer()`, causing a per-row refetch.
+- **3.3.5** — `DJP-009` field accessed after being excluded by `.only()` or
+  `.defer()`, causing a per-row refetch. **Done**, and the only rule so far that
+  ships on zero corpus findings — deliberately, and with the user's agreement.
+
+  The measurement went in the opposite direction from every other rule in this
+  phase. A first probe found **11 candidates** (netbox 1, pretix 10), which
+  looked like a healthy yield. Every one of them was a false positive, for two
+  reasons that a rule reasoning about the source alone would never have
+  distinguished from the defect:
+
+  - **Ten of the eleven read a rebound name.** Both pretix loops
+    (`services/orders.py:1443` and `:1513`) do `o = Order.objects…get(pk=o.pk)`
+    inside a `transaction.atomic()` before touching the fields the probe
+    flagged. The reads are on a fully loaded instance; the restricted queryset
+    says nothing about them.
+  - **The eleventh was an assignment.** netbox's
+    `0070_vlangroup_vlan_id_ranges.py` writes `group.vid_ranges`, and *writing*
+    a deferred column does not load it, because nothing needs the old value.
+
+  Both were settled by measurement rather than argument, and both are now CI
+  gates in `scripts/prefetch_cache_probe.py`. On twenty rows: reading a field
+  `only()` loaded costs **1** query, reading one it left out costs **21**,
+  assigning one costs **1**, and reading `pk` costs **1**. Multi-table and
+  abstract inheritance were measured separately and both reload, which is why
+  the rule walks `mro` and not just `inherited`.
+
+  With the two corrections applied the corpora go to **zero** — all fourteen
+  restricted loops and all seven restricted view querysets in healthchecks,
+  netbox and pretix are correct. netbox's `DataFileViewSet` defers `data` and
+  pairs it with a serializer whose `fields` list omits `data`, which is the
+  pattern working exactly as intended. That is the honest result for a rule
+  whose target population is code written by people already thinking about
+  query cost, and it is why this one is framed as a regression guard: the
+  defect is real and expensive, and the corpora are one `fields` edit away from
+  it.
+
+  Because the corpus could not exercise the rule, the **injection probe had to
+  do all of the work**, and it found more than any previous one. Of 26 planted
+  defects the first pass caught **9**. The seventeen survivors decomposed into
+  four genuinely different problems, and only the first was a missing test:
+
+  - **A shared helper was wrong.** `reassigned()` — used by `DJP-001`, `DJP-002`
+    and now this rule — treated `b.field = x` as rebinding `b`, because it
+    walked the assignment target for any matching `Name` rather than asking
+    whether the name was in a *binding* position. Every loop that writes to the
+    rows it reads was therefore invisible to the whole family, so
+    `for b in books: b.slug = b.author.name` was an N+1 nobody would ever be
+    told about. Fixed with an explicit `binds()` that descends only `Name`,
+    `Starred`, `Tuple` and `List` targets; it also picks up `with … as b` and
+    `:=`, which the original missed entirely.
+
+    **This unmasked a second bug that had been cancelling it out.** With those
+    loops finally visible, the corpus gained 36 findings — and 21 of them were
+    wrong, because `accesses()` never asked whether a chain was being *read*.
+    NetBox's `Device.save` writes `device.site = self.site`, `device.rack`,
+    `device.location`, and each store was reported as a relation follow. Setting
+    a foreign key assigns an id and queries nothing. The two defects had been
+    invisible for the same reason: the loops that trigger the second are exactly
+    the loops the first discarded. A new `read_chain()` now yields the part of a
+    chain that is actually loaded — the whole of it under `Load`, and everything
+    below the last segment under `Store`, since `device.site.name = x` must
+    fetch `site` before it can set anything on it.
+
+    That left 15 real findings, all triaged `true_positive`: pretix's cart
+    consumption path following five unselected foreign keys per position, two
+    event-clone loops reading `i.grant_membership_type` and `imv.item.pk`
+    where the adjacent lines already use the `_id` column form, a shredder that
+    prefetches `answers` but reaches `order`, two data migrations, and a
+    healthchecks command whose queryset excludes on `user__*` — a join that
+    selects nothing — then reads `profile.user.email` three times per row.
+    Every one of them sits in a loop that writes to its rows, which is to say
+    every one of them was hidden by the helper bug and by nothing else.
+  - **A guard hid a false negative.** Requiring a single-segment chain meant
+    `b.title.upper()` — which loads `title` exactly as `b.title` does — was
+    never reported. Now only the *first hop* is considered, and whether it is a
+    relation is left to `concrete_field`.
+  - **Three guards were dead by redundancy** and were deleted rather than
+    given tests: `head()`'s `__` split (every name containing `__` is a
+    relation, and relations are declined anyway), `restricted()`'s "no
+    restriction" early return (`missing_field` already reads empty sets as
+    "nothing deferred"), and `agreed()`'s explicit `None` check (`None` equals
+    only itself, so the equality test rejects it).
+  - **The rest were tests that could not reach the guard they were aimed at**,
+    each diagnosed by printing what the analyser actually held rather than by
+    reading the code. `b.pk` and `b.id` never reach the `primary_key` guard
+    because a model with an implicit key has no such column in the graph — it
+    takes an explicitly declared `primary_key=True`. A serializer that inherits
+    its `Meta` has `model=None` and is declined before the `mode` branch runs.
+    A view whose queryset comes from another module is skipped by the text
+    prefilter, so reaching the empty-spec branch needs a sibling view in the
+    same file to supply the `.only(` the prefilter looks for.
+
+  Final: **23 of 23 caught**, 45 tests. Two defects were retired rather than
+  chased — the text prefilter, which is a cost optimisation and cannot change
+  results (lesson 28 again), and the load-context test, which `written` fully
+  subsumes.
+
+  **Lesson 35 — the same noise lied twice in one session.** The rule was
+  measured at **+13 seconds** against pretix (19.8s → 32.7s), which would have
+  been fatal. It was an artefact: the injection probe was still finishing on
+  the same box. Alternating *without / with / without* gave 16.5s / 16.8s /
+  17.8s — the rule costs about 0.2s, and the "baseline" in the bad measurement
+  was slower than the instrumented run in the good one. Moving code out and
+  back is not enough on its own; the baseline has to be taken twice, on either
+  side of the change, and the box has to be quiet.
+
+  **Lesson 36 — never truncate the output of the thing you are verifying.** The
+  `reassigned()` fix was declared free of triage churn on the strength of a
+  `tail -6`, which showed unchanged totals. The benchmark prints its untriaged
+  findings *above* the summary table, so the 36 new ones scrolled past unseen,
+  and the totals were unchanged only because the table counts triaged findings
+  alone. A gate that exits 1 was reported as passing for several steps.
+
+  **Lesson 37 — two bugs can hide each other, and fixing one is how you find
+  the other.** `reassigned()` discarded every loop that wrote to its rows;
+  `accesses()` reported writes as reads. Neither could be observed while the
+  other stood, because the only loops that expose the second are the loops the
+  first threw away. The corpus was quiet, and it was quiet for two reasons that
+  had to be removed in order. When a fix that should have changed nothing
+  produces a flood of findings, the flood is the more interesting result.
+
+  The `read_chain` fix then broke a third thing, and the benchmark's regression
+  check caught it: three findings in `0204_orderposition_backfill_is_bundled`
+  that had been judged `true_positive` went silent. The refactor had moved the
+  dedup bookkeeping above the "is this chain rooted at the row" test, so
+  walking `OrderPosition.all.filter(item=ib.bundled_item)` marked every
+  attribute beneath `.all.filter` as seen — including `ib.bundled_item`, which
+  is a keyword *value* in the call, not part of the chain. The dedup set exists
+  to stop a chain being reported twice, so it must only ever remember chains
+  that were actually yielded.
+
+  **Lesson 38 — triage is a regression suite, not a scoreboard.** Every one of
+  the three silenced findings was correct and had been reviewed months earlier.
+  Nothing in the unit tests covered the shape, and the precision table still
+  read 100%, because a finding that disappears cannot be a false positive. It
+  was `regressed` — verdicts recorded and no longer reported — that found it.
+  That column earns its keep the first time a shared helper changes.
+
 - **3.3.6** — `DJP-010` filtering or ordering on an unindexed field, using the model graph.
 
 ### Step 3.4 — SQL and ORM injection
@@ -4080,7 +4217,7 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **53 rules are
+document specifies, and most of it is still only specified: **54 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first eight of Phase 3's.
 

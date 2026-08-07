@@ -1205,6 +1205,146 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-06",
       "note": "The second bulk_create in the same migration, identical in shape to the first: a list comprehension over the whole Event table, evaluated in full before bulk_create begins. Same verdict and same remediation -- drop the brackets and stream the outer queryset with .iterator(), which lets the existing batch_size actually bound memory instead of only bounding statement size. Worth noting this migration is unusual in reaching Event by direct import rather than apps.get_model(), which is precisely why djaudit can name the model here and stays silent on most other data migrations."
+    },
+    {
+      "fingerprint": "ed2a84d5b0994009",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1392,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "api/serializers/order.py:1392. CartPosition.objects.filter(event=..., cart_id__in=..., expires__gt=...) selects no relations, and the body then follows five distinct foreign keys per row -- subevent here, plus variation, item, voucher and seat below. This is the cart-consumption path of order creation, so the row count is the size of the carts being consumed and every one of them costs five extra queries. select_related('subevent', 'variation', 'item', 'voucher', 'seat') would collapse all five into the original query."
+    },
+    {
+      "fingerprint": "b2a37849f0e76b5b",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1393,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "api/serializers/order.py:1393. cp.variation is read as the condition of a conditional expression and again as cp.variation.quotas, following the variation foreign key once per cart position on a queryset that selected no relations. Same loop and same fix as the subevent finding on the previous line: one select_related covering all five relations removes the whole cluster. Reported separately because each relation is an independent query the database runs."
+    },
+    {
+      "fingerprint": "2bcc64df77ecd485",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1393,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "api/serializers/order.py:1393. cp.item.quotas.filter(...) is the else arm of the same conditional, following the item foreign key per row. It is a true positive independently of the variation arm: whichever branch is taken, one of the two relations is fetched on every iteration, and neither is covered by the queryset. Note the .quotas.filter() beyond it is a further per-row query that DJP-002 declines to report because a filtered related manager cannot be served from a prefetch cache."
+    },
+    {
+      "fingerprint": "3754f6c72f7fc83e",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1398,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "api/serializers/order.py:1398. cp.voucher is read as a truth test and then twice more inside the branch, following the voucher foreign key once per cart position. Reading the column rather than the object -- if cp.voucher_id -- would answer the truth test for free, and the two uses inside the branch need the instance only as a dict key, so voucher_id would serve there too. Part of the same five-relation cluster; select_related is the single fix."
+    },
+    {
+      "fingerprint": "a2c7ae5fa2d4ee00",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/serializers/order.py",
+      "line": 1402,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "api/serializers/order.py:1402. cp.seat follows the seat foreign key per row, again as a truth test followed by two uses as a dict key. Identical shape to the voucher finding four lines above and identically fixable, either by select_related on the queryset or by testing cp.seat_id. The fifth and last of the relation follows in this loop."
+    },
+    {
+      "fingerprint": "4ba7791c013f4472",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 936,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "base/models/event.py:936. emv.property.name is a genuine read -- it is the argument to meta_properties.get(name=...) -- on rows from EventMetaValue.objects.filter(event=other), which selects no relations. One query per meta value to fetch the property, purely to read its name. Worth noting that the same loop assigns emv.property twice; those are stores and are correctly not reported, so this finding is the read discrimination working rather than a leak of the assignment case."
+    },
+    {
+      "fingerprint": "d113d3dd41d2a32c",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 994,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "base/models/event.py:994. if i.grant_membership_type and is_cross_organizer follows the grant_membership_type foreign key on every item being cloned, to learn only whether it is set. The surrounding lines make the case by themselves: this same body writes if i.category_id: and if i.tax_rule_id:, using the column exactly as this line should. Testing i.grant_membership_type_id is free because the column is already loaded, so this is one avoidable query per item in a clone of an entire event."
+    },
+    {
+      "fingerprint": "701dba29c4f7bcc5",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/models/event.py",
+      "line": 1030,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "base/models/event.py:1030. imv.item.pk fetches the whole Item row to read the primary key that is already present on imv as item_id. One query per item meta value during an event clone. The line directly above it is imv.property = item_meta_properties_map[imv.property_id], which reads the column form of the neighbouring relation, so the fix here is item_map[imv.item_id] and it is a single character short of what the file already does elsewhere."
+    },
+    {
+      "fingerprint": "b758e21aca188f82",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/shredder.py",
+      "line": 551,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "base/shredder.py:551. The queryset prefetches answers and answers__question but reaches the order relation, which filter(order__event=self.event) only joins against and never selects. op.order.code is then read twice per position, once for the file name and once for the dict key, costing one query per order position in a shred of an entire event. Adding order to a select_related alongside the existing prefetch_related is the fix; the prefetch already present shows the author was optimising this loop and missed one edge."
+    },
+    {
+      "fingerprint": "5a5bd58feddde9df",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0273_remove_checkinlist_auto_checkin_sales_channels.py",
+      "line": 12,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "migrations/0273_remove_checkinlist_auto_checkin_sales_channels.py:12. cl.event.organizer.sales_channels.all() reaches a multi-row relation, which the queryset's select_related('event', 'event__organizer') cannot cover -- select_related is join-based and stops at single-valued relations, so sales_channels needs prefetch_related('event__organizer__sales_channels'). The author clearly considered the traversal cost, having written select_related for the two single-valued hops, which makes this a precise illustration of the distinction the rule encodes. Impact is bounded because a data migration runs once, but the per-row query is real."
+    },
+    {
+      "fingerprint": "750d4e3fefac69a3",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0305_fixup_eventmetaproperties.py",
+      "line": 18,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "migrations/0305_fixup_eventmetaproperties.py:18. The queryset is filter(...).order_by(...) with no select_related, and the log line reads emv.event.organizer.slug, traversing two relations per row. Reported as event__organizer rather than as two separate findings because the chain is one path. Both this and the event.slug finding on the same line are avoidable with select_related('event__organizer'). A one-off repair migration, so the cost is paid once, but the traversal is exactly what the rule describes."
+    },
+    {
+      "fingerprint": "1a09fbcb7bf56799",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0305_fixup_eventmetaproperties.py",
+      "line": 18,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "migrations/0305_fixup_eventmetaproperties.py:18. emv.event.slug follows the event foreign key on each row of an unselected queryset. Distinct from the event__organizer finding on the same line in that it terminates one hop earlier; both are served by the same select_related('event__organizer'), which Django resolves as a single join covering event as well. Bounded impact for a data migration, correct as a detection."
+    },
+    {
+      "fingerprint": "f6be6d703acc65fa",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0305_fixup_eventmetaproperties.py",
+      "line": 19,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "migrations/0305_fixup_eventmetaproperties.py:19. emv.property.name follows the property foreign key per row for a log message, on a queryset that selected no relations. The same line also reads emv.property.id and emv.property.organizer.slug, so a single select_related('property__organizer') removes this finding and the one beside it. Correct detection; the run-once nature of a migration limits the damage but not the accuracy."
+    },
+    {
+      "fingerprint": "ca7bedfc60a23962",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "src/pretix/base/migrations/0305_fixup_eventmetaproperties.py",
+      "line": 19,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "migrations/0305_fixup_eventmetaproperties.py:19. emv.property.organizer.slug traverses two relations per row in the same log call, and is reported as the property__organizer path. Together with the three other findings in this loop it makes eight extra queries per cross-organizer meta value, all removable by select_related('event__organizer', 'property__organizer'). A repair migration, so the total row count is small by construction, but the shape is a textbook N+1."
     }
   ]
 }

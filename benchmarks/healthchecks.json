@@ -325,6 +325,16 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "A RunPython data migration walking api.Check and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. save(update_fields=['badge_key']) already names the field bulk_update needs."
+    },
+    {
+      "fingerprint": "66e95d6067c87af5",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "hc/accounts/management/commands/sendinactivitynotices.py",
+      "line": 73,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-04",
+      "note": "sendinactivitynotices.py:73. The queryset is Profile.objects.order_by('id') narrowed by five exclude() calls, four of which span the user relation (user__last_login, user__date_joined, user__subscription). Filtering across a relation emits a JOIN but selects no columns from it, so nothing is cached: the three reads of profile.user.email in the body each hit the User table once per surviving profile. select_related('user') would make it one query for the run. Found only after the reassigned() fix stopped discarding loops that write to their rows -- this body does profile.deletion_notice_date = now(), which previously hid the whole loop."
     }
   ]
 }

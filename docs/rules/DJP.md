@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJP` — performance and ORM efficiency
 
-8 rules on the queries a Django project makes without meaning to. The ORM
+9 rules on the queries a Django project makes without meaning to. The ORM
 makes the expensive thing and the cheap thing look identical: `book.author.name`
 is an attribute access whether the author arrived with the book or costs its own
 round trip, and the source gives no indication which. Every rule here reports a
@@ -57,6 +57,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJP-006`](#djp-006--count-used-only-to-test-whether-rows-exist) | `.count()` used only to test whether rows exist | low | firm |
 | [`DJP-007`](#djp-007--a-row-written-once-per-iteration-where-a-bulk-write-would-do) | A row written once per iteration where a bulk write would do | medium | firm |
 | [`DJP-008`](#djp-008--a-whole-table-read-into-memory-where-it-could-be-streamed) | A whole table read into memory where it could be streamed | medium | firm |
+| [`DJP-009`](#djp-009--field-read-on-a-queryset-that-deferred-it) | Field read on a queryset that deferred it | medium | firm |
 
 ---
 
@@ -239,3 +240,24 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#iterator>
 - <https://docs.djangoproject.com/en/stable/topics/db/optimization/#retrieve-everything-at-once-if-you-know-you-will-need-it>
+
+---
+
+### DJP-009 — Field read on a queryset that deferred it
+
+**Severity** medium · **Confidence** firm · **Tier** static
+
+**What it means.** `only()` and `defer()` do not make a column unavailable -- they make it expensive. Reading a deferred field issues a fresh `SELECT` for that one column on that one row, so a loop over a restricted queryset costs one query per row: measured at 21 queries for 20 rows against 1 when the field was loaded. Nothing in the source marks the read as different from any other attribute access, and no exception is raised, which is why this survives review and testing. It is also self-inflicted in a particular way: the restriction was added deliberately to save work, and the read that defeats it is usually written later by someone who never saw the queryset. The net result is slower than having written no `only()` at all.
+
+**How to fix it.** Add the field to `only()`, or drop it from `defer()`. If the field is large and genuinely wanted only sometimes -- a text blob or a JSON document -- keep the restriction and fetch the column separately for the rows that need it, rather than reading it per row. If the restriction no longer earns its keep, remove it: an unrestricted query that fetches one extra column once beats a restricted one that fetches it N times.
+
+**What this rule cannot see.**
+
+- Reports only reads written directly in the loop body. A deferred field read inside a function the loop calls, or in a template rendered from these rows, costs exactly the same and is not reported.
+- Declines any loop that rebinds the row variable, because a name reassigned mid-body no longer refers to a row of the restricted queryset. This is deliberately conservative and will hide a genuine defect written before the rebinding.
+- Assignment to a deferred field is not reported, having been measured to cost no query, and an attribute assigned anywhere in the body is ignored entirely because it is resident from that point on.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#only>
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#defer>

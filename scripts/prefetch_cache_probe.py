@@ -91,6 +91,9 @@ BULK_CEILING = 5
 """A SELECT, a BEGIN, the statement and a COMMIT, with one to spare."""
 
 LONG_AGO = datetime(2000, 1, 1, tzinfo=UTC)
+"""A sentinel `auto_now` value. Compared with `__lt`, never `__year`: on this
+SQLite build `__year` matches nothing at all, so a gate written with it would
+have passed by absence for both branches."""
 
 STREAM_ROWS = 20000
 """Rows for the materialise-versus-stream comparison.
@@ -109,10 +112,6 @@ STREAM_RATIO = 5
 Measured at 9x. The margin is left wide because the absolute numbers depend on
 row width and on the interpreter, while the shape does not.
 """
-"""A sentinel `auto_now` value. Compared with `__lt`, never `__year`: on this
-SQLite build `__year` matches nothing at all, so a gate written with it would
-have passed by absence for both branches."""
-
 VM = _models.VM
 Iface = _models.Iface
 Site = _models.Site
@@ -368,6 +367,54 @@ def writes_report() -> list[str]:
     return failures
 
 
+def deferred_queries(read: Callable[[Any], object], *, only: str = "text") -> int:
+    """Queries spent looping rows of a queryset restricted by `only`."""
+    seed_notes()
+    with CaptureQueriesContext(connection) as captured:
+        for row in Note.objects.only(only):
+            read(row)
+    return len(captured)
+
+
+def assigning_loads() -> bool:
+    """Whether *writing* a field `only()` left out costs a reload per row.
+
+    This is the guard that turned DJP-009's corpus result from eleven findings
+    to zero. The first probe counted an assignment as a read, which flagged a
+    netbox migration that only ever writes the excluded column.
+    """
+    return deferred_queries(lambda row: setattr(row, "touched", LONG_AGO)) > 1
+
+
+def deferred_report() -> list[str]:
+    """Reading a field `only()` left out costs one query per row; writing is free."""
+    wrong: list[str] = []
+    loaded = deferred_queries(lambda row: row.text)
+    missing = deferred_queries(lambda row: row.touched)
+    identity = deferred_queries(lambda row: row.pk)
+
+    print(f"\n  only('text'), reading text          {loaded:>6} queries")
+    print(f"  only('text'), reading touched      {missing:>6} queries")
+    print(
+        f"  only('text'), assigning touched    "
+        f"{deferred_queries(lambda row: setattr(row, 'touched', LONG_AGO)):>6} queries"
+    )
+    print(f"  only('text'), reading pk           {identity:>6} queries")
+
+    if loaded != 1:
+        wrong.append(f"reading a field only() loaded cost {loaded} queries, expected 1")
+    if missing < loaded + WRITE_ROWS:
+        wrong.append(
+            f"reading a field only() left out cost {missing} queries; a reload per row "
+            f"would be at least {loaded + WRITE_ROWS}"
+        )
+    if identity != 1:
+        wrong.append(f"reading pk under only() cost {identity} queries, expected 1")
+    if assigning_loads():
+        wrong.append("assigning a deferred field triggered a reload; DJP-009 ignores writes")
+    return wrong
+
+
 def peak_bytes(materialise: bool) -> tuple[int, int]:
     """Peak allocation, and rows alive at once, reading every Note.
 
@@ -491,6 +538,7 @@ def main() -> int:
     wrong.extend(emptiness_report())
     wrong.extend(writes_report())
     wrong.extend(streaming_report())
+    wrong.extend(deferred_report())
 
     if wrong:
         print(f"\nFAIL: Django no longer behaves as CACHE_READS assumes: {wrong}")

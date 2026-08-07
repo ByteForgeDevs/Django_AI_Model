@@ -395,3 +395,116 @@ class TestWithNothingToReasonFrom:
 
         ctx._model_graph = ModelGraph()
         assert list(rule().check(ctx)) == []
+
+
+class TestAssignmentIsNotTraversal:
+    """Setting a foreign key runs no query; reading one does.
+
+    Both halves of this distinction were broken at once and cancelled out.
+    `reassigned` treated `b.author = x` as rebinding `b`, so every loop that
+    wrote to its rows was discarded before these reads were ever considered.
+    Fixing that exposed the second half: netbox's `Device.save` and pretix's
+    clone paths assign relations in a loop, and each assignment was reported
+    as a query the database never runs.
+    """
+
+    def test_a_stored_relation_is_not_reported(self, make_project):
+        assert (
+            findings(
+                make_project,
+                """
+                from library.models import Book, Author
+
+                def reassign(target):
+                    for b in Book.objects.all():
+                        b.author = target
+                        b.save()
+                """,
+            )
+            == []
+        )
+
+    def test_a_read_in_a_loop_that_also_writes_is_still_reported(self, make_project):
+        found = findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def listing():
+                for b in Book.objects.all():
+                    print(b.author.name)
+                    b.title = "x"
+                    b.save()
+            """,
+        )
+        assert paths(found) == ["author"]
+
+    def test_storing_through_a_relation_reports_the_hop_it_must_fetch(self, make_project):
+        found = findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def rename():
+                for b in Book.objects.all():
+                    b.author.name = "x"
+            """,
+        )
+        assert paths(found) == ["author"]
+
+    def test_an_augmented_store_through_a_relation_reports_the_fetch(self, make_project):
+        """`b.author.name += x` cannot augment what it has not loaded."""
+        found = findings(
+            make_project,
+            """
+            from library.models import Book
+
+            def bump():
+                for b in Book.objects.all():
+                    b.author.name += "!"
+            """,
+        )
+        assert paths(found) == ["author"]
+
+    def test_every_relation_the_netbox_shape_assigns_stays_silent(self, make_project):
+        """The four findings this cost netbox, in one loop.
+
+        `Device.save` sets site, rack and location on each child device and
+        saves it. Three foreign keys written, none read, no query beyond the
+        save itself.
+        """
+        assert (
+            findings(
+                make_project,
+                """
+                from library.models import Book
+
+                def rehome(author, editor):
+                    for b in Book.objects.filter(author=author):
+                        b.author = author
+                        b.editor = editor
+                        b.save()
+                """,
+            )
+            == []
+        )
+
+    def test_a_row_read_nested_in_an_unrelated_chain_survives(self, make_project):
+        """The dedup set must only remember chains that were actually yielded.
+
+        Marking every attribute under the outermost one suppresses the row's
+        own reads when they sit inside a call on something else, which is how
+        pretix's `OrderPosition.all.filter(item=ib.bundled_item)` went silent:
+        walking `.all.filter` reaches the keyword values too.
+        """
+        found = findings(
+            make_project,
+            """
+            from library.models import Book, Tag
+
+            def audit():
+                for b in Book.objects.all():
+                    Tag.objects.filter(label=b.author.name).update(label="x")
+            """,
+        )
+        assert paths(found) == ["author"]
