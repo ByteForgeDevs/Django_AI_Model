@@ -23,6 +23,7 @@ from djaudit.llm.evaluate import (
 )
 from djaudit.llm.explain import Explanation, FingerprintError, explain, find
 from djaudit.llm.group import Theme, collapsed, group
+from djaudit.llm.impact import Impact, blast_radius, framing, impact, no_invented_numbers
 from djaudit.llm.prompts import (
     TRIAGE_SCHEMA,
     build_triage_prompt,
@@ -76,6 +77,7 @@ __all__ = [
     "Field",
     "FieldKind",
     "FingerprintError",
+    "Impact",
     "Judgement",
     "LLMConfig",
     "Metered",
@@ -98,6 +100,7 @@ __all__ = [
     "Verdict",
     "askable_rules",
     "baselines",
+    "blast_radius",
     "build_triage_prompt",
     "check_grounds",
     "collapsed",
@@ -105,10 +108,13 @@ __all__ = [
     "contested_rules",
     "explain",
     "find",
+    "framing",
     "group",
     "headroom",
+    "impact",
     "key_for",
     "load_ground_truth",
+    "no_invented_numbers",
     "propose",
     "redact",
     "render_finding",

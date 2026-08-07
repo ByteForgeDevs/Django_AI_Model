@@ -33,6 +33,8 @@ from djaudit.llm.evaluate import Verdict
 from djaudit.llm.explain import FingerprintError, explain, find
 from djaudit.llm.explain import render as render_explanation
 from djaudit.llm.group import collapsed, group
+from djaudit.llm.impact import impact
+from djaudit.llm.impact import render as render_impact
 from djaudit.llm.provider import NullProvider, Provider
 from djaudit.llm.suggest import render, suggest
 
@@ -528,6 +530,14 @@ def explain_command(
         Confidence,
         typer.Option("--min-confidence", help="Must match the run the fingerprint came from."),
     ] = Confidence.FIRM,
+    show_impact: Annotated[
+        bool,
+        typer.Option(
+            "--impact",
+            help="Add who this affects, what it costs, how widespread it is, "
+            "and when it does not apply -- for a reviewer who does not write Django.",
+        ),
+    ] = False,
 ) -> None:
     """Explain one finding in terms of the code it was found in.
 
@@ -549,7 +559,11 @@ def explain_command(
         _fail(str(exc))
         return
 
-    Console().print(render_explanation(explain(finding, result.findings)), highlight=False)
+    console = Console()
+    console.print(render_explanation(explain(finding, result.findings)), highlight=False)
+    if show_impact:
+        console.print()
+        console.print(render_impact(impact(finding, result.findings)), highlight=False)
 
 
 @app.command()

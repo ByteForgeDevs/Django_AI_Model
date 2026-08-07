@@ -539,6 +539,23 @@ class TestExplainCommand:
 
         assert result.exit_code == EXIT_ERROR
 
+    def test_impact_adds_the_framing_for_a_non_specialist(self, orm_project):
+        fingerprint = self.a_fingerprint(orm_project)
+
+        result = runner.invoke(app, ["explain", fingerprint, str(orm_project), "--impact"])
+
+        assert result.exit_code == EXIT_OK
+        assert "Who this affects" in result.output
+        assert "How urgent" in result.output
+        assert "When this does not apply to you" in result.output
+
+    def test_impact_is_off_unless_asked_for(self, orm_project):
+        fingerprint = self.a_fingerprint(orm_project)
+
+        result = runner.invoke(app, ["explain", fingerprint, str(orm_project)])
+
+        assert "Who this affects" not in result.output
+
     def test_it_consults_no_model_and_says_nothing_about_one(self, orm_project):
         """Offline is not a degraded mode here, so there is nothing to disclose."""
         fingerprint = self.a_fingerprint(orm_project)

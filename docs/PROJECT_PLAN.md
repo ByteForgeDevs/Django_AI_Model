@@ -5775,7 +5775,38 @@ remove from them, and `6.5.3` asserts that by trying.
   one was a case no test distinguished (`startswith` → `in`, which would resolve
   `def012` to a fingerprint it merely appears inside). The third was a test that
   varied two fields at once and so reached only one of two filters.
-- **6.3.2** — Business-impact framing for non-specialist reviewers.
+- **6.3.2** — **Business-impact framing for non-specialist reviewers. Done.**
+  `llm/impact.py`, `djaudit explain --impact`, 28 tests, mutation 22/22.
+
+  Answers four questions a non-specialist actually asks — *who this affects*,
+  *what it costs*, *how widespread it is*, *how urgent it is* — plus a fifth
+  the vendors never print: **when this does not apply to you.** That last one
+  is free, because a measurement showed **all 67 rules carry `limitations`**,
+  the field recording what the rule cannot see. Those caveats are rendered
+  **verbatim from `RuleMeta.limitations`**, never paraphrased; a mutant that
+  truncated them to twenty characters was caught.
+
+  The honesty property: **no number appears in generated prose unless the run
+  counted it.** The `who`/`cost`/`urgency` templates are written digit-free,
+  the only numbers are the counted blast radius (occurrences and files), and
+  `no_invented_numbers` re-reads the rendered text and asserts every integer
+  in it is one of those counts. A percentage and a dollar figure smuggled into
+  the templates were both caught by that check.
+
+  **The check fired on honest text, and the fix was not to loosen it.**
+  `DJA-008`'s rule-authored caveat legitimately cites "DJA-010" and "two
+  findings". Relaxing the regex to tolerate those would have stopped it
+  catching anything. Instead `framing()` (generated prose, digit-checked) was
+  split from `render()` (framing plus verbatim caveats, checked by requiring
+  the rule's exact text to survive). Both guarantees kept, neither weakened.
+
+  The mutation round's **canary passed** — which is the finding. Blanking the
+  audience sentence left every test green, because they asserted the four
+  *headings* and never the values beneath them. The section would have been
+  structurally perfect and said nothing. Each heading is now pinned to its own
+  content, and two further tests require every family and every severity to
+  say something distinct, so a shared sentence cannot make the section
+  decorative.
 
 ### Step 6.4 — Patch generation
 
