@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJI` — injection and untrusted input
 
-9 rules on the boundary between text the project wrote and text the
+10 rules on the boundary between text the project wrote and text the
 client sent. Every one of them is about the same mistake in a different
 costume: a value that should have travelled beside a command ends up inside
 it, and something that was meant to be data is read as syntax.
@@ -59,6 +59,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJI-007`](#dji-007--request-data-evaluated-or-deserialised-by-an-executing-loader) | Request data evaluated or deserialised by an executing loader | critical | firm |
 | [`DJI-008`](#dji-008--request-data-used-to-build-a-shell-command) | Request data used to build a shell command | critical | firm |
 | [`DJI-009`](#dji-009--request-data-chooses-the-host-of-an-outbound-request) | Request data chooses the host of an outbound request | high | certain |
+| [`DJI-010`](#dji-010--redirect-target-chosen-by-request-data-with-no-host-check) | Redirect target chosen by request data with no host check | medium | firm |
 
 ---
 
@@ -269,3 +270,27 @@ $ djaudit run . --min-severity info --min-confidence tentative
 - <https://owasp.org/www-community/attacks/Server_Side_Request_Forgery>
 - <https://docs.python.org/3/library/urllib.parse.html#urllib.parse.urljoin>
 - <https://requests.readthedocs.io/en/latest/user/advanced/>
+
+---
+
+### DJI-010 — Redirect target chosen by request data with no host check
+
+**Severity** medium · **Confidence** firm · **Tier** static
+
+**What it means.** A redirect the client controls turns the application's own domain into the first hop of a phishing link. The victim sees a hostname they recognise, the certificate is genuine, and the site they land on is not. It is also how a login flow leaks its credentials: a next parameter pointing at an attacker's copy of the sign-in page is followed the moment authentication succeeds, and any token carried in the URL or a permissive referrer goes with it. Django rejects a redirect to an unusual scheme but sends one to any host, so the framework does not close this.
+
+**How to fix it.** Check the target before redirecting to it. django.utils.http provides url_has_allowed_host_and_scheme, which rejects an absolute URL, a protocol-relative one and the backslash and control-character variants that slip past a hand-written check; pass allowed_hosts=None to permit only relative paths, or the hosts you are willing to send a user to. Where the destination is one of a known few, take a key from the request and look the URL up rather than accepting it.
+
+**What this rule cannot see.**
+
+- A target is reported only when taint analysis proves it came from the request. One read from a model field or a session is not reported, though a stored redirect is a real attack.
+- A validator is recognised by what it does, not by what it returns. A function that parses a URL and reads its host is taken to be checking it, so one that reads the host for another purpose entirely would be honoured as a guard.
+- What the guarding branch does with its answer is not examined, because deciding whether every path out of a check rejects the request or substitutes a default is how a rule begins reporting correct defensive code as a defect.
+- Only the first argument is read, and only when it is the sole argument. A redirect given a route name and arguments reverses a URL, which cannot be made to name another host.
+
+**References**
+
+- <https://cwe.mitre.org/data/definitions/601.html>
+- <https://docs.djangoproject.com/en/stable/ref/request-response/#django.http.HttpResponseRedirect>
+- <https://docs.djangoproject.com/en/stable/topics/http/shortcuts/#redirect>
+- <https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html>

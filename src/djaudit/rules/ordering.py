@@ -38,9 +38,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from djaudit.dataflow.taint import (
-    REQUEST_NAMES,
     Taint,
-    request_source,
     taint_of,
 )
 from djaudit.models import (
@@ -53,7 +51,15 @@ from djaudit.models import (
     Tier,
 )
 from djaudit.registry import Rule, RuleMeta, register
-from djaudit.rules._injection import Frame, own_calls, own_nodes
+from djaudit.rules._injection import (
+    Frame,
+    identity,
+    names_read,
+    own_calls,
+    own_nodes,
+    parameters_read,
+    source_of,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -79,9 +85,6 @@ SOURCE_WORDS = ("request", "self.kwargs")
 literal ``self.kwargs``, and taint does not cross a scope boundary, so a file
 whose text holds neither string can never produce a tainted argument.
 """
-
-ANONYMOUS = REQUEST_NAMES | {"self"}
-"""Names too common to identify one value, so useless for matching a guard."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,84 +116,6 @@ def arguments(node: ast.AST) -> Iterator[Ordering]:
         yield Ordering(call=node, argument=inner, starred=starred)
 
 
-def _names(node: ast.expr) -> frozenset[str]:
-    """The identifying names an expression reads.
-
-    ``request`` and ``self`` are excluded because they appear in nearly every
-    view, so matching on them would let an unrelated guard like
-    ``if request.method in ("GET", "POST")`` excuse any ordering in the same
-    function. What identifies a value is the local name carrying it, not the
-    object it was ultimately read from.
-    """
-    return frozenset(
-        inner.id
-        for inner in ast.walk(node)
-        if isinstance(inner, ast.Name) and inner.id not in ANONYMOUS
-    )
-
-
-def source_of(node: ast.expr) -> str | None:
-    """The request attribute somewhere inside this expression.
-
-    :func:`request_source` resolves a plain attribute chain, so it answers for
-    ``request.GET`` and returns ``None`` for ``request.GET["sort"]`` -- which is
-    the shape actually written at a call. Walking finds the chain inside the
-    subscript, or inside the ``.get()`` wrapped around it.
-    """
-    for inner in ast.walk(node):
-        if isinstance(inner, ast.expr):
-            found = request_source(inner)
-            if found is not None:
-                return found
-    return None
-
-
-def _parameters(node: ast.expr) -> frozenset[str]:
-    """Which request parameter this expression reads, as ``source:key`` pairs.
-
-    ``request.GET.get("sort", "title")`` yields both ``request.GET:sort`` and
-    ``request.GET:title``, over-generating rather than parsing argument
-    positions, because the set is only ever used to decide whether a guard and
-    a value are talking about the same parameter.
-    """
-    source = source_of(node)
-    if source is None:
-        return frozenset()
-    return frozenset(
-        f"{source}:{inner.value}"
-        for inner in ast.walk(node)
-        if isinstance(inner, ast.Constant) and isinstance(inner.value, str)
-    )
-
-
-def identity(value: ast.expr, chains: DefUse | None) -> tuple[frozenset[str], frozenset[str]]:
-    """What this value *is*, following names back to what they were assigned.
-
-    The ordering field at the call is usually a bare name, while the guard is
-    written against whatever that name came from -- healthchecks tests
-    ``request.GET.get("sort")`` and then orders by ``sort``. Walking the
-    reaching definitions is what connects the two.
-    """
-    names = set(_names(value))
-    parameters = set(_parameters(value))
-    if chains is None:
-        return frozenset(names), frozenset(parameters)
-    queue = [node for node in ast.walk(value) if isinstance(node, ast.Name)]
-    seen: set[str] = set()
-    while queue:
-        name = queue.pop()
-        if name.id in seen:
-            continue
-        seen.add(name.id)
-        for binding in chains.reaching(name):
-            if binding.value is None:
-                continue
-            names.update(_names(binding.value))
-            parameters.update(_parameters(binding.value))
-            queue.extend(n for n in ast.walk(binding.value) if isinstance(n, ast.Name))
-    return frozenset(names), frozenset(parameters)
-
-
 def allowlisted(value: ast.expr, scope: Scope, chains: DefUse | None) -> bool:
     """Whether this scope tests the ordering value for membership of a set.
 
@@ -220,7 +145,7 @@ def allowlisted(value: ast.expr, scope: Scope, chains: DefUse | None) -> bool:
             continue
         if not any(isinstance(op, ast.In | ast.NotIn) for op in node.ops):
             continue
-        if _names(node.left) & names or _parameters(node.left) & parameters:
+        if names_read(node.left) & names or parameters_read(node.left) & parameters:
             return True
     return False
 

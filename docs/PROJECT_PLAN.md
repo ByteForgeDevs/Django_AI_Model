@@ -4599,7 +4599,56 @@ We therefore build the dataflow foundation first, and we default this family to
   `authority()` shown declining six shapes that taint analysis had already marked
   `TAINTED`, and the rule shown reaching 32 real fetch sites across the benchmarks
   so its silence there is measured rather than assumed.
-- **3.5.5** — `DJI-010` open redirect — `redirect()` or `HttpResponseRedirect` with a tainted target.
+- **3.5.5** — `DJI-010` **open redirect** — `redirect()` or `HttpResponseRedirect`
+  with a tainted target. **Done.**
+
+  The first question was how much Django already does, and the answer was
+  measured by construction rather than assumed. `HttpResponseRedirectBase`
+  screens `allowed_schemes`, so `javascript:` raises `DisallowedRedirect` — but
+  `//evil.com`, `http://evil.com` and `https:evil.com` are all sent without
+  complaint. `resolve_url` makes it worse: when a string is not a view name it
+  falls back to returning any value containing a `/` or a `.`, which every
+  absolute URL does. Django blocks the scheme and nothing else; the framework
+  ships `url_has_allowed_host_and_scheme` precisely because the response class
+  does not call it.
+
+  The second measurement decided the rule's shape. All three benchmarks guard
+  their redirects, and **no two do it the same way**: pretix calls Django's
+  validator directly at 41 sites, NetBox wraps it in a local `safe_for_redirect`,
+  and healthchecks hand-rolls `_allow_redirect` on `urlparse().netloc`. A rule
+  keyed on Django's function name would have been right on one project of three,
+  so the guard is **resolved** — a call is a check if what it calls forwards to a
+  known validator, or parses the URL *and* reads its authority.
+
+  The third arrived as three pretix false positives on the first benchmark run,
+  and they share one cause: **taint launders provenance through opaque calls**.
+  `redirect(reverse(...))`, a project URL builder, and a redirector whose target
+  is cryptographically signed with `signing.Signer().unsign()` are all `TAINTED`,
+  because a call inherits taint from its arguments — and all three are correct
+  code that cannot be made to name another host. So a call is evidence only when
+  it is the request being *read*, `request.GET.get("next")`, never when it is the
+  project computing something from request data. This is the same conclusion
+  `DJI-009` reached about a part it cannot read, arrived at from the other side.
+
+  Two defects were the rule's own. `validates()` returned true for *any* call to
+  `urlparse`, which made its authority check unreachable and counted 10, 17 and
+  40 project-local validators; requiring a parse **and** an authority read cut
+  that to 3, 3 and 32 without changing a single reported finding — the difference
+  was entirely functions that parse a URL for some other purpose. And an arity
+  guard that skipped `redirect()` calls carrying extra arguments, written to let
+  `redirect("view", pk=1)` reverse a route in peace, would also have skipped
+  `redirect(url, permanent=True)`. The route name declines itself for the better
+  reason that its first argument is a constant, so the guard was removed.
+
+  `scheme` is deliberately not an authority attribute. It is the one thing Django
+  already checks, so honouring a scheme-only test as a guard would excuse a
+  redirect to any host at all.
+
+  *Done when:* 32 tests, **261 of 261 injection defects caught with no survivor
+  and no unapplied mutant** — the first clean sweep of the family probe — and
+  both decline stages shown load-bearing on real code: across 390 reached
+  redirect sites, 7 are declined only by the resolved guard, including
+  healthchecks' hand-rolled one, and 9 only by the read-versus-computed test.
 - **3.5.6** — `DJI-011` `mark_safe` or `format_html` applied to tainted data (XSS).
 - **3.5.7** — `DJI-012` path traversal — file open or `FileResponse` on a tainted path.
 
@@ -4967,9 +5016,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **64 rules are
+document specifies, and most of it is still only specified: **65 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first ten of Phase 3's and the first nine of its injection family.
+2, plus the first ten of Phase 3's and the first ten of its injection family.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against
