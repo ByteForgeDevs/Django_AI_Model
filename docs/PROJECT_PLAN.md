@@ -5026,6 +5026,46 @@ We therefore build the dataflow foundation first, and we default this family to
   everyone to treat the budget as advisory. It is tightened when 3.2 lands and
   the real post-dataflow figure is known.
 - **3.6.4** — Triage pass; publish the N+1 false-positive rate honestly, including in the README.
+
+  **The triage pass found nothing outstanding, which is the point of doing it.**
+  245 findings across the three targets are reviewed, each with a written
+  justification, a reviewer and a date: 194 `true_positive`, 51
+  `accepted_risk`, 0 withdrawn. A first pass at this substep assumed the eight
+  `tentative` `DJP` findings were invisible to the gate, because `djaudit
+  benchmark` has no confidence flag. It has none because it does not need one —
+  `benchmark.py` already runs the engine at `TENTATIVE`, and all eight were
+  triaged. They were re-reviewed independently anyway and every existing
+  verdict was confirmed, which is worth more than the assumption was.
+
+  **One note was wrong and is now corrected.** NetBox's `cables.py:1103` and
+  `:1114` were justified as "repeated evaluation of one queryset". They are
+  not. Read from Django's source rather than reasoned about:
+  `QuerySet._fetch_all` populates `_result_cache` once and re-iteration returns
+  it, and `ForwardManyToOneDescriptor.__get__` consults
+  `field.get_cached_value(instance)` before querying. So the second read of the
+  same relation on the same instances costs nothing, and the finding's "one
+  query per row" is false *at that line*. The defect is still real — the
+  queryset has no `select_related`, and one fix closes both sites — so it stays
+  a true positive on the defect and is booked as a **redundant report** on the
+  cost.
+
+  **The published number.** Of 56 N+1 findings across the three targets, 56
+  name a genuinely unprefetched relation and 2 overstate what they cost: a
+  **3.6% redundant-report rate**, stated in the README and not netted off the
+  precision figure. Measuring it needed care — grouping by rule, file and
+  message alone put the rate at 14.3%, but most of those pairs are distinct
+  querysets that happen to produce an identical sentence, and two lines in
+  `pretix/base/services/notifications.py` that look like one finding twice are
+  two different `NotificationSetting` filters. Only same-relation,
+  same-queryset, same-function repeats count.
+
+  The README also now states the two things the number does not mean: it is not
+  an independent audit, because we triaged our own benchmark, and it is not a
+  recall claim, because a mature project cannot tell us what we walked past.
+
+  *Done when:* 245 findings reviewed with zero untriaged, the corrected
+  mechanism recorded in `benchmarks/netbox.json`, and the redundant-report rate
+  published in the README beside the precision figure rather than instead of it.
 - **3.6.5** — `docs/rules/DJP.md` and `docs/rules/DJI.md`, plus a dataflow design note stating the analysis limits explicitly.
 - **3.6.6** — Close the `DJI` mutation gaps 3.6.2 exposed. The re-run measured
   39 survivors of 324. Most are the widening class and stay documented rather

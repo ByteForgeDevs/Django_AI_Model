@@ -234,7 +234,7 @@
       "line": 1103,
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
-      "note": "Verified against source, and it is the same queryset as :1099 iterated a second time four lines later. Genuine by mechanism. NetBox re-iterates `circuit_terminations` four times in this block, which is a separate defect -- repeated evaluation of one queryset -- that this family should report in its own right rather than folding into the N+1 count."
+      "note": "Verified against source, and re-verified against Django's own source, which corrected an earlier note here. This is the same queryset as :1099, iterated again four lines later, and the second pass costs nothing: `QuerySet._fetch_all` returns the cached `_result_cache` rather than re-querying, and `ForwardManyToOneDescriptor.__get__` consults `field.get_cached_value(instance)` before touching the database, so ``ct._provider_network`` was already resolved on these exact instances at :1099. The defect is real -- `CircuitTermination.objects.filter(qs)` still has no `select_related`, and fixing it fixes both sites -- but this line's message overstates it, because no query is issued here. Counted as a true positive on the defect and as a redundant report on the cost; both are published in the README rather than netted off."
     },
     {
       "fingerprint": "8b9ceb94384386d1",
@@ -254,7 +254,7 @@
       "line": 1114,
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
-      "note": "Verified against source. Fourth pass over `circuit_terminations`, reading `ct.cable` in an `any(...)`. Reported once per path rather than once per read, so this is not a duplicate of :1107 -- it is a separate loop over the same rows."
+      "note": "Verified against source, and re-verified against Django's own source, which corrected an earlier note here. This is the same queryset as :1107, iterated again seven lines later, and the second pass costs nothing: `QuerySet._fetch_all` returns the cached `_result_cache` rather than re-querying, and `ForwardManyToOneDescriptor.__get__` consults `field.get_cached_value(instance)` before touching the database, so ``ct.cable`` was already resolved on these exact instances at :1107. The defect is real -- `CircuitTermination.objects.filter(qs)` still has no `select_related`, and fixing it fixes both sites -- but this line's message overstates it, because no query is issued here. Counted as a true positive on the defect and as a redundant report on the cost; both are published in the README rather than netted off."
     },
     {
       "fingerprint": "8b1caf5af5475940",

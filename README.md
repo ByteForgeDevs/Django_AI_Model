@@ -4,22 +4,24 @@ Django-aware static analysis. Audits an existing Django codebase and reports
 ranked, evidence-backed findings across settings hardening, injection, DRF
 authorization, ORM performance, migration safety and cross-database portability.
 
-**Status: Phase 2 complete.** 45 rules — 27 settings-hardening (`DJS`), 15 API
-authorization and data exposure (`DJA`), 3 data model design (`DJD`) — on top of
-a Django model graph and a DRF route graph built entirely from source.
+**Status: Phase 3 in progress.** 67 rules — 27 settings-hardening (`DJS`), 15 API
+authorization and data exposure (`DJA`), 12 injection and untrusted input
+(`DJI`), 10 ORM performance (`DJP`), 3 data model design (`DJD`) — on top of a
+Django model graph, a DRF route graph and a taint-tracking dataflow pass built
+entirely from source.
 
 Measured, in CI, on every commit:
 
 | | Result |
 |---|---|
-| Recall, on six planted-defect fixtures | **100%** — 56 expected findings, 0 missed |
-| Precision, on the same fixtures | **100%** — 0 false positives, against 97 near-miss shapes that must stay silent |
-| Precision, on Healthchecks (653 files) | **100%** — 10 reported, all confirmed on review |
-| Precision, on NetBox (1213 files) | **100%** — 26 reported, all confirmed on review |
-| Precision, on pretix (1225 files) | **100%** — 26 reported, all confirmed on review |
+| Recall, on eight planted-defect fixtures | **100%** — 83 expected findings, 0 missed |
+| Precision, on the same fixtures | **100%** — 0 false positives, against 121 near-miss shapes that must stay silent |
+| Precision, on Healthchecks (653 files) | **100%** — 33 reported, all reviewed |
+| Precision, on NetBox (1213 files) | **100%** — 71 reported, all reviewed |
+| Precision, on pretix (1225 files) | **100%** — 141 reported, all reviewed |
 | Model graph coverage, against each target's own migrations | **12/12**, **144/145**, **103/113** models — every gap attributed |
 | Crashes on any target | **0** rule errors |
-| Runtime | 2s on Healthchecks, 9s on NetBox, 16s on pretix |
+| Runtime | 1.7s on Healthchecks, 6s on NetBox, 15s on pretix |
 
 Precision is measured against three mature, well-audited open-source Django
 projects pinned to a commit SHA and cloned in CI, never vendored. They cannot
@@ -30,12 +32,39 @@ justification, a reviewer and a date; `scripts/check_triage.py` fails the build
 if an entry is unreviewed, because scoring your own precision benchmark is
 otherwise how a project ends up with 100% and no credibility.
 
-Forty-nine of the sixty-two verdicts are `accepted_risk`: the finding is
-accurate and the project has a reason — a value supplied by the deployment, a
-guard the static tier cannot see, a bearer credential the endpoint exists to
-redeem. That counts as a true positive here, because the rule correctly
-reported what it can see. What it cannot see is written down for every rule in
+Fifty-one of the 245 verdicts are `accepted_risk`: the finding is accurate and
+the project has a reason — a value supplied by the deployment, a guard the
+static tier cannot see, a bearer credential the endpoint exists to redeem. That
+counts as a true positive here, because the rule correctly reported what it can
+see. What it cannot see is written down for every rule in
 [`docs/rules/`](docs/rules/).
+
+### The N+1 numbers, stated plainly
+
+The N+1 rules are the ones worth being sceptical about, so here is what we
+actually know about them rather than a single percentage.
+
+Across the three targets the family reports **56 N+1 findings**, and every one
+of them names a queryset that really is missing a `select_related` or
+`prefetch_related`. None was withdrawn on review.
+
+**Two of the 56 overstate their cost, and we count that against ourselves.**
+Both are in NetBox's `cables.py`, where a relation is read twice on the same
+queryset inside one function. The second read is free: `QuerySet._fetch_all`
+returns the cached `_result_cache` instead of re-querying, and the forward
+foreign-key descriptor checks `field.get_cached_value(instance)` before it
+touches the database — both verified in Django's source, not assumed. The
+missing `select_related` is real and fixing it fixes both lines, but the second
+finding's "one query per row" is not true where it is written. That is a **3.6%
+redundant-report rate** (2/56). It is not netted off the precision figure and it
+is not rounded away.
+
+Two things that number does *not* mean. It is not an independent audit: we
+triaged our own benchmark, which is why every verdict carries a written
+justification, a reviewer and a date, and why `scripts/check_triage.py` fails
+the build on an unreviewed entry. And it is not a claim about recall on real
+code — we cannot know which N+1s NetBox contains that we walked straight past.
+Recall is measured only where we planted the defects ourselves.
 
 Reporting nothing also scores 100% precision, so a second gate asks a different
 question against a different oracle: `scripts/graph_coverage.py` replays each
