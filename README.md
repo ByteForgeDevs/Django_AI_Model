@@ -75,6 +75,13 @@ are 55 inherited from `MPTTModel`, 4 from `AbstractBaseUser` and 2 from
 open. An unexplained gap fails the build. See
 [`docs/architecture/model-graph.md`](docs/architecture/model-graph.md).
 
+The `DJP` and `DJI` families rest on a taint-tracking dataflow pass whose limits
+are written down rather than discovered:
+[`docs/architecture/dataflow.md`](docs/architecture/dataflow.md) states what it
+cannot see — no path sensitivity, no cross-module flow, no aliasing through
+containers or attributes, one interprocedural hop within a module — with a
+verified example of each staying silent.
+
 ## What it is, and what it is not
 
 This is not a trained model and does not call an LLM. Every finding is produced
