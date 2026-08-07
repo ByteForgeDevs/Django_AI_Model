@@ -333,3 +333,36 @@ class TestWithNothingToReasonFrom:
             assert _pins(text) is True, text
         for text in ("//", "https://", "http://", ""):
             assert _pins(text) is False, text
+
+
+class TestWhichArgumentIsTheDestination:
+    """`redirect(to, *args, **kwargs)` -- only `to` chooses the host.
+
+    Read from `django/shortcuts.py`: `redirect` passes everything to
+    `resolve_url(to, *args, **kwargs)`, which calls `reverse(to, args=args,
+    kwargs=kwargs)`. The extra arguments are therefore substituted into a URL
+    *pattern*, landing in a path segment of a URL the project itself named.
+    They cannot move the client to another host, which is the whole of what
+    this rule is about.
+
+    Blaming the last argument instead of the first survived every other test
+    here, and it is a false positive on the most ordinary call in Django --
+    `redirect('detail', pk)`.
+    """
+
+    def test_a_reverse_argument_is_not_a_destination(self, make_project):
+        body = 'return redirect("detail", request.GET["pk"])\n'
+        assert run(make_project(view(body))) == []
+
+    def test_nor_is_a_third_one(self, make_project):
+        body = 'return redirect("detail", "x", request.GET["pk"])\n'
+        assert run(make_project(view(body))) == []
+
+    def test_nor_a_keyword_argument(self, make_project):
+        body = 'return redirect("detail", pk=request.GET["pk"])\n'
+        assert run(make_project(view(body))) == []
+
+    def test_but_the_first_argument_is(self, make_project):
+        """The contrast, so the three above cannot pass by the rule being mute."""
+        body = 'return redirect(request.GET["next"], "x")\n'
+        assert len(run(make_project(view(body)))) == 1

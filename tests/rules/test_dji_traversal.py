@@ -204,3 +204,147 @@ class TestWithNothingToReasonFrom:
 
     def test_a_sink_with_no_arguments(self, make_project):
         assert run(make_project(view("return open()\n"))) == []
+
+
+class TestWhichExpressionIsBlamed:
+    """The walk has to name the tainted *part*, not the expression containing it.
+
+    Every test above asserts that a finding exists. Mutation showed that is not
+    enough: replacing each descent through a composition with a bare taint test
+    on the whole node left all of them passing, because a composed expression
+    containing request data is itself tainted, so the rule still reported --
+    just about a coarser node. Six mutants survived that way.
+
+    It matters to the reader, not only to the probe. The message and the second
+    evidence excerpt are the two places a user learns *what* the client
+    controls, and `BASE + request.GET["f"]` names a constant they can ignore
+    where `request.GET["f"]` names the hole.
+    """
+
+    def blamed(self, project) -> str:
+        found = run(project)
+        assert len(found) == 1, found
+        excerpt = next(e for e in found[0].evidence if e.kind is EvidenceKind.AST)
+        assert excerpt.content
+        return found[0].evidence[1].content
+
+    def test_concatenation_blames_the_added_part(self, make_project):
+        body = 'return open(BASE + request.GET["f"])\n'
+        assert self.blamed(make_project(view(body))) == "request.GET['f']"
+
+    def test_an_fstring_blames_the_interpolation(self, make_project):
+        body = "return open(f\"{BASE}/{request.GET['f']}\")\n"
+        assert self.blamed(make_project(view(body))) == "request.GET['f']"
+
+    def test_percent_interpolation_blames_the_argument(self, make_project):
+        body = 'return open("%s/%s" % (BASE, request.GET["f"]))\n'
+        assert self.blamed(make_project(view(body))) == "request.GET['f']"
+
+    def test_a_join_blames_the_supplied_argument(self, make_project):
+        body = 'return open(os.path.join(BASE, request.GET["f"]))\n'
+        assert self.blamed(make_project(view(body))) == "request.GET['f']"
+
+    def test_pathlib_division_blames_the_divisor(self, make_project):
+        body = 'return open(Path(BASE) / request.GET["f"])\n'
+        assert self.blamed(make_project(view(body))) == "request.GET['f']"
+
+    def test_a_name_is_resolved_to_what_it_holds(self, make_project):
+        """Blaming the local would tell the reader nothing they did not write."""
+        body = 'name = request.GET["f"]\nreturn open(BASE + name)\n'
+        assert self.blamed(make_project(view(body))) == "request.GET['f']"
+
+    def test_a_name_defined_from_itself_still_blames_the_request(self, make_project):
+        """The recursion guard, and the only shape that reaches it.
+
+        Resolving `name` walks to its definitions, one of which reads `name`
+        again. The guard stops there and lets the other definition answer. A
+        mutant that instead returned the repeated name when it happened to be
+        tainted still produced a finding -- on the same line, with the same
+        rule -- and blamed `name`, which tells the reader nothing. Asserting
+        the finding exists could never have caught that.
+        """
+        body = 'name = request.GET["f"]\nname = BASE + name\nreturn open(name)\n'
+        assert self.blamed(make_project(view(body))) == "request.GET['f']"
+
+
+class TestWhichHolderOwnsTheVerb:
+    """`copy` and `move` are ordinary words, and only two modules make them sinks.
+
+    Without this, the mutants that drop the `os` and `shutil` restrictions
+    survive: nothing in the suite calls a same-named method on anything else,
+    so the guard looked untested and, to a reader, unnecessary.
+    """
+
+    def test_a_project_object_with_a_filesystem_name_is_not_a_sink(self, make_project):
+        body = 'return copy.copy(request.GET["f"])\n'
+        assert run(make_project(view(body))) == []
+
+    def test_an_os_verb_on_shutil_is_not_a_sink(self, make_project):
+        """The cross product, which is where the two guards are actually tested.
+
+        `copy.copy` never reaches them: the holder is not in `MODULES`, so the
+        function has already returned. Only a holder that *is* one of the two
+        modules, carrying the *other* one's verb, runs the comparison -- which
+        is why the mutants dropping each restriction survived a suite full of
+        `copy.copy`. `shutil.remove` is also the mistake a person makes,
+        reaching for `os.remove` and typing the module they were already using.
+        """
+        body = 'return shutil.remove(request.GET["f"])\n'
+        assert run(make_project(view(body))) == []
+
+    def test_a_shutil_verb_on_os_is_not_a_sink(self, make_project):
+        """The same trade in the other direction: `os.copy` does not exist."""
+        body = 'return os.copy(request.GET["f"], BASE)\n'
+        assert run(make_project(view(body))) == []
+
+    def test_os_removing_something_still_is(self, make_project):
+        """The contrast, so the two above cannot pass by the rule going silent."""
+        body = 'return os.remove(request.GET["f"])\n'
+        assert len(run(make_project(view(body)))) == 1
+
+    def test_an_arbitrary_object_moving_something_is_not_a_sink(self, make_project):
+        body = 'return tarfile.move(request.GET["f"])\n'
+        assert run(make_project(view(body))) == []
+
+    def test_shutil_moving_something_still_is(self, make_project):
+        body = 'return shutil.move(request.GET["f"], BASE)\n'
+        assert len(run(make_project(view(body)))) == 1
+
+    def test_a_clean_binding_is_not_reported(self, make_project):
+        """The name resolves, and what it resolves to is a constant."""
+        body = 'name = "report.csv"\nreturn open(BASE + name)\n'
+        assert run(make_project(view(body))) == []
+
+
+class TestPercentFormattingWithATuple:
+    """A path built with `%` blames the element, not the tuple holding it.
+
+    The traversal walk's tuple branch was reached zero times across all three
+    corpora, which is an argument that nobody writes it, not that nobody can.
+    Skipping it leaves the finding in place -- the tuple carries the taint --
+    and moves the blame onto `(BASE, request.GET['f'])`, which tells the reader
+    to look at a line they can already see rather than at the part of it that
+    came from the request.
+    """
+
+    def blamed(self, project) -> str:
+        found = run(project)
+        assert len(found) == 1, found
+        return found[0].evidence[1].content
+
+    def test_the_tainted_element_of_a_pair(self, make_project):
+        body = 'return open("%s/%s" % (BASE, request.GET["f"]))\n'
+        assert self.blamed(make_project(view(body))) == "request.GET['f']"
+
+    def test_a_single_element_tuple(self, make_project):
+        body = 'return open("%s" % (request.GET["f"],))\n'
+        assert self.blamed(make_project(view(body))) == "request.GET['f']"
+
+    def test_a_list_on_the_right(self, make_project):
+        body = 'return open("%s" % [request.GET["f"]])\n'
+        assert self.blamed(make_project(view(body))) == "request.GET['f']"
+
+    def test_a_tuple_of_constants_is_not_reported(self, make_project):
+        """The contrast: walking into the tuple must not invent taint."""
+        body = 'return open("%s/%s" % (BASE, "notes.txt"))\n'
+        assert run(make_project(view(body))) == []

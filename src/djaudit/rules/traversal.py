@@ -141,7 +141,7 @@ def accesses(node: ast.Call) -> Iterator[Access]:
 
 
 def traversable(
-    node: ast.expr, chains: DefUse | None, seen: set[str] | None = None
+    node: ast.expr, chains: DefUse | None, seen: set[int] | None = None
 ) -> ast.expr | None:
     """The part of this path the request supplies, if any part of it does.
 
@@ -170,9 +170,17 @@ def traversable(
     if isinstance(node, ast.Name) and chains is not None:
         # Declining on a repeat visit rather than falling through to taint, for
         # the reason DJI-011 records: a permissive default reverses the guard.
-        if node.id in seen:
+        #
+        # Keyed on the node, not the name. Keying on the name made a rebinding
+        # that reads itself unresolvable -- `name = request.GET["f"]` then
+        # `name = BASE + name` reported nothing at all, because the inner read
+        # looked like a repeat of the outer one. They are different uses at
+        # different points with different definitions reaching them, and only
+        # the inner one can see the request. Node identity still terminates,
+        # since the tree is finite and each node is walked once.
+        if id(node) in seen:
             return None
-        seen.add(node.id)
+        seen.add(id(node))
         for binding in chains.reaching(node):
             if binding.value is None:
                 continue
@@ -184,7 +192,7 @@ def traversable(
     return node if taint_of(node, chains) is Taint.TAINTED else None
 
 
-def _joined(node: ast.Call, chains: DefUse | None, seen: set[str]) -> ast.expr | None:
+def _joined(node: ast.Call, chains: DefUse | None, seen: set[int]) -> ast.expr | None:
     """What ``os.path.join(base, part)`` puts into its result.
 
     Looked inside rather than declined, because it is not opaque the way a
@@ -208,7 +216,7 @@ def _joined(node: ast.Call, chains: DefUse | None, seen: set[str]) -> ast.expr |
 
 
 def _any_part(
-    parts: tuple[ast.expr | ast.FormattedValue, ...], chains: DefUse | None, seen: set[str]
+    parts: tuple[ast.expr | ast.FormattedValue, ...], chains: DefUse | None, seen: set[int]
 ) -> ast.expr | None:
     """The first part the request supplies. Position carries no meaning here."""
     for part in parts:

@@ -130,7 +130,7 @@ def marked(node: ast.Call) -> Iterator[Trusted]:
 
 
 def unescaped(
-    node: ast.expr, chains: DefUse | None, seen: set[str] | None = None
+    node: ast.expr, chains: DefUse | None, seen: set[int] | None = None
 ) -> ast.expr | None:
     """The part of *node* the request supplies, if any part of it does.
 
@@ -166,9 +166,18 @@ def unescaped(
         # TAINTED -- true, but about a value that had already been declined
         # because quote() percent-encodes it. A recursion guard that gives up
         # into a permissive default reverses the decision it was protecting.
-        if node.id in seen:
+        #
+        # Keyed on the node rather than the name, for `DJI-012`'s reason. The
+        # netbox case above is one name reaching one earlier definition twice,
+        # which node identity still stops. Keying on the name also stopped a
+        # rebinding that reads itself -- `label = request.GET["q"]` then
+        # `label = "<b>" + label` went silent, because the inner read looked
+        # like a repeat of the outer one when it is a different use with a
+        # different definition reaching it, and the only one that sees the
+        # request.
+        if id(node) in seen:
             return None
-        seen.add(node.id)
+        seen.add(id(node))
         for binding in chains.reaching(node):
             if binding.value is None:
                 continue
@@ -180,7 +189,7 @@ def unescaped(
     return node if taint_of(node, chains) is Taint.TAINTED else None
 
 
-def _spliced(node: ast.Call, chains: DefUse | None, seen: set[str]) -> ast.expr | None:
+def _spliced(node: ast.Call, chains: DefUse | None, seen: set[int]) -> ast.expr | None:
     """What ``"...".format(x)`` puts into its result.
 
     ``str.format`` is the one call this rule looks inside. It is not opaque the
@@ -194,7 +203,7 @@ def _spliced(node: ast.Call, chains: DefUse | None, seen: set[str]) -> ast.expr 
 
 
 def _any_part(
-    parts: tuple[ast.expr | ast.FormattedValue, ...], chains: DefUse | None, seen: set[str]
+    parts: tuple[ast.expr | ast.FormattedValue, ...], chains: DefUse | None, seen: set[int]
 ) -> ast.expr | None:
     """The first part the request supplies. Position carries no meaning here."""
     for part in parts:
@@ -306,11 +315,12 @@ class TrustedHtml(Rule):
         position = (
             "format string" if found.name in {FORMAT_HTML, "format_html_join"} else "argument"
         )
+        article = "a" if position.startswith("f") else "an"
         return self.finding(
             location=ctx.location(path, found.call),
             confidence=Confidence.CERTAIN,
             message=(
-                f"{found.name}() is given a {position} that {source or written} reaches, "
+                f"{found.name}() is given {article} {position} that {source or written} reaches, "
                 f"so request data is written into the page with its markup intact"
             ),
             evidence=(

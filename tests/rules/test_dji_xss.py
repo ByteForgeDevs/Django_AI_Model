@@ -208,3 +208,120 @@ class TestWithNothingToReasonFrom:
 
     def test_a_sink_with_no_arguments(self, make_project):
         assert run(make_project(view("return mark_safe()\n"))) == []
+
+
+class TestTheRecursionGuardKeyedOnTheNode:
+    """A name that reads itself is not the same use twice.
+
+    The guard was keyed on the name, which conflated two different uses of one
+    name at two different points, each with different definitions reaching it.
+    The cost was a silent miss on the most ordinary way anyone builds a string.
+    Keyed on the node instead, both cases below are answered correctly, and the
+    netbox shape the guard exists for is still stopped -- that one is one use
+    reaching one earlier definition twice, which node identity also catches.
+    """
+
+    def test_a_name_appended_to_itself_is_still_reported(self, make_project):
+        body = 'label = request.GET["q"]\nlabel = "<b>" + label\nreturn mark_safe(label)\n'
+        assert len(run(make_project(view(body)))) == 1
+
+    def test_and_it_blames_the_request_read(self, make_project):
+        """Not the local, which would tell the reader nothing they did not write."""
+        body = 'label = request.GET["q"]\nlabel = "<b>" + label\nreturn mark_safe(label)\n'
+        found = run(make_project(view(body)))
+        assert "request.GET" in found[0].message
+        assert "label" not in found[0].message
+        excerpt = [e.content for e in found[0].evidence if e.kind is EvidenceKind.AST]
+        assert "request.GET['q']" in excerpt
+
+    def test_a_sanitised_value_stays_sanitised_across_a_rebinding(self, make_project):
+        """The decision the guard protects, which the fix must not reverse.
+
+        `quote` percent-encodes, so this is safe, and it stays safe when the
+        name is rebound from itself. If node-keying had let the second visit
+        fall through to the taint fallback, this would be reported -- which is
+        exactly the regression the name-keyed guard was written to prevent.
+        """
+        body = 'html = quote(request.GET["q"])\nhtml = "<b>" + html\nreturn mark_safe(html)\n'
+        assert run(make_project(view(body))) == []
+
+    def test_a_cycle_between_two_names_terminates(self, make_project):
+        """Node identity is finite, so a mutual definition cannot loop forever."""
+        body = 'a = request.GET["q"]\nb = a\na = b\nreturn mark_safe(a)\n'
+        assert len(run(make_project(view(body)))) == 1
+
+    def test_one_sanitised_definition_reached_down_two_paths(self, make_project):
+        """The shape the guard was written for, reduced from netbox.
+
+        `netbox/tables/columns.py` builds a table cell by appending to `html`
+        in several branches, each appending the same `button`, whose one
+        definition holds a `quote()`d query string. Walking `html` therefore
+        arrives at that same `app` node twice, and the second arrival is the
+        one the guard stops.
+
+        It has to stop by *declining*. Falling through to the taint default
+        would answer TAINTED -- true of the value, but the walk had already
+        decided it was safe because `quote` percent-encodes it. That mutation
+        survived every other test in this file and reported here and on the
+        real netbox file, so this is the case that holds the decision in place.
+        """
+        body = (
+            'app = "?r=" + quote(request.GET["r"])\n'
+            'button = "<a href=\'" + app + "\'>x</a>"\n'
+            'html = ""\n'
+            'if button and request.GET.get("d"):\n'
+            '    html += "<span>" + button + "</span>"\n'
+            "elif button:\n"
+            "    html += button\n"
+            "return mark_safe(html)\n"
+        )
+        assert run(make_project(view(body))) == []
+
+    def test_and_the_same_shape_unsanitised_is_still_reported(self, make_project):
+        """The contrast: the guard declines a repeat, it does not decline the shape."""
+        body = (
+            'app = "?r=" + request.GET["r"]\n'
+            'button = "<a href=\'" + app + "\'>x</a>"\n'
+            'html = ""\n'
+            'if button and request.GET.get("d"):\n'
+            '    html += "<span>" + button + "</span>"\n'
+            "elif button:\n"
+            "    html += button\n"
+            "return mark_safe(html)\n"
+        )
+        assert len(run(make_project(view(body)))) == 1
+
+
+class TestPercentFormattingWithATuple:
+    """`"%s" % (value,)` -- the right side of a `%` is a tuple, and the tuple
+    is not the thing to blame.
+
+    No corpus writes this: 3,091 files reached the tuple branch once between
+    them, and never in a way that changed a finding. It is still the oldest
+    string formatting in Python, and skipping the branch does not silence the
+    rule -- the tuple is itself tainted, so it reports either way. What is lost
+    is the pointing: the reader is handed `('ok', request.GET['q'])` instead of
+    `request.GET['q']`. That is the entire difference, so it is what these
+    assert.
+    """
+
+    def blamed(self, findings: list[Finding]) -> str:
+        excerpts = [e.content for e in findings[0].evidence if e.kind is EvidenceKind.AST]
+        return excerpts[-1]
+
+    def test_a_single_element_tuple(self, make_project):
+        body = 'return mark_safe("<b>%s</b>" % (request.GET["q"],))\n'
+        assert self.blamed(run(make_project(view(body)))) == "request.GET['q']"
+
+    def test_the_tainted_element_of_several(self, make_project):
+        body = 'return mark_safe("<b>%s%s</b>" % ("ok", request.GET["q"]))\n'
+        assert self.blamed(run(make_project(view(body)))) == "request.GET['q']"
+
+    def test_a_list_on_the_right(self, make_project):
+        body = 'return mark_safe("<b>%s</b>" % [request.GET["q"]])\n'
+        assert self.blamed(run(make_project(view(body)))) == "request.GET['q']"
+
+    def test_a_tuple_of_constants_is_not_reported(self, make_project):
+        """The contrast: walking into the tuple must not invent taint."""
+        body = 'return mark_safe("<b>%s%s</b>" % ("a", "b"))\n'
+        assert run(make_project(view(body))) == []

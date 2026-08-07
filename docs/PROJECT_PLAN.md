@@ -5107,6 +5107,58 @@ We therefore build the dataflow foundation first, and we default this family to
   asserting *which* expression is blamed, which is what the evidence excerpt
   shows the reader.
 
+  **Done.** 324 mutants, **299 caught, 25 survivors, none unexplained.** Every
+  survivor was put through a differential harness that applies the mutation and
+  compares findings — rule, line *and* the blamed evidence excerpt — across 57
+  snippets and all 3,091 corpus files. A survivor is only a gap if it changes an
+  answer somewhere, and the harness is what decides that rather than a reading
+  of the diff.
+
+  Twenty are the widening class and stay. One, `ordering.py`'s constant-field
+  early-out, *looked* like a gap and is not: it is reached 415 times across the
+  corpora, and removing it changes no finding anywhere, so it buys time and not
+  correctness. Two more — dropping `DJI-011`'s recursion guard and letting
+  `DJI-012`'s repeat fall through — change nothing across snippets or corpora;
+  they are recorded as equivalent rather than killed with a test that would only
+  be asserting itself. One is self-describing: an alias branch the matcher
+  cannot reach.
+
+  Four were real, and three of those were bugs rather than missing tests.
+
+  `DJI-011` had `DJI-012`'s name-keyed `seen` bug. `label = request.GET["q"]`
+  then `label = "<b>" + label` reported **nothing**, because the guard was keyed
+  on the name, so the inner read looked like a repeat of the outer one when it
+  is a different use with a different definition reaching it — and the only one
+  that sees the request. Re-keyed to `id(node)`, as `taint.py` and `loops.py`
+  already did. `DJI-009` and `DJI-010` share the shape but not the bug: they
+  fall through to a taint default that happens to answer correctly here. That is
+  luck, not design, and it is why the fix is tested by shape rather than assumed
+  from the grep.
+
+  The guard that fix had to preserve was then found untested. `mark_safe(html)`
+  in `netbox/tables/columns.py` builds a cell by appending the same `button` in
+  several branches, so the walk reaches one `quote()`d value twice; declining
+  the second arrival is the decision, and falling through to the taint default
+  reverses it. That mutation survived every test in the file and produced a
+  **false positive on the real netbox file** — found by running the mutants
+  against the corpora, not the fixtures. Reduced to eight lines and asserted
+  both ways.
+
+  `DJI-010` blamed the right argument for a reason nothing checked. Read from
+  `django/shortcuts.py`: `redirect(to, *args, **kwargs)` forwards to
+  `resolve_url` and then `reverse(to, args=args, kwargs=kwargs)`, so every
+  argument after the first lands in a path segment of a URL the project named
+  and cannot move the client to another host. Blaming the last argument instead
+  survived the whole suite while making `redirect('detail', pk)` — the most
+  ordinary call in Django — a false positive.
+
+  The tuple branches in both string walks are the 3.6.2 finding restated with
+  the fix: `"%s" % (value,)` reports either way, because the tuple carries the
+  taint. What changes is the pointing, from `request.GET['q']` to
+  `('ok', request.GET['q'])`. The corpora reached that branch **once between
+  them**, which is an argument about what three projects write, not about what
+  the branch is worth; the tests assert the excerpt.
+
 ---
 
 # Phase 4 — Migration safety and the live tier
