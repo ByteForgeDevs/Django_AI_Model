@@ -466,6 +466,16 @@ class _Builder:
                 for child in ast.iter_child_nodes(node):
                     if isinstance(child, ast.expr):
                         self.expression(scope, child)
+                    elif isinstance(child, ast.keyword):
+                        # A call holds each keyword argument under an
+                        # `ast.keyword`, which is not an expression, so an
+                        # expression filter walks past the whole argument.
+                        # `sorted(rows, key=lambda r: r.n)` and
+                        # `Prefetch("x", queryset=[q for q in qs])` are both
+                        # written this way, and neither inner scope existed:
+                        # 670 lambdas and comprehensions across the three
+                        # benchmark corpora had no scope object at all.
+                        self.expression(scope, child.value)
 
     def comprehension(
         self, scope: Scope, node: ast.expr, generators: list[ast.comprehension]

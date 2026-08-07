@@ -307,3 +307,47 @@ class TestRobustness:
     def test_unreachable_code_after_a_return_does_not_raise(self):
         chains, _ = analyse("def f():\n    return 1\n    qs = A.objects.all()\n", scope_name="f")
         assert chains is not None
+
+
+class TestKeywordArguments:
+    """A name passed by keyword is still a read.
+
+    ``expression()`` descends by filtering children on ``isinstance(child,
+    ast.expr)``, and a call holds each keyword argument under an
+    ``ast.keyword`` -- which is not an expression. Every name passed by keyword
+    was therefore invisible to this analysis, 2% of reads in healthchecks and
+    over 7% in NetBox, and nothing downstream distinguished "no chain" from "a
+    chain reaching nothing".
+    """
+
+    def test_a_name_passed_by_keyword(self):
+        chains, _ = analyse("qs = Book.objects.all()\nrender(request, template=qs)\n")
+        assert values(use_of(chains, "qs")) == ["Book.objects.all()"]
+
+    def test_a_name_nested_inside_a_keyword_value(self):
+        chains, _ = analyse("term = request.GET['q']\nf(where=[g(term)])\n")
+        assert values(use_of(chains, "term")) == ["request.GET['q']"]
+
+    def test_the_contrast_positionally(self):
+        """The same read one argument to the left, which always worked."""
+        chains, _ = analyse("qs = Book.objects.all()\nrender(qs)\n")
+        assert values(use_of(chains, "qs")) == ["Book.objects.all()"]
+
+    def test_a_double_star_keyword(self):
+        """``**kwargs`` is an ``ast.keyword`` with ``arg`` set to None."""
+        chains, _ = analyse("extra = {'a': 1}\nf(**extra)\n")
+        assert values(use_of(chains, "extra")) == ["{'a': 1}"]
+
+    def test_a_keyword_read_sees_a_rebind_above_it(self):
+        chains, _ = analyse("x = 1\nx = 2\nf(y=x)\n")
+        assert values(use_of(chains, "x")) == ["2"]
+
+    def test_a_keyword_read_in_a_branch_merges(self):
+        chains, _ = analyse(
+            "if cond:\n    x = 1\nelse:\n    x = 2\nf(y=x)\n",
+        )
+        assert sorted(values(use_of(chains, "x"))) == ["1", "2"]
+
+    def test_a_walrus_in_a_keyword_binds(self):
+        chains, _ = analyse("f(a=(n := 5), b=n)\n")
+        assert values(use_of(chains, "n")) == ["5"]

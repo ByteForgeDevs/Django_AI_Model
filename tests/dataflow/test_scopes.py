@@ -257,6 +257,48 @@ class TestComprehensionScopes:
         assert comp.resolve("limit") is not None
 
 
+class TestKeywordArguments:
+    """A call holds each keyword argument under an ``ast.keyword``.
+
+    ``ast.keyword`` is not an ``ast.expr``, so an expression-only walk steps
+    over the entire argument. Every scope written inside one — 670 lambdas and
+    comprehensions across the three benchmark corpora — went unbuilt.
+    """
+
+    def test_a_lambda_in_a_keyword_argument_gets_a_scope(self):
+        root = scopes("rows = sorted(books, key=lambda b: b.title)")
+        assert only_child(root, "<lambda>").binds("b")
+
+    def test_the_same_lambda_positionally_also_gets_one(self):
+        """The contrast: the positional form always worked."""
+        root = scopes("rows = apply(lambda b: b.title)")
+        assert only_child(root, "<lambda>").binds("b")
+
+    def test_a_keyword_lambda_parameter_does_not_leak(self):
+        """Asserts the contrast, so it cannot pass by no scope existing at all."""
+        root = scopes("rows = sorted(books, key=lambda b: b.title)")
+        assert only_child(root, "<lambda>").binds("b")
+        assert root.resolve("b") is None
+
+    def test_a_comprehension_in_a_keyword_argument_gets_a_scope(self):
+        root = scopes('p = Prefetch("chapters", queryset=[c for c in chapters])')
+        assert only_child(root, "<comprehension>").binds("c")
+        assert root.resolve("c") is None
+
+    def test_a_walrus_in_a_keyword_argument_binds_outside(self):
+        root = scopes("f(a=(n := 5))")
+        assert root.resolve("n").kind is BindingKind.WALRUS
+
+    def test_a_keyword_lambda_still_sees_the_enclosing_function(self):
+        root = scopes("def f():\n    order = 'title'\n    return sorted(b, key=lambda x: order)\n")
+        inner = only_child(only_child(root, "f"), "<lambda>")
+        assert inner.resolve("order") is not None
+
+    def test_a_keyword_nested_inside_a_keyword_is_reached(self):
+        root = scopes("f(a=g(key=lambda b: b.title))")
+        assert only_child(root, "<lambda>").binds("b")
+
+
 class TestWalrus:
     def test_a_walrus_binds_in_the_current_scope(self):
         root = scopes("if (n := count()) > 0:\n    pass\n")

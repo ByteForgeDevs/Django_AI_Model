@@ -411,6 +411,13 @@ class _Analysis:
                 for child in ast.iter_child_nodes(node):
                     if isinstance(child, ast.expr):
                         self.expression(child, state)
+                    elif isinstance(child, ast.keyword):
+                        # `f(x=name)` holds its value under an `ast.keyword`,
+                        # which is not an `expr`, so an expression filter drops
+                        # the whole argument. Every other non-expr child inside
+                        # an expression -- `comprehension`, `arguments`, `arg`
+                        # -- belongs to a nested scope and is handled above.
+                        self.expression(child.value, state)
 
     def load(self, node: ast.Name, state: _State) -> None:
         reaching = state.env.get(node.id, ())
