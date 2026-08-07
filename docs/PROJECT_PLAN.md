@@ -4478,6 +4478,76 @@ We therefore build the dataflow foundation first, and we default this family to
   side-effect rather than by return value, and the two visible `SafeLoader`
   calls shown declined by the loader lookup itself.
 - **3.5.3** — `DJI-008` `subprocess` with `shell=True` or `os.system` on tainted data.
+  **Done.** The substep title names two shapes. Running each candidate against
+  `hi; touch SENTINEL` and checking the filesystem afterwards found that one of
+  them is not a vulnerability and that the title misses a third shape entirely.
+
+  | shape | second command ran |
+  |---|---|
+  | `os.system(s)`, `os.popen(s)` | **yes** |
+  | `subprocess.getoutput(s)`, `getstatusoutput(s)` | **yes** |
+  | `subprocess.run(s, shell=True)` | **yes** |
+  | `subprocess.Popen(s, shell=True)` | **yes** |
+  | `subprocess.run(["sh", "-c", s])` | **yes** |
+  | `subprocess.run(s)` | no — `FileNotFoundError` |
+  | `subprocess.run(["echo", s])` | no |
+  | `subprocess.run(["echo", s], shell=True)` | **no** |
+
+  **A string command with no shell is a crash, not an injection.**
+  `subprocess.run("wc; touch X")` raises `FileNotFoundError`, because the entire
+  string is taken as one program name and nothing splits it. That is the same
+  shape as PyYAML's missing `Loader` one substep earlier: the conventional
+  advice reports it, and what it reports is a traceback.
+
+  **`shell=True` does not make a list dangerous.** POSIX hands `["echo", s]` to
+  `/bin/sh -c "echo" "s"`, so element 0 is the command and everything after it
+  becomes the shell's own positional parameters. The sentinel is unambiguous —
+  `["echo", payload]` did not run the payload while `[payload, "ignored"]` did.
+  A rule that flags every element of a list because the call also says
+  `shell=True` would be wrong on the common shape and right only on the rare
+  one, so the rule reports element 0 and nothing else. The unit test asserts the
+  *payload it selected* rather than an empty result, because `["wc", tainted]`
+  is still a sink shape — what declines it is taint finding a constant there,
+  and keeping the two questions apart is what makes the test mean anything.
+
+  **The shell can arrive as the program.** `["sh", "-c", s]` carries no `shell`
+  keyword at all, so a rule keyed on that keyword misses it completely. The
+  program name is checked against a set of shells, with the directory stripped,
+  and the argument after `-c` is the payload — while anything after *that* is a
+  positional parameter and is not reported.
+
+  **Quoting is honoured, and it is honoured per value.** `shlex.quote` was
+  measured to neutralise the payload through f-strings, concatenation, `%`
+  formatting and `join`, so it must be a guard or the rule is unusable on any
+  project that already does the right thing — the fourth substep running where
+  the sanitiser decides whether the rule ships at all. It is deliberately *not*
+  added to the taint model's global sanitiser set: quoting makes a string safe
+  as one shell word and says nothing about that string reaching SQL or `eval`.
+  The guard asks only *tainted* parts whether they were quoted, which is what
+  separates `shlex.quote(prefix) + request.GET["f"]` — a quoter present, on the
+  wrong value — from a command that is actually safe. Like `DJI-006`'s
+  allowlist, it follows reaching definitions, because the payload at the call is
+  usually a name and the quoting is written where that name was built.
+
+  **The corpus is silent, and the funnel says why.** Eleven shell calls exist in
+  3,091 files and none is tainted. The only `os.system` is healthchecks' shell
+  integration, which is gated behind `settings.SHELL_ENABLED`, takes its
+  template from admin configuration rather than a request, and passes every
+  user-controlled substitution through `shlex.quote` — so `UNKNOWN` is the right
+  answer for the right reason rather than a rule that cannot see.
+
+  Of 26 injection defects aimed at the rule, three were genuinely missing tests:
+  honouring a `quote()` from any module, calling an unresolved source a direct
+  one, and — the interesting one — letting a quoter anywhere in the payload
+  excuse it, which is the `shlex.quote(prefix) + tainted` shape and a real
+  defect class rather than a test artefact. A fourth mutant was defective, since
+  it called a helper that does not exist in this module and so could only ever
+  raise; it was re-aimed at reading a dotted holder as the module name.
+
+  *Done when:* 39 tests, 173/192 injection with every survivor a widening, the
+  execution table established by filesystem sentinel rather than by return
+  value, and the quoting guard shown declining four shapes that taint analysis
+  had already marked tainted.
 - **3.5.4** — `DJI-009` **SSRF** — outbound HTTP request to a tainted URL.
 - **3.5.5** — `DJI-010` open redirect — `redirect()` or `HttpResponseRedirect` with a tainted target.
 - **3.5.6** — `DJI-011` `mark_safe` or `format_html` applied to tainted data (XSS).
@@ -4847,9 +4917,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **62 rules are
+document specifies, and most of it is still only specified: **63 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first ten of Phase 3's and the first seven of its injection family.
+2, plus the first ten of Phase 3's and the first eight of its injection family.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

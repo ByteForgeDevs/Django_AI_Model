@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJI` — injection and untrusted input
 
-7 rules on the boundary between text the project wrote and text the
+8 rules on the boundary between text the project wrote and text the
 client sent. Every one of them is about the same mistake in a different
 costume: a value that should have travelled beside a command ends up inside
 it, and something that was meant to be data is read as syntax.
@@ -57,6 +57,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJI-005`](#dji-005--request-data-expanded-into-queryset-keyword-arguments) | Request data expanded into queryset keyword arguments | high | firm |
 | [`DJI-006`](#dji-006--ordering-field-chosen-by-request-data-with-no-allowlist) | Ordering field chosen by request data with no allowlist | medium | firm |
 | [`DJI-007`](#dji-007--request-data-evaluated-or-deserialised-by-an-executing-loader) | Request data evaluated or deserialised by an executing loader | critical | firm |
+| [`DJI-008`](#dji-008--request-data-used-to-build-a-shell-command) | Request data used to build a shell command | critical | firm |
 
 ---
 
@@ -217,3 +218,28 @@ $ djaudit run . --min-severity info --min-confidence tentative
 - <https://pyyaml.org/wiki/PyYAMLDocumentation>
 - <https://docs.djangoproject.com/en/stable/topics/signing/>
 - <https://cwe.mitre.org/data/definitions/502.html>
+
+---
+
+### DJI-008 — Request data used to build a shell command
+
+**Severity** critical · **Confidence** firm · **Tier** static
+
+**What it means.** A shell reads its input as a language, not as a filename. Semicolons, backticks, $(...) and pipes are all instructions, so a request value spliced into a command line does not choose an argument, it appends commands. Each shape reported here was measured running a second command from its payload, which means the process executes whatever the client writes, with the application's own privileges and its own database credentials in the environment.
+
+**How to fix it.** Pass an argument list and no shell: subprocess.run([tool, value]) hands value to the program as one argument however it is spelled, which was measured not to run an embedded command. Where a shell is genuinely required, wrap every interpolated value in shlex.quote, which was measured to neutralise the same payload. Better still, validate the value against a fixed set first: most command lines built from a request only ever need one of a handful of permitted values.
+
+**What this rule cannot see.**
+
+- A payload is reported only when taint analysis proves it came from the request. A command built from a model field, a setting or a helper's parameter is unknown rather than tainted and is not reported.
+- A string first argument with no shell keyword is not reported. It was measured to raise FileNotFoundError, because the whole string is taken as one program name, so the defect is a crash rather than an injection.
+- With shell=True and a list argument only the first element is reported. POSIX passes the rest to the shell as positional parameters, which was measured not to execute them.
+- A shell keyword that is a variable rather than the literal True is not reported, because the rule cannot show which way it resolves and this finding is too severe to raise on a guess.
+- Quoting is recognised as shlex.quote or shlex.join by name. A project that wraps either in its own helper is not recognised, so such a call is reported even though the payload is escaped.
+
+**References**
+
+- <https://docs.python.org/3/library/subprocess.html#security-considerations>
+- <https://docs.python.org/3/library/shlex.html#shlex.quote>
+- <https://cwe.mitre.org/data/definitions/78.html>
+- <https://owasp.org/www-community/attacks/Command_Injection>
