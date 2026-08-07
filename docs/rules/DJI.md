@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJI` — injection and untrusted input
 
-11 rules on the boundary between text the project wrote and text the
+12 rules on the boundary between text the project wrote and text the
 client sent. Every one of them is about the same mistake in a different
 costume: a value that should have travelled beside a command ends up inside
 it, and something that was meant to be data is read as syntax.
@@ -61,6 +61,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJI-009`](#dji-009--request-data-chooses-the-host-of-an-outbound-request) | Request data chooses the host of an outbound request | high | certain |
 | [`DJI-010`](#dji-010--redirect-target-chosen-by-request-data-with-no-host-check) | Redirect target chosen by request data with no host check | medium | firm |
 | [`DJI-011`](#dji-011--request-data-marked-as-trusted-html) | Request data marked as trusted HTML | high | certain |
+| [`DJI-012`](#dji-012--file-path-chosen-by-request-data) | File path chosen by request data | high | certain |
 
 ---
 
@@ -319,3 +320,27 @@ $ djaudit run . --min-severity info --min-confidence tentative
 - <https://docs.djangoproject.com/en/stable/ref/utils/#django.utils.html.format_html>
 - <https://docs.djangoproject.com/en/stable/topics/templates/#automatic-html-escaping>
 - <https://docs.djangoproject.com/en/stable/ref/utils/#django.utils.safestring.mark_safe>
+
+---
+
+### DJI-012 — File path chosen by request data
+
+**Severity** high · **Confidence** certain · **Tier** static
+
+**What it means.** A path assembled from request data lets the client name a file the view never meant to expose. A leading slash makes os.path.join discard the base directory outright, and a ../ climbs out of it after normalisation, so a constant prefix is not a defence. Read access leaks settings modules, private keys and the database file; the same path handed to os.remove or shutil.move deletes or relocates them.
+
+**How to fix it.** Do not build a path from request data. Take a key from the request and look the path up, or store the file through Django's storage API, whose FileSystemStorage refuses a traversing name. Where a path must be assembled, django.utils._os.safe_join raises rather than escaping its base.
+
+**What this rule cannot see.**
+
+- A path is reported only when taint analysis proves it came from the request. A filename read from a model field is not reported, though a stored path is a real way to traverse.
+- Reads through Django's storage API are never reported, because FileSystemStorage resolves names with safe_join and raises SuspiciousFileOperation on a traversing one.
+- A call the project wrote is never treated as the request being read, so a helper returning an unfiltered path is missed. This is the trade that lets basename and safe_join go unlisted.
+- Only os and shutil are read as filesystem modules. A path handed to a third-party library that opens it is outside what this rule can follow from the call alone.
+
+**References**
+
+- <https://cwe.mitre.org/data/definitions/22.html>
+- <https://docs.djangoproject.com/en/stable/ref/files/storage/>
+- <https://docs.python.org/3/library/os.path.html#os.path.join>
+- <https://owasp.org/www-community/attacks/Path_Traversal>

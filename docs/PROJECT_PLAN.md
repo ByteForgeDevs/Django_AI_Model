@@ -4706,7 +4706,58 @@ We therefore build the dataflow foundation first, and we default this family to
   benchmarks and declining every one — three of them declined *only* by the
   read-versus-computed test, so that stage is load-bearing on real code rather
   than on fixtures alone.
-- **3.5.7** — `DJI-012` path traversal — file open or `FileResponse` on a tainted path.
+- **3.5.7** — `DJI-012` **path traversal** — the request choosing which file is
+  opened, removed, copied or moved. **Done.**
+
+  Four measurements, all by construction against the installed Django 6.0.7.
+
+  First, **a constant base is no defence**. `os.path.join(BASE, "/etc/passwd")`
+  returns `/etc/passwd` — an absolute later part discards everything before it —
+  and `os.path.join(BASE, "../../etc/passwd")` normalises to the same place.
+  `Path(BASE) / "/etc/passwd"` behaves identically. So the reassuring-looking
+  constant at the front of a join buys nothing, and the rule must not be
+  reassured by it.
+
+  Second, and this is the interesting one, **the answer is the opposite of
+  `DJI-009`'s**. There, `BASE + path` was *safe*: a URL's authority is fixed by
+  the leading characters and nothing appended later can move it, so only the
+  first part mattered. A filesystem path has no authority — `..` climbs out of a
+  concatenation as easily as out of a join — so `DJI-012` asks about **every**
+  part, the way `DJI-011` does for HTML. Two rules, near-identical shapes,
+  opposite answers, and the difference is a property of the target grammar
+  rather than anything visible in the AST.
+
+  Third, **Django already refuses traversal through its storage API**, so
+  reporting it would be a false positive. `django.utils._os.safe_join` raises
+  `SuspiciousFileOperation` on both `..` and an absolute name;
+  `FileSystemStorage.path` is literally `safe_join(self.location, name)`; and
+  `default_storage.open("../../etc/passwd")` and `default_storage.open(
+  "/etc/passwd")` both raise. The rule therefore treats a storage read as no
+  sink at all.
+
+  Fourth, `FileResponse` — which this plan had listed as a sink — **does no name
+  checking of its own, and takes an already-open file object**. There is nothing
+  for it to check. The sink is the `open()` handed to it, which the rule already
+  sees, so naming `FileResponse` too would only have double-reported.
+
+  The corpus then settled the shape of the sink list, and produced the session's
+  sharpest naming lesson: **two names that look alike can need opposite
+  polarity**. `open` is a sink only when **bare** — 97 calls across the three
+  targets, of which 39 are attributes belonging to Django storage, PIL,
+  `tarfile` and `pathlib`, none of them the builtin. `remove`, `copy` and `move`
+  are sinks only when **attributed to `os` or `shutil`** — 209 matches by name,
+  of which exactly **one** is a real filesystem call; 80 are `copy.copy` and most
+  of the remainder are `list.remove()`. A name-keyed rule would have been almost
+  entirely wrong in both directions at once.
+
+  *Done when:* 29 tests, **311 of 311 injection defects caught** with no survivor
+  and no unapplied mutant, and 73 filesystem sinks reached across the benchmarks
+  (2 healthchecks, 30 netbox, 41 pretix) with none tainted and none reported.
+  Stated honestly: unlike `DJI-010` and `DJI-011`, **no corpus site is declined by
+  the walk itself** — every one is declined at the sink or by the request test —
+  so the walk's stages are proven by the mutation probe and not yet by real code.
+  The recall evidence for all four of `DJI-009` through `DJI-012` is owed by the
+  3.6.2 fixture, where each is silent on the corpus by construction.
 
 ### Step 3.6 — Benchmark and document
 
@@ -5072,9 +5123,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **66 rules are
+document specifies, and most of it is still only specified: **67 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first ten of Phase 3's and the first eleven of its injection
+2, plus the first ten of Phase 3's and the first twelve of its injection
 family.
 
 The step and substep counts are verified against the document itself. The
