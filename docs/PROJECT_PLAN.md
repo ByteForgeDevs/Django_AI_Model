@@ -5285,6 +5285,41 @@ and patch authoring. Nothing in the detection path changes.
 triage is genuinely a burden. If it is not, this phase is premature and should
 wait.
 
+**Amendment — this phase was pulled forward, and runs after Phase 3.** The
+entry criterion has two halves and they came apart. The second half is met: 245
+findings across five families have been triaged by hand, and it is a burden.
+The first half was a proxy for the second, written when it was not yet clear
+how quickly the corpus would grow, and it stopped being informative once the
+thing it was proxying for could be observed directly.
+
+Nothing here depends on Phases 4 or 5 in any case. This layer consumes
+`Finding`, which has not changed shape since Phase 0. `DJM` and `DJX` would
+give it more findings to reason about; they would not unblock the reasoning.
+Phases 4 and 5 keep their numbers and follow this one, because renumbering
+would invalidate every cross-reference in this document to buy nothing.
+
+**Amendment — the evaluation set moves first.** It was written as `6.5.2`, near
+the end. Every previous phase built its measurement before the thing it
+measured, and the one time that order was reversed — carrying a mutation score
+in prose rather than re-deriving it — the number was wrong by 26 mutants and
+had been wrong for two sessions. An LLM layer is the worst possible place to
+build blind, because plausible output is exactly what it produces when it is
+wrong. So `6.1.5` is the eval harness, and it exists before anything asks a
+model a question.
+
+The ground truth is the 245 verdicts in `benchmarks/*.json`, with their notes.
+That is one reviewer's judgement rather than an oracle, and the harness says so
+in its output. It is still the only honest yardstick available, and it has the
+property that matters: it was written before any model saw it, for a different
+purpose, so it cannot have been shaped to flatter one.
+
+**Amendment — no third-party API is called from this repository's CI, ever.**
+Sending a target project's source to a model is the user's decision to make
+about their own code, taken with their own credentials. It is not a thing this
+project's test suite may do on their behalf, and a gate that needs network and
+a paid account is a gate that gets disabled. Every test runs against a recorded
+provider. See `6.1.2`.
+
 **Exit criteria.** Every LLM output is either verifiable (a patch that compiles
 and passes tests) or clearly labelled as advisory. No finding is ever created or
 suppressed by a model without a deterministic rule behind it.
@@ -5295,12 +5330,27 @@ that a deterministic rule already produced, with the evidence already attached.
 That keeps the failure mode at "unhelpful" rather than "confidently wrong about
 your security posture".
 
+**And the constraint is structural, not a promise.** A rule stated in a document
+is obeyed until someone is in a hurry. The response types the providers return
+carry no field that can express "this is a defect" or "this is not one", so
+there is no code path from a model's output to the finding list — not one that
+is guarded, one that does not exist. `djaudit triage` may reorder and annotate
+the findings a deterministic rule produced. It cannot add to them and it cannot
+remove from them, and `6.5.3` asserts that by trying.
+
 ### Step 6.1 — Provider abstraction
 
 - **6.1.1** — Provider interface with structured output support; no vendor lock-in.
 - **6.1.2** — Configuration, credential handling, and an explicit offline mode.
 - **6.1.3** — Response caching keyed by finding fingerprint plus prompt version, so cost is bounded and results are reproducible.
 - **6.1.4** — Token budget, rate limiting, and graceful degradation to deterministic output.
+- **6.1.5** — **The evaluation harness, before anything asks a model a question.**
+  Scores a triage run against the 245 recorded human verdicts: agreement rate,
+  and separately the two error directions, because they are not equally bad. A
+  model calling an accepted risk a true positive wastes a reviewer's afternoon.
+  A model calling a true positive an accepted risk is the failure this project
+  exists to prevent, and it is reported on its own line rather than averaged
+  into a single score that can hide it.
 
 ### Step 6.2 — Triage
 
@@ -5324,8 +5374,13 @@ your security posture".
 ### Step 6.5 — Guardrails
 
 - **6.5.1** — Provenance labelling: every model-authored artefact marked as such in output and SARIF.
-- **6.5.2** — Evaluation set for triage quality, measured against human triage from Phases 1–5.
+- **6.5.2** — Evaluation set for triage quality, measured against human triage from Phases 1–5. **Moved to `6.1.5`** — it is the measurement, and it goes first.
 - **6.5.3** — Documented failure modes and a written statement of what the model is never permitted to do.
+- **6.5.4** — **Prove the structural guarantee by attacking it.** A hostile
+  provider that returns every field it is allowed to return, plus fields it is
+  not, and asserts the finding list is byte-identical before and after. The
+  promise that a model cannot create or suppress a finding is worth exactly as
+  much as the test that tries to make it do so.
 
 ---
 
@@ -5385,12 +5440,12 @@ conversation.
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
 | 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | **Complete** (PR #3) — `DJA-001`…`DJA-015`, `DJD-001`…`DJD-003`, 100% precision on three real targets |
-| 3 | Performance and injection | 6 | 36 | In progress |
-| 4 | Migration safety and live tier | 6 | 28 | Not started |
-| 5 | Portability and external adapters | 4 | 20 | Not started |
-| 6 | LLM layer | 5 | 17 | Not started |
+| 3 | Performance and injection | 6 | 36 | **Complete** (PR #5) — `DJP-001`…`DJP-010`, `DJI-001`…`DJI-012`, 100% precision on three real targets |
+| 4 | Migration safety and live tier | 6 | 28 | Not started — **runs after Phase 6**, see the amendment there |
+| 5 | Portability and external adapters | 4 | 20 | Not started — **runs after Phase 6** |
+| 6 | LLM layer | 5 | 19 | In progress — **pulled forward, runs after Phase 3** |
 | 7 | Distribution | 3 | 10 | Not started |
-| | **Total** | **52** | **233** | |
+| | **Total** | **52** | **235** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
