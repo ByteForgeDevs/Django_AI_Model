@@ -10,6 +10,19 @@ mechanism and ``docs/architecture/llm-layer.md`` for the argument.
 from djaudit.llm.budget import Budget, Metered, RateLimit
 from djaudit.llm.cache import Cache, Cached, key_for
 from djaudit.llm.config import Credential, LLMConfig
+from djaudit.llm.edit import (
+    DIFF_CONTEXT,
+    Edit,
+    EditError,
+    apply,
+    diff,
+    line_starts,
+    offset_of,
+    replace_value,
+    span,
+    touched_lines,
+    verified_span,
+)
 from djaudit.llm.evaluate import (
     ReviewedFinding,
     Score,
@@ -65,6 +78,7 @@ from djaudit.llm.triage import (
 
 __all__ = [
     "CORPUS_PRIOR",
+    "DIFF_CONTEXT",
     "MINIMUM_OBSERVATIONS",
     "TRIAGE_SCHEMA",
     "Answer",
@@ -73,6 +87,8 @@ __all__ = [
     "Cached",
     "Credential",
     "Declined",
+    "Edit",
+    "EditError",
     "Explanation",
     "Field",
     "FieldKind",
@@ -98,6 +114,7 @@ __all__ = [
     "Triager",
     "Usage",
     "Verdict",
+    "apply",
     "askable_rules",
     "baselines",
     "blast_radius",
@@ -106,6 +123,7 @@ __all__ = [
     "collapsed",
     "comment_for",
     "contested_rules",
+    "diff",
     "explain",
     "find",
     "framing",
@@ -113,14 +131,20 @@ __all__ = [
     "headroom",
     "impact",
     "key_for",
+    "line_starts",
     "load_ground_truth",
     "no_invented_numbers",
+    "offset_of",
     "propose",
     "redact",
     "render_finding",
+    "replace_value",
     "score",
     "source_line_of",
+    "span",
     "suggest",
+    "touched_lines",
     "triage",
+    "verified_span",
     "worth_asking",
 ]

@@ -5810,7 +5810,49 @@ remove from them, and `6.5.3` asserts that by trying.
 
 ### Step 6.4 — Patch generation
 
-- **6.4.1** — `libcst` integration for structure-preserving rewrites.
+- **6.4.1** — **Structure-preserving rewrites. Done — and `libcst` was measured
+  out rather than integrated.** `llm/edit.py`, `tests/test_dependencies.py`,
+  41 + 5 tests, mutation 26/26.
+
+  The substep was planned as "`libcst` integration". Before taking on a
+  dependency an order of magnitude larger than everything djaudit ships, the
+  cheaper option was measured: derive a byte range from `ast` position data,
+  slice it out, and re-parse it. Across the three benchmark targets and the
+  fixtures — **3,159 files, 86,783 assignment values**:
+
+  | result | count | share |
+  |---|---|---|
+  | slice re-parses to an identical tree | 86,601 | **99.790%** |
+  | slice does not | 182 | 0.210% |
+
+  Every one of the 182 is one shape: a value in parentheses that `ast` excludes
+  from its own range, so the slice is a fragment that only parses inside
+  brackets. That matters less than the fact that it is **detectable from
+  inside** — parse the slice, compare it to the node. `verified_span` returns
+  `None` when the comparison fails, so a ranged edit is not "99.79% safe", it is
+  safe and *available* 99.79% of the time. `libcst` would have bought the 0.21%
+  and would not have supplied the round-trip proof, which is the part that makes
+  an edit publishable. It is not a dependency and not an extra;
+  `tests/test_dependencies.py` pins the runtime list to `typer` + `rich` and
+  fails if anything imports `libcst`, Django, or an HTTP client.
+
+  `apply` re-derives the untouched text from both sides and requires it to
+  match, so "the edit was surgical" is checked rather than assumed. Overlapping
+  edits raise instead of being ordered by a rule that would silently decide
+  which fix wins.
+
+  **`ast` columns are UTF-8 byte offsets, not character offsets** — the trap
+  worth naming, because `len(line[:col])` produces a range that is off by n,
+  still parses, and edits the wrong bytes without raising.
+
+  Three mutants survived the first round, and they were the module's three core
+  guarantees. The round-trip comparison was **unreachable** by every existing
+  test: the parenthesised case exits earlier through `SyntaxError`, so nothing
+  ever reached the branch where a slice parses cleanly and means something else.
+  It took two texts of identical shape (`X = alpha` against a node from
+  `X = beta1`) to get there. The third was the proof helper — tested directly,
+  never tested as *called*, so deleting the call from `apply` left everything
+  green.
 - **6.4.2** — `djaudit fix --dry-run` producing a unified diff.
 - **6.4.3** — Verification loop: apply to a scratch copy, re-run djaudit and the target's own test suite, and discard any patch that fails either.
 - **6.4.4** — Deterministic fixes for the mechanical rules, with no model involved — most `DJS` settings fixes need no intelligence at all.
