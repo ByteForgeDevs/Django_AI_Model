@@ -490,3 +490,59 @@ class TestTriageCommand:
         result = runner.invoke(app, ["triage", str(root)])
 
         assert result.exit_code == EXIT_ERROR
+
+
+class TestExplainCommand:
+    """Explain must be useful offline, and must refuse rather than guess."""
+
+    @staticmethod
+    def a_fingerprint(project) -> str:
+        result = runner.invoke(app, ["run", str(project), "--format", "json"])
+        fingerprint = json.loads(result.output)["findings"][0]["fingerprint"]
+        assert isinstance(fingerprint, str)
+        return fingerprint
+
+    def test_it_explains_a_real_finding(self, orm_project):
+        fingerprint = self.a_fingerprint(orm_project)
+
+        result = runner.invoke(app, ["explain", fingerprint, str(orm_project)])
+
+        assert result.exit_code == EXIT_OK
+        assert "What is wrong" in result.output
+        assert "What to do" in result.output
+        assert "References" in result.output
+
+    def test_a_prefix_is_enough(self, orm_project):
+        fingerprint = self.a_fingerprint(orm_project)
+
+        result = runner.invoke(app, ["explain", fingerprint[:8], str(orm_project)])
+
+        assert result.exit_code == EXIT_OK
+        assert "What is wrong" in result.output
+
+    def test_an_unknown_fingerprint_is_a_tool_error(self, orm_project):
+        result = runner.invoke(app, ["explain", "0123456789abcdef", str(orm_project)])
+
+        assert result.exit_code == EXIT_ERROR
+        # Rich wraps at the terminal width and leaves the trailing space
+        # before the break, so both have to be collapsed.
+        assert "may have been fixed" in " ".join(result.output.split())
+
+    def test_a_prefix_too_short_to_mean_anything_is_refused(self, orm_project):
+        result = runner.invoke(app, ["explain", "ab", str(orm_project)])
+
+        assert result.exit_code == EXIT_ERROR
+        assert "too short" in result.output
+
+    def test_a_missing_path_is_a_tool_error(self, tmp_path):
+        result = runner.invoke(app, ["explain", "abcdef", str(tmp_path / "nope")])
+
+        assert result.exit_code == EXIT_ERROR
+
+    def test_it_consults_no_model_and_says_nothing_about_one(self, orm_project):
+        """Offline is not a degraded mode here, so there is nothing to disclose."""
+        fingerprint = self.a_fingerprint(orm_project)
+
+        result = runner.invoke(app, ["explain", fingerprint, str(orm_project)])
+
+        assert "model" not in result.output.lower()

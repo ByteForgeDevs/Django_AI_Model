@@ -30,6 +30,8 @@ from djaudit.llm import config as llm_config
 from djaudit.llm.budget import Budget, Metered
 from djaudit.llm.cache import Cache, Cached
 from djaudit.llm.evaluate import Verdict
+from djaudit.llm.explain import FingerprintError, explain, find
+from djaudit.llm.explain import render as render_explanation
 from djaudit.llm.group import collapsed, group
 from djaudit.llm.provider import NullProvider, Provider
 from djaudit.llm.suggest import render, suggest
@@ -510,6 +512,44 @@ def _print_suggestions(console: Console, run: TriageRun, root: Path) -> None:
             console.print(f"  [dim]- {reason}[/dim]")
         if len(refused) > _REFUSALS_SHOWN:
             console.print(f"  [dim]... and {len(refused) - _REFUSALS_SHOWN} more[/dim]")
+
+
+@app.command(name="explain")
+def explain_command(
+    fingerprint: Annotated[
+        str,
+        typer.Argument(help="The finding's fingerprint, or enough of its start to be unique."),
+    ],
+    path: Annotated[
+        Path,
+        typer.Argument(help="Path to the Django project the finding came from."),
+    ] = Path(),
+    min_confidence: Annotated[
+        Confidence,
+        typer.Option("--min-confidence", help="Must match the run the fingerprint came from."),
+    ] = Confidence.FIRM,
+) -> None:
+    """Explain one finding in terms of the code it was found in.
+
+    No model is consulted and none is needed: every finding already carries its
+    own evidence, rationale, remediation and references. This assembles them,
+    adds what else in the file is wrong for the same reason, and stops.
+
+    It also never reads the project's source. The finding's snippet is already
+    masked where a rule found a secret, and re-reading the line to show more
+    context would print that secret to your terminal.
+    """
+    if not path.is_dir():
+        _fail(f"path is not a directory: {path}")
+
+    result = engine.run(path, min_confidence=min_confidence)
+    try:
+        finding = find(result.findings, fingerprint)
+    except FingerprintError as exc:
+        _fail(str(exc))
+        return
+
+    Console().print(render_explanation(explain(finding, result.findings)), highlight=False)
 
 
 @app.command()

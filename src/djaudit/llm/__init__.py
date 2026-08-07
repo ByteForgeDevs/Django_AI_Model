@@ -21,6 +21,7 @@ from djaudit.llm.evaluate import (
     load_ground_truth,
     score,
 )
+from djaudit.llm.explain import Explanation, FingerprintError, explain, find
 from djaudit.llm.group import Theme, collapsed, group
 from djaudit.llm.prompts import (
     TRIAGE_SCHEMA,
@@ -71,8 +72,10 @@ __all__ = [
     "Cached",
     "Credential",
     "Declined",
+    "Explanation",
     "Field",
     "FieldKind",
+    "FingerprintError",
     "Judgement",
     "LLMConfig",
     "Metered",
@@ -100,6 +103,8 @@ __all__ = [
     "collapsed",
     "comment_for",
     "contested_rules",
+    "explain",
+    "find",
     "group",
     "headroom",
     "key_for",

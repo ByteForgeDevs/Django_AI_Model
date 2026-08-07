@@ -5743,7 +5743,38 @@ remove from them, and `6.5.3` asserts that by trying.
 
 ### Step 6.3 — Explanation
 
-- **6.3.1** — `djaudit explain <fingerprint>` — a contextual explanation citing this code, not the generic rule text.
+- **6.3.1** — **`djaudit explain <fingerprint>`, with no model at all. Done.**
+  Measured first: across the 245 corpus findings, **100% carry evidence,
+  references, a rationale and a remediation**, and 97% carry a snippet. The
+  material for a substantive explanation is already in the finding schema, put
+  there by the rule that fired — so `explain` assembles it, adds what else in
+  the file is wrong for the same reason, and consults nothing.
+
+  **The safety property: `explain` never reads the target's source.** Settings
+  rules mask the value they report, so a finding on a live key carries
+  `SECRET_KEY = "*x<redacted:50 chars>"`. An explanation that re-read the line
+  "for context" would print the real key to a terminal, into CI logs, and — once
+  6.3.2 exists — into a prompt. This is the exact inverse of 6.2.3, where
+  `propose` *must* read from disk because a patch has to match reality. A
+  description has to respect the redaction instead.
+
+  Asserting the secret is absent from the output is not enough; that passes for
+  a version that reads the file and happens not to print it. So the test makes
+  `Path.read_text`, `read_bytes` and `open` raise, then explains a masked
+  finding. The mutation round confirms it is load-bearing: a mutant that adds a
+  disk read is **caught**. A second test proves the contrast — that the fixture
+  really does hold a secret worth protecting.
+
+  An ambiguous fingerprint prefix is an error, never a first match: a wrong
+  explanation rendered under the right identifier looks entirely correct and
+  gives the reader no signal at all.
+
+  Mutation: **22 of 22 caught**, after three genuine survivors. Two were the
+  same trap as 6.2.4 — a test that builds its input from the constant it is
+  checking cannot see a wrong constant, so `MINIMUM_PREFIX` 6→5 survived — and
+  one was a case no test distinguished (`startswith` → `in`, which would resolve
+  `def012` to a fingerprint it merely appears inside). The third was a test that
+  varied two fields at once and so reached only one of two filters.
 - **6.3.2** — Business-impact framing for non-specialist reviewers.
 
 ### Step 6.4 — Patch generation
