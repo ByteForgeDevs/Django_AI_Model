@@ -3906,7 +3906,98 @@ We therefore build the dataflow foundation first, and we default this family to
 
 ### Step 3.4 — SQL and ORM injection
 
-- **3.4.1** — `DJI-001` `cursor.execute` with an interpolated string (f-string, `%`, `+`, `.format`).
+- **3.4.1** — `DJI-001` `cursor.execute` with an interpolated string (f-string, `%`, `+`, `.format`). **Done.**
+
+  **Substep 3.5.1 was built here, because 3.4 cannot be written without it.**
+  The plan put the taint source model at the head of Step 3.5, but three of
+  Step 3.4's six rules name request data in their own one-line description, and
+  this one is unbuildable without it. Pulled forward rather than duplicated:
+  `src/djaudit/dataflow/taint.py` is 3.5.1, and 3.5.1 is marked done below.
+
+  **The corpus chose the trigger, and it chose against the obvious one.** The
+  three targets contain exactly five `.execute()` calls whose statement was
+  composed rather than written whole, and **all five are correct**:
+
+  | site | spliced | why it is fine |
+  |---|---|---|
+  | nb `middleware.py:276` | `mode` | a local, `'READ WRITE' if w else 'READ ONLY'` |
+  | px `metrics.py:250` | `type._meta.db_table` | an identifier; cannot be a parameter |
+  | px `vouchers.py:111` | `_meta.db_table`, `tmptable` | metadata and `", ".join(['(%s)'] * n)` |
+  | px `locking.py:113` | `LOCK_ACQUISITION_TIMEOUT` | a module constant |
+  | px `locking.py:114` | `calls` | integers from `pg_lock_key()` |
+
+  So a rule that reported *composition* would have scored nought for five on
+  mature code. The rule reports **reach** instead: the statement is composed
+  **and** a spliced part reads something Django filled from the request.
+
+  **The gate's own arithmetic settled the middle case.** `locking.py:114`
+  cannot be shown safe — `calls` is built from keys returned by another
+  function — and the tempting design reports it at `tentative` as "could not
+  verify". `benchmark` runs at the `tentative` floor and `max_false_positive_rate`
+  is 0.0, so that finding would have to be triaged, and the only honest verdict
+  is `false_positive`: the code is safe and `accepted_risk` means something
+  else. One unverifiable value would have failed the build. Unknown is
+  therefore not reported, and the reason is recorded rather than the preference.
+
+  **Silence had to be shown to be the right silence.** A rule that could not
+  recognise a cursor would also report nothing here, and from the outside the
+  two are identical. The diagnostic asserts the contrast directly: **5 sites
+  found, 5 receivers resolved to cursors, 0 reported.** Every one is quiet
+  because taint said so.
+
+  **The source set is an allowlist because the corpus made the case.**
+  Counting attribute reads off `request` finds `request.event` 1,727 times,
+  `request.user` 1,400 and `request.organizer` 782 — middleware-attached
+  objects, not client text. "Anything reached through `request`" would have
+  made a model instance an injection vector. `self.request` earns its place the
+  same way: pretix reads it 3,735 times against 2,401 for the bare name.
+
+  **Injection: 42 mutations, 42 caught, after two rounds.** The first found a
+  real bug and one dead branch. `is_cursor` claimed "resolution first,
+  convention second" but implemented "resolution decides, always" — a parameter
+  *has* a binding, with no value, so a cursor handed to a helper was rejected
+  and the convention fallback was unreachable. Resolution now speaks only when
+  it has a value to speak with. The dead branch was `binding.element_of` in the
+  taint lattice, dead by *design* rather than by bug: for `DJP` the difference
+  between a queryset and one of its rows is the whole rule, and for taint a
+  container and its element carry the same verdict in both directions. Deleted,
+  with the reasoning kept as the comment that explains why the collapse is
+  sound here and nowhere else.
+
+  **Lesson 40 — the false-positive budget is part of the rule's specification.**
+  `max_false_positive_rate = 0.0` is not a scoreboard setting; it decides what
+  a rule is allowed to say. Reporting "I could not verify this" sounds humble
+  and costs a false positive, because a reviewer's only honest verdict on safe
+  code is `false_positive`. A three-valued analysis is worth building precisely
+  so that the third value can be kept out of the output.
+
+  **Lesson 41 — re-derive injection anchors after every `ruff format`.** Five
+  of the first round's 43 mutations did not apply, and an unapplied mutation
+  reports as neither caught nor survived: it silently shrinks the denominator.
+  The probe now prints unapplied anchors with their match counts, so a stale
+  anchor cannot be mistaken for a passing test.
+
+  **Lesson 42 — interleave A/B when the box will not go quiet.** The baseline
+  read 18.51s earlier in the day and 22.42s an hour later with a load average
+  of 6.8, so a sequential before/after would have charged this rule a 21%
+  regression it did not cause. Alternating base, change, base, change instead
+  put the drift on both sides equally: baselines 22.25s and 22.18s, a 0.07s
+  spread, against 22.73s and 22.89s with the rule. The cost is **+0.55s on
+  pretix, about 2.5%** — an order of magnitude larger than the baseline spread,
+  so unlike `DJP-010` this one is real and worth stating rather than noise.
+
+  The reason it is only 2.5% is the prefilter, which is also measured rather
+  than assumed: the word `execute` admits 0.9% of healthchecks, 1.6% of NetBox
+  and 4.4% of pretix, and of pretix's 1,225 files exactly **three** go on to
+  have a scope tree built. Def-use chains are the expensive part of every
+  dataflow rule, and the point of the prefilter is that they are never built
+  for a file that cannot produce a finding. `composed()` is shared between the
+  prefilter and the rule for the same reason the loop inventory is shared: a
+  prefilter that admits less than the rule reports is a recall hole nothing
+  downstream would reveal.
+
+  *Done when:* 42/42 injection, 5 corpus sites all recognised and all silent,
+  and the taint model carrying its own tests for all three of its answers.
 - **3.4.2** — `DJI-002` `Model.objects.raw` with interpolation.
 - **3.4.3** — `DJI-003` `.extra()` with untrusted input.
 - **3.4.4** — `DJI-004` `RawSQL` or `Func` with an interpolated template.
@@ -3915,7 +4006,7 @@ We therefore build the dataflow foundation first, and we default this family to
 
 ### Step 3.5 — Untrusted input rules
 
-- **3.5.1** — Taint source model: `request.GET`, `POST`, `data`, `body`, `headers`, `COOKIES`, `FILES`, and view kwargs.
+- **3.5.1** — Taint source model: `request.GET`, `POST`, `data`, `body`, `headers`, `COOKIES`, `FILES`, and view kwargs. **Done — built in 3.4.1**, which could not be written without it. `src/djaudit/dataflow/taint.py` carries the three-valued lattice and `src/djaudit/dataflow/strings.py` the composition shapes it propagates through; the design record is in the 3.4.1 entry above.
 - **3.5.2** — `DJI-007` `eval`, `exec`, `pickle.loads`, or `yaml.load` on tainted data.
 - **3.5.3** — `DJI-008` `subprocess` with `shell=True` or `os.system` on tainted data.
 - **3.5.4** — `DJI-009` **SSRF** — outbound HTTP request to a tainted URL.
@@ -4287,9 +4378,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **55 rules are
+document specifies, and most of it is still only specified: **56 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first eight of Phase 3's.
+2, plus the first ten of Phase 3's and the first of its injection family.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

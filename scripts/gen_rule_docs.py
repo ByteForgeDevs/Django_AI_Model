@@ -99,6 +99,30 @@ BLURBS: dict[Family, Blurb] = {
             "how many rows actually hold the value it is describing."
         ),
     ),
+    Family.DJI: Blurb(
+        heading="injection and untrusted input",
+        summary=(
+            "{count} rules on the boundary between text the project wrote and text the\n"
+            "client sent. Every one of them is about the same mistake in a different\n"
+            "costume: a value that should have travelled beside a command ends up inside\n"
+            "it, and something that was meant to be data is read as syntax."
+        ),
+        scope=(
+            "Every rule here is **static**, and each one reports *reach* rather than shape.\n"
+            "Composing a SQL string is not a defect — a table name cannot be a query\n"
+            "parameter, so interpolating one is sometimes the only way to write the query.\n"
+            "What these rules look for is a spliced value that can be traced back to\n"
+            "something Django filled from the request.\n"
+            "\n"
+            "That tracing is a three-valued analysis, and the third value is the point.\n"
+            "Besides *safe* and *tainted* there is *unknown*: a helper's own parameter\n"
+            "holds whatever its caller passed, and this analysis does not read callers.\n"
+            "Unknown is not reported. It is the most common shape of a real defect of this\n"
+            "kind and also the most common shape of perfectly correct code, and nothing in\n"
+            "one function's text distinguishes them — so a rule that reported it would be\n"
+            "reporting its own ignorance, once per helper."
+        ),
+    ),
     Family.DJP: Blurb(
         heading="performance and ORM efficiency",
         summary=(
