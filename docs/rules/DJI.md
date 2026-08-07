@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJI` — injection and untrusted input
 
-3 rules on the boundary between text the project wrote and text the
+4 rules on the boundary between text the project wrote and text the
 client sent. Every one of them is about the same mistake in a different
 costume: a value that should have travelled beside a command ends up inside
 it, and something that was meant to be data is read as syntax.
@@ -53,6 +53,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJI-001`](#dji-001--request-data-interpolated-into-a-sql-statement) | Request data interpolated into a SQL statement | critical | firm |
 | [`DJI-002`](#dji-002--request-data-interpolated-into-a-raw-query) | Request data interpolated into a .raw() query | critical | firm |
 | [`DJI-003`](#dji-003--request-data-interpolated-into-a-extra-clause) | Request data interpolated into a .extra() clause | critical | firm |
+| [`DJI-004`](#dji-004--request-data-interpolated-into-a-rawsql-or-func-expression) | Request data interpolated into a RawSQL or Func expression | critical | firm |
 
 ---
 
@@ -117,5 +118,29 @@ $ djaudit run . --min-severity info --min-confidence tentative
 **References**
 
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#extra>
+- <https://owasp.org/www-community/attacks/SQL_Injection>
+- <https://cwe.mitre.org/data/definitions/89.html>
+
+---
+
+### DJI-004 — Request data interpolated into a RawSQL or Func expression
+
+**Severity** critical · **Confidence** firm · **Tier** static
+
+**What it means.** RawSQL splices its first argument into the query verbatim, and Func renders itself with `template % data`, so its template, function and arg_joiner keywords are SQL text too. A value built into any of them is syntax by the time the driver sees it, and a quote in client input ends the literal the author intended. Because both are expressions rather than queryset methods they are often built in one place and used in another, which is what lets an injectable one survive review.
+
+**How to fix it.** For RawSQL, put a placeholder in the SQL and the value in the params argument: RawSQL('title = %s', [value]). For Func, pass the value as an expression rather than building it into the template -- Value(value) is compiled and parameterised, and appears 78 times across the benchmark corpora, so it is already the house idiom. Better still, replace the expression with a built-in one; Django ships a Func subclass for almost every database function worth calling.
+
+**What this rule cannot see.**
+
+- Taint is tracked within one function. A value that reaches the expression through a helper's parameter is reported as unknown rather than tainted, so an injection assembled across two functions is unseen.
+- The callable must be a bare name that the same file imports from django.db.models, so a RawSQL reached through a module attribute or re-exported by a project's own helper module is not recognised here.
+- Func subclasses that set a composed template as a class attribute are not read, because the template is then written in a class body rather than at a call, and no such class appears in the benchmark corpora.
+- Only the three documented Func keywords are treated as SQL. A custom template referring to some other key of extra would splice that value too, which this rule does not attempt to follow.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/expressions/#raw-sql-expressions>
+- <https://docs.djangoproject.com/en/stable/ref/models/expressions/#func-expressions>
 - <https://owasp.org/www-community/attacks/SQL_Injection>
 - <https://cwe.mitre.org/data/definitions/89.html>

@@ -4148,7 +4148,66 @@ We therefore build the dataflow foundation first, and we default this family to
   survivors explained, and the corpus silence shown to be the surface's absence
   rather than the rule's.
 
-- **3.4.4** — `DJI-004` `RawSQL` or `Func` with an interpolated template.
+- **3.4.4** — `DJI-004` `RawSQL` or `Func` with an interpolated template. **DONE.**
+
+  These are the two raw-SQL doors that are *expressions* rather than queryset
+  methods, so they can be built in one place and handed to `annotate()`,
+  `filter()` or `order_by()` somewhere else entirely — which is what lets an
+  injectable one survive review.
+
+  **Key on the callable, never on the keyword.** `template=` appears 44 times
+  across the corpus and exactly twice is it a `Func`: the other 42 are
+  `create(template=…)`, `send_mail(template=…)`, `mail(template=…)`,
+  `response_class(template=…)` — Django's email and view machinery, where the
+  word means an HTML file. A rule triggered by the keyword would have spent its
+  life reading mail templates. Keyed on the callable it sees exactly 20 calls:
+  12 `Func`, 8 `RawSQL`.
+
+  **`Func`'s SQL slots came from reading `Func.as_sql`, not from memory.** It
+  ends in `template % data`, and `data` is fed by `function`, `arg_joiner` and
+  the compiled expressions — so three keywords are SQL text, not one. In the
+  corpus `function=` is on 11 of 11 `Func` calls and `template=` on 1, so the
+  slot a keyword-shaped rule would have found is the rarest of the three. The
+  signature also settles the asymmetry with `RawSQL`: `Func(*expressions,
+  output_field=None, **extra)` makes its SQL keywords keyword-*only*, so a
+  positional argument is always an expression and never a template, while
+  `RawSQL(sql, params)` puts its SQL first. The two are read differently
+  because Django defines them differently.
+
+  **A same-file import beat a project-wide index, on measurement.** All 19
+  resolvable calls name a Django import in their own file (`django.db.models.Func`
+  11, `django.db.models.expressions.RawSQL` 8); no file in 3,091 defines a
+  class of either name; none aliases either on import; and no call is written
+  as a module attribute. So `accepts()` reads the file's own imports rather
+  than building a `ClassIndex`, which is cheaper and, on this evidence, no less
+  precise — lesson 32 answered before it was incurred rather than after.
+
+  **The diagnostic is the strongest of the family so far**, because it shows
+  the composed sites getting all the way past the receiver test before taint
+  declines them: 32 files hold one of the words, 10 hold a real call, 20 SQL
+  slots, 2 composed, 2 confirmed Django-imported, 0 reported. Both composed
+  sites are the idiom already met in 3.4.1 and 3.4.2 — netbox's
+  `Func(template=f"to_jsonb(%(expressions)s -> '{old_name}')")` and pretix's
+  `RawSQL` wrapping a queryset's own compiled SQL. Neither is request-reachable,
+  both are `unknown`, and `UNKNOWN` is never reported.
+
+  **The mutation probe found one weak test and one dead branch.** The weak test
+  gave `output_field` an uncomposed value, so two separate mutants that widened
+  the slot list had nothing to report and both survived — lesson 28 for the
+  third time in this family, and the third time it was a value that was never
+  an interpolation. Composing the value kills both. The dead branch was the
+  `alias.asname or alias.name` in the import reader: since the matcher compares
+  names exactly, an aliased import can never become a candidate for it to
+  confirm. Rather than keep an unreachable branch it now declines aliases
+  explicitly, which is also the safer direction — `RawSQL as Func` would
+  otherwise have the rule report a `RawSQL` call while calling it a `Func`.
+
+  All five remaining survivors *widen* a prefilter or an acceptance test, and
+  none can change output.
+
+  *Done when:* 26 tests, 82/87 injection with five survivors explained, and the
+  corpus silence traced past `accepts` to taint.
+
 - **3.4.5** — `DJI-005` queryset kwargs expanded from request data (`filter(**request.GET)`).
 - **3.4.6** — `DJI-006` `order_by` driven by a request parameter with no allowlist.
 
@@ -4526,9 +4585,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **58 rules are
+document specifies, and most of it is still only specified: **59 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first ten of Phase 3's and the first three of its injection family.
+2, plus the first ten of Phase 3's and the first four of its injection family.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against
