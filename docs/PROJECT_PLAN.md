@@ -4761,7 +4761,72 @@ We therefore build the dataflow foundation first, and we default this family to
 
 ### Step 3.6 — Benchmark and document
 
-- **3.6.1** — N+1 fixture project with true positives, correctly prefetched near-misses, and `Prefetch`-object cases. It must also carry a paginated `ModelViewSet` over an unordered model, giving `DJD-003` its first end-to-end case: that rule ends Phase 2 firing in no fixture and on no benchmark target, so its zero is currently unexamined, and the shape it needs is one this fixture builds anyway.
+- **3.6.1** — **N+1 fixture project** with true positives, correctly prefetched
+  near-misses, and `Prefetch`-object cases. **Done**, as `tests/fixtures/orm_project`:
+  15 planted defects, every `DJP` rule from 001 to 010 firing exactly once, and
+  100% precision and recall.
+
+  This is the only place any performance rule has a known answer. The three
+  benchmark corpora measure precision and *cannot* measure recall — they are
+  mature, so almost anything djaudit says about them is a false positive, and
+  nothing there can tell us what it missed.
+
+  The structure carries the argument. Every defect in `inventory/views.py` has a
+  correctly-written twin in `inventory/controls.py`, which the manifest forbids
+  **by file** rather than by line. Detecting that a loop mentions a relation is
+  easy and worthless; the question is whether the fetch that covers it is
+  present, and each control is that same query with the fetch. The pairs include
+  the three shapes a naive rule gets wrong: a `Prefetch` object standing in for
+  a relation name, a `Prefetch` whose inner queryset covers a *second* level, and
+  a `to_attr` prefetch that serves the new name and not the old one — the last
+  two measured in `scripts/prefetch_cache_probe.py` rather than assumed.
+
+  Then the part that matters more than the fixture: **a control passes by being
+  silent, and so does a control the rule can never reach.**
+  `scripts/fixture_controls_probe.py` removes the fix from each control and
+  requires the matching rule to then report it. It immediately found one control
+  that was worthless — `DJP-010` only speaks about models carrying a
+  self-stamping timestamp, its only static evidence that a table accumulates
+  rows, so a control viewset over `Site` passed by being invisible, which is
+  indistinguishable from the rule being broken. It now lists the same growing
+  table as the reported viewset and differs only in which column a caller may
+  sort by. All 11 remaining controls are proven load-bearing.
+
+  Two controls cannot live in the controls file, because their defect and their
+  fix are two classes rather than two functions, so the manifest pins them by
+  line — and a line number rots. One rotted within the hour, by four lines,
+  because a docstring above it grew. The probe therefore also reports *where*
+  each rule would speak and cross-checks every line-numbered manifest entry
+  against it, and that check was shown failing on a deliberately wrong line
+  before it was kept.
+
+  `DJP-008`'s control is the one that cannot be un-fixed, because what guards it
+  is context rather than code: the rule speaks only inside migrations,
+  management commands and scheduled tasks, on the reasoning that a table small
+  enough to render in a response is small enough to hold. So the identical
+  whole-table read appears twice — reported in a management command, silent in a
+  request handler.
+
+  `DJD-003` gets its first end-to-end case here, which is why it was worth
+  building into this fixture rather than a later one: the rule shipped at the end
+  of Phase 2 firing in no fixture and on no benchmark, and **an unexamined zero
+  is not a passing control**. Getting it to fire taught the fixture something
+  about the analyser, too. Written with only a `get_queryset` body, both
+  `DJD-003` and `DJP-010` stayed silent — a view's model is resolved from a
+  class-level `queryset` and from nothing else, neither a `get_queryset` return
+  nor the serializer's `Meta.model` — and they were right to: a rule that cannot
+  name the model cannot name the fix. The fixture was wrong, not the rules.
+
+  One last honesty check, recorded because the temptation was real. The
+  `DJP-010` control pages an unordered model and so `DJD-003` reports it too. A
+  draft turned pagination off to keep the finding count tidy, which silently
+  traded `DJD-003` for `DJA-013`: an endpoint returning every row is not a fix,
+  and **a fixture that hides one rule behind another is lying about both**. The
+  manifest expects both findings instead.
+
+  *Done when:* 15 expectations and 12 controls at 100% precision and recall, 15
+  tests carrying the reasoning the manifest cannot express, the control probe
+  green in CI, and the probe shown failing on a misaimed control line.
 - **3.6.2** — Injection fixture project including sanitised near-misses.
 - **3.6.3** — Performance profiling: dataflow analysis must not push a NetBox-scale run beyond 10 seconds. **Done.**
 
