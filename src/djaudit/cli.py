@@ -465,6 +465,12 @@ def _print_provenance(console: Console, run: TriageRun, *, provider_name: str) -
     a summary that loses "no model was consulted" is the one place this tool
     could mislead someone badly.
     """
+    if run.misbehaved:
+        console.print(
+            f"[bold red]warning:[/bold red] {run.misbehaved} repl(ies) from "
+            f"{provider_name} were refused for carrying fields nobody asked for. "
+            "Those findings are undecided, not judged."
+        )
     console.print(
         f"{run.skipped} settled from the recorded corpus, "
         f"{run.asked} put to [bold]{provider_name}[/bold], "

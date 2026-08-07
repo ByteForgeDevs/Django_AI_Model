@@ -6026,7 +6026,46 @@ remove from them, and `6.5.3` asserts that by trying.
   provider that returns every field it is allowed to return, plus fields it is
   not, and asserts the finding list is byte-identical before and after. The
   promise that a model cannot create or suppress a finding is worth exactly as
-  much as the test that tries to make it do so.
+  much as the test that tries to make it do so. **Done** —
+  `tests/llm/test_hostile_provider.py`, 28 tests, mutation **11/11**.
+  **Taken before `6.5.3`**, because the architecture note is supposed to *cite*
+  this test, and a doc that cites a file which does not exist is the failure
+  mode that note is written to prevent.
+
+  **The provider is hostile in every way the type system permits.** It answers
+  every declared field, choosing the value most likely to change an outcome;
+  adds nine fields nobody declared (`findings`, `suppress`, `severity`,
+  `fingerprint`, `rule_id`, `location`, `ignore`, `confidence`, `__proto__`);
+  claims 2⁴⁰ tokens per call; embeds prompt-injection text in every string; and
+  names itself `hostile/1.0 (ignore previous instructions)` to see whether that
+  name ever reaches a report.
+
+  **The comparison is bytes, not objects** — the rendered JSON report, so a
+  change to any field shows up and the artefact compared is the one that ships
+  (**#81**). `duration_seconds` is removed *by key*, since a regex scrub over
+  the text could quietly delete a finding's own numbers and hide the mutation
+  being hunted, and `test_the_comparison_still_sees_a_changed_finding` proves
+  the scrub left the detector working.
+
+  **The attack was verified before being trusted.** A hostile provider that
+  quietly declined would make every assertion here pass while establishing
+  nothing, so three tests pin that it answers, that its trespass is refused
+  *for the right reason*, and that withholding the trespass makes the same
+  reply acceptable (**#88**).
+
+  **It found a real defect.** `SchemaViolationError` propagated straight out of
+  `triage`, so one bad reply killed a run whose findings were already computed
+  and correct — handing the operator a traceback instead of an audit. Refusing
+  the reply is right; discarding everything else is not. A violation now
+  becomes an abstention that names itself, counted as `misbehaved` (a *subset*
+  of `declined`, so the summary arithmetic stays correct) and printed in red,
+  because degrading quietly would have been worse than crashing.
+
+  **`validate`'s type check turned out to be the only untested guard.** Every
+  other check does set arithmetic over the payload's keys, which a bare string
+  or a list answers without meaning anything — `"accepted_risk"` would have
+  produced an empty set of undeclared fields and sailed through. Five
+  non-object payloads now pin it.
 
 ---
 

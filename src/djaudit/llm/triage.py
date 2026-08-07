@@ -49,7 +49,7 @@ from typing import Protocol, runtime_checkable
 
 from djaudit.llm.evaluate import Verdict
 from djaudit.llm.prompts import build_triage_prompt, worth_asking
-from djaudit.llm.provider import Answer, Provider
+from djaudit.llm.provider import Answer, Declined, Provider, SchemaViolationError
 from djaudit.models import Finding
 from djaudit.provenance import Authorship, Provenance
 from djaudit.provenance import Verdict as LabelledVerdict
@@ -125,6 +125,13 @@ class TriageRun:
     asked: int = 0
     skipped: int = 0
     declined: int = 0
+    #: Replies refused by the schema. A *subset* of `declined` rather than a
+    #: sibling of it: no usable answer came back, and the reason was the
+    #: provider's own fault. Keeping it a subset leaves the summary arithmetic
+    #: correct while still telling an operator which kind of nothing they got,
+    #: because "the provider said nothing" and "the provider said something it
+    #: was never asked" call for very different reactions.
+    misbehaved: int = 0
 
     @property
     def ranked(self) -> list[Judgement]:
@@ -182,7 +189,7 @@ def triage(
     askable = askable_rules({f.rule_id for f in findings}, table)
 
     judgements: list[Judgement] = []
-    asked = skipped = declined = 0
+    asked = skipped = declined = misbehaved = 0
 
     for finding in findings:
         if not worth_asking(finding, askable):
@@ -207,7 +214,19 @@ def triage(
             if isinstance(provider, PerFinding)
             else provider
         )
-        reply = asker.ask(build_triage_prompt(finding))
+        try:
+            reply = asker.ask(build_triage_prompt(finding))
+        except SchemaViolationError as violation:
+            # A provider that answers a question nobody asked is refused --
+            # that happens in `validate` and is not negotiable. What is
+            # negotiable is whether one such reply destroys the run, and it
+            # must not: the findings are already computed and correct, and
+            # throwing them away leaves the operator with a traceback instead
+            # of an audit. So the violation becomes an abstention that names
+            # itself, and `misbehaved` makes it impossible to mistake the run
+            # for a working one.
+            misbehaved += 1
+            reply = Declined(f"the provider returned an invalid reply: {violation}")
         if isinstance(reply, Answer):
             judgements.append(
                 Judgement(
@@ -229,7 +248,13 @@ def triage(
             )
         )
 
-    return TriageRun(judgements=judgements, asked=asked, skipped=skipped, declined=declined)
+    return TriageRun(
+        judgements=judgements,
+        asked=asked,
+        skipped=skipped,
+        declined=declined,
+        misbehaved=misbehaved,
+    )
 
 
 def _verdict_of(answer: Answer) -> Verdict:
