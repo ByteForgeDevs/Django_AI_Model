@@ -5373,7 +5373,42 @@ remove from them, and `6.5.3` asserts that by trying.
   admitting a `bool` where an integer was declared (it subclasses `int`, so the
   obvious check lets it through), dropping the required-field check, and
   admitting a list — **all six caught** by the 25 tests.
-- **6.1.2** — Configuration, credential handling, and an explicit offline mode.
+- **6.1.2** — Configuration, credential handling, and an explicit offline mode. **Done.**
+
+  `src/djaudit/llm/config.py`. **The default is offline, and not "offline if we
+  cannot find credentials".** Offline until asked, so that installing djaudit
+  never sends source anywhere because an environment variable happened to be
+  set in CI. A config file may name a provider and a model without turning one
+  on; only `enabled = true` or the CLI flag does that, so checking out a
+  repository that describes a model does not start making calls.
+
+  **It refuses to hold a key.** djaudit reports `DJS-002`…`DJS-005` for secrets
+  in source, and a tool that then invited you to paste an API key into its own
+  config would deserve to be ignored. `api_key`, `key`, `token`, `secret` and
+  `password` are rejected by name, and any value shaped like a credential is
+  rejected whatever it is called, so renaming the field is not the way around.
+  The error names `DJS-002` and truncates what it echoes, because an error
+  message is a place secrets leak into logs.
+
+  A `Credential` holds the *name* of an environment variable and reads it at
+  the moment of use. The key is therefore not on the object, so it cannot be
+  serialised into a cache entry or a log line by accident, and rotating it
+  needs no restart. Measured against the four vendor key shapes and a set of
+  ordinary values: `openai`, `gpt-4o-mini`, `claude-3-5-sonnet-20241022` and
+  `OPENAI_API_KEY` all pass; the OpenAI, Anthropic, Google and GitHub shapes are
+  all caught, as is any opaque 40-character run.
+
+  `usable` returns a reason rather than a bare `False`, because "you did not ask
+  for a model", "you named no provider" and "the variable is not set" are three
+  different problems and a user told only that nothing happened debugs the
+  wrong one. An empty variable counts as absent, since `export KEY=` is how
+  people turn one off.
+
+  Measured: eight mutations — defaulting to online, treating a described
+  provider as an enabled one, dropping either secret check, letting a key be
+  pasted as a variable name, treating an empty variable as present, letting the
+  config file beat an explicit flag, and swallowing malformed TOML — **all
+  eight caught** by 29 tests.
 - **6.1.3** — Response caching keyed by finding fingerprint plus prompt version, so cost is bounded and results are reproducible.
 - **6.1.4** — Token budget, rate limiting, and graceful degradation to deterministic output.
 - **6.1.5** — **The evaluation harness, before anything asks a model a question.**
