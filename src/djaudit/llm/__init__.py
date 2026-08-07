@@ -21,6 +21,7 @@ from djaudit.llm.evaluate import (
     load_ground_truth,
     score,
 )
+from djaudit.llm.group import Theme, collapsed, group
 from djaudit.llm.prompts import (
     TRIAGE_SCHEMA,
     build_triage_prompt,
@@ -87,6 +88,7 @@ __all__ = [
     "Score",
     "Source",
     "SuppressionError",
+    "Theme",
     "TriageRun",
     "Triager",
     "Usage",
@@ -95,8 +97,10 @@ __all__ = [
     "baselines",
     "build_triage_prompt",
     "check_grounds",
+    "collapsed",
     "comment_for",
     "contested_rules",
+    "group",
     "headroom",
     "key_for",
     "load_ground_truth",

@@ -5691,7 +5691,55 @@ remove from them, and `6.5.3` asserts that by trying.
   `HEAD` in a second worktree: old best 3.52s, new best 3.64s, distributions
   identical, load average 4.2 on 8 cores — and `e8b56d2` is green in CI with
   byte-identical engine source. The machine, not the change. Second time.
-- **6.2.4** — Grouping of related findings into a single reviewable theme.
+- **6.2.4** — **Themes: one rule in one file is one decision. Done.**
+  `llm/group.py` collapses a triaged run into themes and `djaudit triage
+  --group` renders them. On pretix, 131 findings become 68 themes.
+
+  **The key was measured against the 245 recorded verdicts, not chosen.** A
+  group is only useful if a reviewer can make one decision about it, so each
+  candidate was scored on how often it merges findings that were judged
+  *differently*:
+
+  | key | groups | multi-finding | mixed-verdict groups | findings caught in one |
+  |---|---|---|---|---|
+  | rule | 47 | 21 | 5 | 73 |
+  | rule + dir (2 levels) | 66 | 27 | 4 | 65 |
+  | rule + directory | 92 | 40 | 3 | 31 |
+  | **rule + file** | **149** | **45** | **0** | **0** |
+
+  **The compressive option is the wrong one.** Directory grouping yields 92
+  groups against 149 and looked clearly better until it was scored: three of its
+  groups mix a true positive with an accepted risk, covering 31 findings, 12.7%
+  of the corpus. `rule + file` is the only key that never merged a disagreement,
+  and it still moves 141 of 245 findings into a group. Compression was never the
+  objective.
+
+  A theme with members that disagree reports `verdict = None` and renders as
+  **mixed**, never as the majority. Suppressing a dissent inside a summary is
+  the failure that disqualified the alternative key, so it is not available in
+  the shipped one either. The invariant is tested directly: the judgements out
+  are the same objects as the judgements in.
+
+  A `--group` view is more authoritative-looking than a flat one, so the
+  provenance footer — including "no model was consulted" — was extracted into
+  `_print_provenance` and is shared, with a test that the grouped view still
+  prints it.
+
+  The purity table above is **re-derived from `benchmarks/*.json` by a test**
+  rather than trusted, along with its contrast: one test asserts `rule + file`
+  merges no disagreement, another asserts the directory key still does. A purity
+  check over zero rows is 100% pure, so a third test asserts the corpus actually
+  loaded and holds more than one verdict.
+
+  Mutation: **21 of 21 caught**, after the round found dead code in the module
+  itself. `where()` had an `if len(lines) == 1` special case that produced
+  byte-identical output to the general branch — joining a one-element list
+  already gives `file:12` — so removing the branch changed nothing anywhere.
+  Deleted rather than papered over with a test.
+
+  Timing gate again failed locally (3.99s against 3.5s, load average 4.95 on 8
+  cores). `git diff HEAD -- src/djaudit` shows no engine file changed at all, so
+  the gate is measuring the machine. Third occurrence.
 
 ### Step 6.3 — Explanation
 

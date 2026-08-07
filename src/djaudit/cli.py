@@ -30,6 +30,7 @@ from djaudit.llm import config as llm_config
 from djaudit.llm.budget import Budget, Metered
 from djaudit.llm.cache import Cache, Cached
 from djaudit.llm.evaluate import Verdict
+from djaudit.llm.group import collapsed, group
 from djaudit.llm.provider import NullProvider, Provider
 from djaudit.llm.suggest import render, suggest
 
@@ -50,6 +51,12 @@ EXIT_ERROR = 2
 # A run with hundreds of corpus verdicts refuses hundreds of times, and the
 # refusals are all the same sentence; showing every one buries the diffs above.
 _REFUSALS_SHOWN = 5
+
+_VERDICT_STYLES = {
+    Verdict.TRUE_POSITIVE: "bold red",
+    Verdict.ABSTAINED: "yellow",
+    Verdict.ACCEPTED_RISK: "dim",
+}
 
 app = typer.Typer(
     name="djaudit",
@@ -321,6 +328,13 @@ def triage_command(
             "Off unless both this and [tool.djaudit.llm] enable it.",
         ),
     ] = None,
+    grouped: Annotated[
+        bool,
+        typer.Option(
+            "--group",
+            help="Collapse findings of one rule in one file into a single theme.",
+        ),
+    ] = False,
     show_suggestions: Annotated[
         bool,
         typer.Option(
@@ -351,7 +365,10 @@ def triage_command(
     provider = _build_provider(config)
     run = triage(result.findings, provider)
     console = Console()
-    _print_triage(console, run, provider_name=provider.name)
+    if grouped:
+        _print_themes(console, run, provider_name=provider.name)
+    else:
+        _print_triage(console, run, provider_name=provider.name)
     if show_suggestions:
         _print_suggestions(console, run, path)
 
@@ -395,15 +412,10 @@ def _print_triage(console: Console, run: TriageRun, *, provider_name: str) -> No
     table.add_column("severity")
     table.add_column("location")
 
-    styles = {
-        Verdict.TRUE_POSITIVE: "bold red",
-        Verdict.ABSTAINED: "yellow",
-        Verdict.ACCEPTED_RISK: "dim",
-    }
     for judgement in run.ranked:
         finding = judgement.finding
         table.add_row(
-            f"[{styles[judgement.verdict]}]{judgement.verdict.value}[/]",
+            f"[{_VERDICT_STYLES[judgement.verdict]}]{judgement.verdict.value}[/]",
             judgement.source.value,
             finding.rule_id,
             finding.severity.value,
@@ -417,6 +429,16 @@ def _print_triage(console: Console, run: TriageRun, *, provider_name: str) -> No
         f"{run.counting(Verdict.ACCEPTED_RISK)} judged acceptable · "
         f"{run.counting(Verdict.ABSTAINED)} undecided"
     )
+    _print_provenance(console, run, provider_name=provider_name)
+
+
+def _print_provenance(console: Console, run: TriageRun, *, provider_name: str) -> None:
+    """Where the verdicts above came from. Shared, so no view can omit it.
+
+    The grouped view had its own footer for one commit's worth of drafting, and
+    a summary that loses "no model was consulted" is the one place this tool
+    could mislead someone badly.
+    """
     console.print(
         f"{run.skipped} settled from the recorded corpus, "
         f"{run.asked} put to [bold]{provider_name}[/bold], "
@@ -429,6 +451,39 @@ def _print_triage(console: Console, run: TriageRun, *, provider_name: str) -> No
             "[yellow]no model was consulted[/yellow]: every undecided finding above is "
             "one this corpus cannot settle, and needs a person."
         )
+
+
+def _print_themes(console: Console, run: TriageRun, *, provider_name: str) -> None:
+    """The triage table, one row per theme rather than one per finding."""
+    themes = group(run.ranked)
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("verdict")
+    table.add_column("source")
+    table.add_column("rule")
+    table.add_column("n", justify="right")
+    table.add_column("where")
+
+    for theme in themes:
+        verdict = theme.verdict
+        # A theme whose members disagree says so. Printing the majority would
+        # let the group overrule the one finding somebody judged differently.
+        label = verdict.value if verdict else "mixed"
+        style = _VERDICT_STYLES.get(verdict, "bold magenta") if verdict else "bold magenta"
+        table.add_row(
+            f"[{style}]{label}[/]",
+            theme.source.value if theme.source else "mixed",
+            theme.rule_id,
+            str(theme.count),
+            theme.where(),
+        )
+    console.print(table)
+
+    console.print(
+        f"{len(run.judgements)} findings in {len(themes)} themes "
+        f"({collapsed(themes)} fewer things to read)"
+    )
+    _print_provenance(console, run, provider_name=provider_name)
 
 
 def _print_suggestions(console: Console, run: TriageRun, root: Path) -> None:

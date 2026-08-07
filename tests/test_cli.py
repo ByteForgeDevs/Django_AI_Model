@@ -1,6 +1,7 @@
 """CLI contract: exit codes and output routing are what CI depends on."""
 
 import json
+import re
 import shutil
 from dataclasses import replace
 
@@ -439,6 +440,37 @@ class TestTriageCommand:
         assert "1 not offered" in result.output
         assert "DJA-010" in result.output
         assert "corpus verdict cannot justify" in result.output.replace("\n", " ")
+
+    def test_group_collapses_repeats_of_one_rule_in_one_file(self, orm_project):
+        result = runner.invoke(app, ["triage", str(orm_project), "--group"])
+
+        assert result.exit_code == EXIT_OK
+        assert "themes" in result.output
+        assert "fewer things to read" in result.output
+
+    def test_the_grouped_view_still_says_no_model_was_consulted(self, orm_project):
+        """The one place a summary could mislead badly.
+
+        A grouped table looks more authoritative than a flat one -- fewer rows,
+        each standing for several findings. If the provenance line went missing
+        from this view, "abstained" would read as a considered judgement.
+        """
+        result = runner.invoke(app, ["triage", str(orm_project), "--group"])
+
+        assert "no model was consulted" in result.output
+        assert "settled from the recorded corpus" in result.output
+
+    def test_grouping_changes_the_presentation_and_not_the_count(self, orm_project):
+        flat = runner.invoke(app, ["triage", str(orm_project)])
+        grouped = runner.invoke(app, ["triage", str(orm_project), "--group"])
+
+        count = re.search(r"(\d+) findings", flat.output)
+        assert count and f"{count.group(1)} findings in " in grouped.output
+
+    def test_group_is_off_unless_asked_for(self, orm_project):
+        result = runner.invoke(app, ["triage", str(orm_project)])
+
+        assert "themes" not in result.output
 
     def test_suggest_is_off_unless_asked_for(self, orm_project):
         result = runner.invoke(app, ["triage", str(orm_project)])
