@@ -7,6 +7,8 @@ convention this package follows; it is a shape it has. See ``provider`` for the
 mechanism and ``docs/architecture/llm-layer.md`` for the argument.
 """
 
+from djaudit.llm.cache import Cache, Cached, key_for
+from djaudit.llm.config import Credential, LLMConfig
 from djaudit.llm.provider import (
     Answer,
     Declined,
@@ -23,9 +25,13 @@ from djaudit.llm.provider import (
 
 __all__ = [
     "Answer",
+    "Cache",
+    "Cached",
+    "Credential",
     "Declined",
     "Field",
     "FieldKind",
+    "LLMConfig",
     "NullProvider",
     "Prompt",
     "Provider",
@@ -33,4 +39,5 @@ __all__ = [
     "ResponseSchema",
     "SchemaViolationError",
     "Usage",
+    "key_for",
 ]

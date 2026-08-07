@@ -5409,7 +5409,46 @@ remove from them, and `6.5.3` asserts that by trying.
   pasted as a variable name, treating an empty variable as present, letting the
   config file beat an explicit flag, and swallowing malformed TOML — **all
   eight caught** by 29 tests.
-- **6.1.3** — Response caching keyed by finding fingerprint plus prompt version, so cost is bounded and results are reproducible.
+- **6.1.3** — Response caching keyed by finding fingerprint plus prompt version, so cost is bounded and results are reproducible. **Done.**
+
+  `src/djaudit/llm/cache.py`. A cache buys affordability, but the reason it is
+  here first is reproducibility: a triage run that is run twice should not
+  reorder itself because a sampler rolled differently. That only holds if the
+  key covers every input, and **a key that misses one is worse than no cache**,
+  because it serves a confident answer to a question nobody asked.
+
+  The key is the finding fingerprint, the prompt version, the system and user
+  text, the rendered response schema and the model, hashed together. The prompt
+  text is in there as well as its version because a version somebody has to
+  remember to bump is a version that does not get bumped.
+
+  **The schema digest is the part I got wrong first.** I wrote it to normalise
+  field order away, reasoning that the same fields declared in a different
+  order ask the same question. Reading `as_json_schema` says otherwise:
+  `properties` is built in field order and `enum` in choice order, so both
+  reach the provider. The digest now hashes the rendered document, which
+  requires no judgement about which parts of a request matter.
+
+  Nothing secret is stored, and that is checked by reading the bytes back off
+  disk rather than by inspecting the object that went in -- a cache directory
+  ends up in tarballs and CI artifacts. The entry holds a validated reply and a
+  model name; not the credential, not the prompt, not the source it quoted. The
+  filename is a hash, since a path is visible to anyone who can list a
+  directory. **A refusal is never cached**, because declining is about the
+  state of the machine -- no key, no network, budget spent -- and storing one
+  would make a transient condition permanent for the user who exports their key
+  and re-runs.
+
+  Measured: 21 mutations, **21 caught** by 35 tests, but only after three
+  survivors were run down rather than written off.
+  - Normalising field order survived, because `required` is a list and list
+    order outlives sorting a document's keys -- the test was passing for the
+    wrong reason. A case with two *optional* fields removes that backstop.
+  - Writing straight to the destination survived, because the only failing
+    write under test failed before any bytes existed. A test that fails
+    *midway* separates a truncated entry from no entry.
+  - The third was my own bad mutant, guarded by a condition that was never
+    true. Rewritten to make the key readable rather than hashed, it is caught.
 - **6.1.4** — Token budget, rate limiting, and graceful degradation to deterministic output.
 - **6.1.5** — **The evaluation harness, before anything asks a model a question.**
   Scores a triage run against the 245 recorded human verdicts: agreement rate,
