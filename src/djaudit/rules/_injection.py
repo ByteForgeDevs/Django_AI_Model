@@ -114,6 +114,25 @@ class Frame:
         """Queryset-valued expressions in this scope, keyed by node identity."""
         return self.ctx.tracked(self.path, self.scope)
 
+    @property
+    def queryset_calls(self) -> set[int]:
+        """Identities of every call sitting on a chain the tracker calls a queryset.
+
+        The tracker keys a chain only at its outermost expression, so asking it
+        about the ``filter(...)`` in ``filter(...).exclude(...)`` returns
+        nothing at all. That never mattered while the only surfaces were
+        ``.raw()`` and ``.extra()``, which are written last; it matters a great
+        deal for the lookup methods, which are chained past constantly. Peeling
+        each tracked expression back down its own spine restores the inner
+        calls, and cannot admit anything the tracker had not already accepted.
+        """
+        querysets = self.querysets
+        inside: set[int] = set()
+        for node in own_nodes(self.scope):
+            if isinstance(node, ast.expr) and id(node) in querysets:
+                inside.update(id(call) for call in spine(node))
+        return inside
+
 
 def describe(part: ast.expr) -> str:
     """The spliced expression as source, for the message and the evidence."""
@@ -133,10 +152,10 @@ def direct(part: ast.expr) -> bool:
     )
 
 
-def own_calls(scope: Scope) -> Iterator[ast.Call]:
-    """Calls belonging to this scope rather than to a nested one.
+def own_nodes(scope: Scope) -> Iterator[ast.AST]:
+    """Nodes belonging to this scope rather than to a nested one.
 
-    Descending into children here would report the same call once per enclosing
+    Descending into children here would report the same node once per enclosing
     scope, and resolve its names against the wrong chains.
     """
     nested = {id(child.node) for child in scope.children}
@@ -145,9 +164,34 @@ def own_calls(scope: Scope) -> Iterator[ast.Call]:
         node = stack.pop()
         if id(node) in nested:
             continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def own_calls(scope: Scope) -> Iterator[ast.Call]:
+    """Calls belonging to this scope rather than to a nested one."""
+    for node in own_nodes(scope):
         if isinstance(node, ast.Call):
             yield node
-        stack.extend(ast.iter_child_nodes(node))
+
+
+def spine(node: ast.expr) -> Iterator[ast.Call]:
+    """Every call on the receiver chain that ``node`` heads, outermost first.
+
+    The inverse of the peel the queryset tracker performs to find a chain's
+    root: ``a.filter(x).exclude(y)`` yields the ``exclude`` call and then the
+    ``filter`` call, so a rule holding the outermost node can recognise the
+    calls written before it.
+    """
+    current: ast.AST = node
+    while True:
+        if isinstance(current, ast.Call):
+            yield current
+            current = current.func
+        elif isinstance(current, ast.Attribute | ast.Subscript):
+            current = current.value
+        else:
+            return
 
 
 class SqlSurface(Rule):

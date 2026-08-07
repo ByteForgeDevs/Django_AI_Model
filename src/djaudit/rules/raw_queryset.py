@@ -166,10 +166,11 @@ class RawQuerysetInterpolation(SqlSurface):
     def accepts(self, found: Composed, frame: Frame) -> bool:
         """The receiver must be something the tracker calls a queryset.
 
-        The tracker keys a whole chain at its outermost call, so the node to
-        ask about is the ``.raw()`` call itself rather than its receiver.
+        ``.raw()`` is normally written last, so the call itself is usually the
+        node the tracker keyed; asking about the whole spine also catches the
+        rarer ``qs.raw(...).something`` without widening what counts.
         """
-        return id(found.call) in frame.querysets
+        return id(found.call) in frame.queryset_calls
 
     def report(self, ctx: ProjectContext, path: Path, site: Site) -> Finding:
         statement = site.composed

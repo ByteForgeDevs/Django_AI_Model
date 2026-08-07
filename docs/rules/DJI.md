@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJI` — injection and untrusted input
 
-4 rules on the boundary between text the project wrote and text the
+5 rules on the boundary between text the project wrote and text the
 client sent. Every one of them is about the same mistake in a different
 costume: a value that should have travelled beside a command ends up inside
 it, and something that was meant to be data is read as syntax.
@@ -54,6 +54,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJI-002`](#dji-002--request-data-interpolated-into-a-raw-query) | Request data interpolated into a .raw() query | critical | firm |
 | [`DJI-003`](#dji-003--request-data-interpolated-into-a-extra-clause) | Request data interpolated into a .extra() clause | critical | firm |
 | [`DJI-004`](#dji-004--request-data-interpolated-into-a-rawsql-or-func-expression) | Request data interpolated into a RawSQL or Func expression | critical | firm |
+| [`DJI-005`](#dji-005--request-data-expanded-into-queryset-keyword-arguments) | Request data expanded into queryset keyword arguments | high | firm |
 
 ---
 
@@ -144,3 +145,26 @@ $ djaudit run . --min-severity info --min-confidence tentative
 - <https://docs.djangoproject.com/en/stable/ref/models/expressions/#func-expressions>
 - <https://owasp.org/www-community/attacks/SQL_Injection>
 - <https://cwe.mitre.org/data/definitions/89.html>
+
+---
+
+### DJI-005 — Request data expanded into queryset keyword arguments
+
+**Severity** high · **Confidence** firm · **Tier** static
+
+**What it means.** Expanding a request mapping with ** lets the client choose the keywords, and in the ORM a keyword is not a value but a field name joined to a lookup operator. filter(**request.GET) answers ?password__startswith=a, which turns any query into an oracle that reveals a column one character at a time, and ?owner__isnull=1 quietly removes the scoping the view relied on. On create() and update() the same expansion is mass assignment: the client picks which columns are written, and ?is_staff=1 is the usual result. Severity is high rather than critical because the attacker is confined to the ORM's own grammar -- this is arbitrary field and lookup selection, not arbitrary SQL.
+
+**How to fix it.** Never expand a request mapping into an ORM call. Read the parameters you support by name, or build the lookup dictionary from an explicit allowlist: {k: v for k, v in request.GET.items() if k in ALLOWED}. For anything with more than a few filters, a DRF FilterSet or a Django Form declares the accepted fields in one place and validates their types as well, which is the fix that keeps working as the model grows.
+
+**What this rule cannot see.**
+
+- Taint is tracked within one function. A mapping that reaches the call through a helper's parameter is reported as unknown rather than tainted, so an expansion assembled across two functions is not seen.
+- The receiver must be an expression the model graph recognises as a queryset. This is what excludes the class-based-view idiom self.get(*args, **self.kwargs), but it also skips a manager reached through an unresolved import.
+- Q(**request.GET) builds the same lookup injection and is not reported, because Q is a bare callable rather than a queryset method. The corpus holds 69 such calls and every one expands a value read as unknown.
+- The annotate, aggregate, alias and values methods take keyword arguments too, but theirs must be query expressions rather than strings, so an expanded request mapping raises TypeError there instead of injecting anything.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/topics/db/queries/#field-lookups>
+- <https://owasp.org/www-community/attacks/Mass_Assignment>
+- <https://cwe.mitre.org/data/definitions/915.html>

@@ -4208,7 +4208,99 @@ We therefore build the dataflow foundation first, and we default this family to
   *Done when:* 26 tests, 82/87 injection with five survivors explained, and the
   corpus silence traced past `accepts` to taint.
 
-- **3.4.5** — `DJI-005` queryset kwargs expanded from request data (`filter(**request.GET)`).
+- **3.4.5** — `DJI-005` queryset kwargs expanded from request data
+  (`filter(**request.GET)`). **DONE.**
+
+  `Book.objects.filter(**request.GET)` is not string composition, so this rule
+  is the first in the family that is not a `SqlSurface`. There is no SQL to
+  splice: the client instead chooses the *keywords*, and Django parses each one
+  as a field lookup. That is enough to walk relations (`author__email__contains`),
+  read columns the view never meant to expose, and on `create`/`update` to
+  assign fields nobody offered — mass assignment through the ORM's own grammar.
+  Severity is `high` rather than `critical` precisely because of that
+  confinement: the attacker gets the lookup language, not arbitrary SQL.
+
+  **The naive rule would have shipped at 0% precision, and only measurement
+  showed it.** Keying on method name plus a request source finds twelve calls
+  across the corpus — and all twelve are
+  `self.get(self.request, *self.args, **self.kwargs)`, the class-based-view
+  idiom for re-rendering a form after a failed `post`. `self.get` is the view's
+  own handler; it shares a name with `QuerySet.get` and nothing else. Testing
+  the receiver structurally against the queryset tracker excludes all twelve
+  without a single name on a blocklist, and the corpus diagnostic confirms they
+  are still the *only* tainted calls the receiver test declines.
+
+  **Which methods belong was read from Django's signatures, not remembered.**
+  `filter`, `exclude`, `get`, `get_or_create`, `update_or_create`, `create` and
+  `update` all take lookup or value keywords. `order_by(*field_names)` and
+  `values_list(*fields, flat=False, named=False)` take no `**kwargs` at all, and
+  `annotate`/`aggregate`/`alias`/`values` take query expressions, so a request
+  string in one of those is a `TypeError` rather than an injection. An earlier
+  draft of this entry listed `order_by` and `values_list`; the signatures did
+  not, and the signatures are what shipped.
+
+  **The tracker keys a chain only at its outermost call, which this rule is the
+  first to be hurt by.** `.raw()` and `.extra()` are written last, so the call
+  the rule holds is the call the tracker keyed. `.filter()` is chained past
+  constantly, and `filter(**request.GET).exclude(archived=True)` would have been
+  missed entirely. Peeling each tracked expression back down its own spine
+  recovers the inner calls and cannot admit anything the tracker had not already
+  accepted; on the corpus it lifts the real-queryset count from 54 to 63, a 17%
+  recall gain, and `DJI-002` and `DJI-003` now share the same helper. Three
+  shapes drive it — a chained lookup, one before a terminal `.count()`, and one
+  before a slice, the last of which is why the spine is seeded from every node
+  rather than every call, since a subscript heads that chain and is not a call.
+
+  **The two-stage prefilter earns its keep here, and the taint model supplies a
+  third stage.** `"**"` appears in 608 of the 3,091 files, but only 117 hold a
+  call this rule could ever report. `request_source` recognises exactly two
+  things — an attribute of the name `request`, and the literal `self.kwargs` —
+  and taint propagates only along def-use chains, which do not leave the scope.
+  So a mapping cannot be judged tainted unless one of those two strings appears
+  in the file's own text. That is a necessary condition read off the taint model
+  rather than a heuristic, and it halves the work: 608 files walked becomes 264,
+  and 117 scope trees become 68. The full funnel: 608 files with `**` → 264 past
+  the source words → 117 admitted → 423 expansion calls → 63 on a real queryset
+  → all 63 `unknown` → 0 reported. `Q(**terms)` accounts for 69 further calls,
+  all `unknown`; it is recorded as a limitation rather than machinery, because a
+  `Q` object's destination is not visible locally.
+
+  **This rule failed the pretix timing gate before it passed it, and the first
+  measurement was nearly the wrong one.** It arrived at 23.02s against a 20s
+  budget — but the box was slow that hour, and the stashed baseline measured
+  18.33s rather than the 13.22s recorded at the previous commit. Re-baselining
+  on the same box turned an apparent 74% blow-up into a real but smaller 26%
+  one. Three changes account for it. The rule computed def-use chains, the
+  queryset tracker and the spine walk for *every* scope in an admitted file,
+  when almost no scope holds an expansion at all; doing that work only after a
+  syntactic match is found returned 4.2s. `admits()` allocated a generator for
+  each of the 833,609 nodes it walked, when 7% of them are calls; guarding with
+  an `isinstance` fast path — a fast path, not a second opinion, since
+  `expansions` declines a non-call itself — returned a further 0.2s. The source
+  words above cut the walk in half again. `check()` fell from 1.643s to 0.863s,
+  and the interleaved A/B settled at 12.94s base against 13.99s, **+1.05s or
+  8%**, with 30% of the budget still spare.
+
+  **The mutation probe found three tests that could not reach the guard they
+  named.** A decline test for a written-out keyword, one for a non-lookup
+  method, and one for a call with no receiver all used sources containing no
+  `**` at all — so the file-level prefilter discarded them before the guard ran,
+  and each passed for the wrong reason. This is lesson 28 for the fourth time in
+  this family, and the first time the vacuum was caused by the prefilter rather
+  than by an uncomposed value. Every decline test now carries a `**` the rule
+  must walk past. The source-word prefilter needed a guard of its own for the
+  same reason: `self.kwargs` is the only way a true positive can arrive in a
+  file that never says `request`, so there is a test written deliberately
+  without that word, which fails the moment either source word is dropped.
+
+  Of the nine remaining survivors, seven *widen* a prefilter or an acceptance
+  test, one is `DJI-004`'s deliberately unreachable alias branch, and the last
+  changes only when the spine is computed rather than what it computes.
+
+  *Done when:* 28 tests, 103/112 injection with nine survivors explained, the
+  twelve class-based-view calls shown excluded by structure rather than by name,
+  and the corpus silence traced past the receiver test to taint.
+
 - **3.4.6** — `DJI-006` `order_by` driven by a request parameter with no allowlist.
 
 ### Step 3.5 — Untrusted input rules
@@ -4585,9 +4677,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **59 rules are
+document specifies, and most of it is still only specified: **60 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first ten of Phase 3's and the first four of its injection family.
+2, plus the first ten of Phase 3's and the first five of its injection family.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

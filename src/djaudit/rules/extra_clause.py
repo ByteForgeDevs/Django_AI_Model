@@ -157,8 +157,13 @@ class ExtraClauseInterpolation(SqlSurface):
         return statement_calls(node)
 
     def accepts(self, found: Composed, frame: Frame) -> bool:
-        """The receiver must be something the tracker calls a queryset."""
-        return id(found.call) in frame.querysets
+        """The receiver must be something the tracker calls a queryset.
+
+        Asking about the whole spine rather than the call alone, because
+        ``qs.extra(where=[...]).filter(...)`` is an ordinary thing to write and
+        the tracker keys such a chain only at its outermost call.
+        """
+        return id(found.call) in frame.queryset_calls
 
     def report(self, ctx: ProjectContext, path: Path, site: Site) -> Finding:
         statement = site.composed
