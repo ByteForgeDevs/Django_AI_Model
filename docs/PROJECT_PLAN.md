@@ -3834,6 +3834,76 @@ We therefore build the dataflow foundation first, and we default this family to
 
 - **3.3.6** — `DJP-010` filtering or ordering on an unindexed field, using the model graph.
 
+  Shipped, deliberately much narrower than the line above describes, and the
+  narrowing was chosen by measurement rather than taste. Static analysis cannot
+  know how many rows a table holds, which is the whole difficulty: an unindexed
+  sort is free on fifty rows and ruinous on fifty million, and nothing in the
+  source says which one it is. The three readings were measured against the
+  corpora before any of them was built:
+
+  | Reading | Findings | Why not |
+  |---|---|---|
+  | Any `Meta.ordering` on an unindexed column | 44 (nb 9, px 35) | Mostly lookup tables — `DeviceRole`, `Platform`, `ItemCategory` |
+  | Any `ordering_fields` naming an unindexed column | 21 (px) | Same problem, smaller |
+  | The above, on a table that accumulates rows | **7 (px)** | Shipped |
+
+  The accumulation test is the idea worth keeping. A column that stamps its own
+  creation — `auto_now_add=True`, or a date defaulted to `now` — is what an
+  append-only table looks like, and it is the difference between a log and a
+  configuration list. `auto_now` is deliberately excluded: it records
+  modification, so it says a row *changed*, not that another one arrived.
+  Applying it leaves exactly pretix's transactional tables — `Checkin`,
+  `Invoice`, `CartPosition`, `WaitingListEntry`, `Voucher`, `ReusableMedium`,
+  `RevokedTicketSecret` — and rejects all 9 netbox candidates, which are
+  inventory. That it discriminates in the right direction on a corpus it was
+  not tuned against is the reason to trust it.
+
+  `ordering_fields` rather than `Meta.ordering` because the caller picks the
+  column: the expensive plan is one query parameter away and no care taken in
+  the view prevents it. Postgres given `ORDER BY unindexed LIMIT 50` sorts every
+  qualifying row before returning the first page, and repeats that for each page.
+
+  **The graph was wrong about indexes and nothing had noticed**, because until
+  now no rule read `indexed_fields`. One set of boolean defaults was applied to
+  every field class, so a plain `ForeignKey` reported `db_index=False` and a
+  `OneToOneField` reported `unique=False`. Django creates an index for both, and
+  for `SlugField` — measured by building the tables and reading the emitted
+  `CREATE INDEX` statements rather than by reading signatures, since the foreign
+  key's index lives in a default argument and enumerating field classes whose
+  `db_index` defaults to `True` returns only `SlugField`. Left alone, DJP-010
+  would have accused every foreign-key filter in the corpus of a table scan.
+
+  **Injection found a real bug in the rule, not just missing tests.** 22
+  mutations, 8 survivors. One was `ordering_fields = ['__all__']` being read as
+  the wildcard: DRF compares `ordering_fields == '__all__'` against the
+  attribute itself, so inside a list it is an ordinary column name. Reading
+  DRF's `get_valid_fields` also settled the neighbouring question — the wildcard
+  expands to `_meta.fields`, which contains foreign-key columns and no
+  many-to-many — so the rule now declines only *multi-valued* relations, and a
+  `ForeignKey(db_index=False)` is reported like the column it is. Two guards
+  were dead by redundancy and deleted: `pk` and a relation path are both absent
+  from `all_fields`, so the lookup already declines them. Final: 20 of 20.
+
+  **Lesson 39 — a false-positive rate is a design input, not a report.** Three
+  scopes were measured before a line of the rule was written, and the numbers
+  chose the design. The alternative — build the broad version, discover 44
+  findings, then bolt on filters until the number looks acceptable — reaches a
+  similar place with no evidence that the filters mean anything. Here the
+  discriminator is checkable: it was never shown netbox, and it rejects all 9
+  of netbox's candidates for the stated reason.
+
+  **The rule is free, and the way to know that is to bracket it.** pretix timed
+  baseline / change / baseline on a quiet box: 18.51s, 18.88s, 19.45s. The
+  change sits *between* its two baselines, so the 0.94s drift between the
+  baselines is larger than the 0.37s it appears to cost — an `ApiRule` reuses
+  the route graph that has already been built. A single before/after pair would
+  have reported either a 2% regression or a 3% speedup depending on which
+  baseline it happened to take, and both readings would have been noise.
+
+  *Done when:* 35 tests, 20/20 injection, 7 findings all triaged
+  `true_positive`, the graph's index defaults measured against Django, and the
+  rule's cost shown to be inside the corpus's own timing noise.
+
 ### Step 3.4 — SQL and ORM injection
 
 - **3.4.1** — `DJI-001` `cursor.execute` with an interpolated string (f-string, `%`, `+`, `.format`).
@@ -4217,7 +4287,7 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **54 rules are
+document specifies, and most of it is still only specified: **55 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first eight of Phase 3's.
 

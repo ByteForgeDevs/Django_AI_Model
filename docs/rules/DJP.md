@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJP` — performance and ORM efficiency
 
-9 rules on the queries a Django project makes without meaning to. The ORM
+10 rules on the queries a Django project makes without meaning to. The ORM
 makes the expensive thing and the cheap thing look identical: `book.author.name`
 is an attribute access whether the author arrived with the book or costs its own
 round trip, and the source gives no indication which. Every rule here reports a
@@ -58,6 +58,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJP-007`](#djp-007--a-row-written-once-per-iteration-where-a-bulk-write-would-do) | A row written once per iteration where a bulk write would do | medium | firm |
 | [`DJP-008`](#djp-008--a-whole-table-read-into-memory-where-it-could-be-streamed) | A whole table read into memory where it could be streamed | medium | firm |
 | [`DJP-009`](#djp-009--field-read-on-a-queryset-that-deferred-it) | Field read on a queryset that deferred it | medium | firm |
+| [`DJP-010`](#djp-010--client-can-sort-a-growing-table-by-an-unindexed-column) | Client can sort a growing table by an unindexed column | medium | firm |
 
 ---
 
@@ -261,3 +262,24 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#only>
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#defer>
+
+---
+
+### DJP-010 — Client can sort a growing table by an unindexed column
+
+**Severity** medium · **Confidence** firm · **Tier** static
+
+**What it means.** `ordering_fields` lets the caller choose the sort column, so the plan is decided by a query parameter rather than by the view. Postgres asked to `ORDER BY` a column with no index sorts every qualifying row before it can return the first page of results, and repeats that work for each page. On a table that accumulates rows the cost grows with the age of the deployment, which is why these endpoints are fast in staging and slow in year three.
+
+**How to fix it.** Add `db_index=True` to the column, or a `Meta.indexes` entry leading with it where the sort is usually combined with a filter. If the column is not meant to be sorted on, drop it from `ordering_fields` -- the list is an allowlist, so removing a name removes the plan it permits.
+
+**What this rule cannot see.**
+
+- Only reports models carrying a self-stamping timestamp, which is the static evidence available that a table accumulates rows. A growing table without one is missed.
+- Reads `ordering_fields` only. A default `ordering` on the view or the model sorts every list request on the same column, but is not chosen by the caller and is not reported here.
+- Cannot see a functional or partial index created in a migration by hand rather than declared on the model, so an index added through `RunSQL` will look absent.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/options/#django.db.models.Options.indexes>
+- <https://www.django-rest-framework.org/api-guide/filtering/#orderingfilter>

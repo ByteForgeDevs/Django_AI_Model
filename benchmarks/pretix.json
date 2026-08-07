@@ -1345,6 +1345,76 @@
       "reviewer": "Zambagarrah",
       "reviewed": "2026-08-04",
       "note": "migrations/0305_fixup_eventmetaproperties.py:19. emv.property.organizer.slug traverses two relations per row in the same log call, and is reported as the property__organizer path. Together with the three other findings in this loop it makes eight extra queries per cross-organizer meta value, all removable by select_related('event__organizer', 'property__organizer'). A repair migration, so the total row count is small by construction, but the shape is a textbook N+1."
+    },
+    {
+      "fingerprint": "aaafec0c8873027e",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/cart.py",
+      "line": 53,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/cart.py:53. CartPositionViewSet exposes ordering on datetime, which is CartPosition's auto_now_add stamp and carries no index; the model indexes cart_id and other columns explicitly, so the omission is specific rather than a project that never indexes anything. Cart positions accumulate for every checkout attempt including abandoned ones, which on a busy shop is the highest-volume table in the schema, and the endpoint is reachable by any client holding an event token. Confirmed by reading the model: no db_index on the field and no Meta.indexes on the model at all."
+    },
+    {
+      "fingerprint": "e7a71ec2c9a1760b",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/checkin.py",
+      "line": 1234,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/checkin.py:1234. CheckinViewSet allows sorting by created and datetime, neither indexed, on a table with one row per ticket scan. The model's own Meta.ordering is ('-datetime',), so the unindexed sort is not merely permitted but is what every unparameterised list request already does -- the finding names the client-controllable surface, and the default is the same plan. Checkin has no Meta.indexes. For a large festival this is hundreds of thousands of rows sorted in full to return fifty."
+    },
+    {
+      "fingerprint": "6d0da09985cfb916",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/media.py",
+      "line": 71,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/media.py:71. ReusableMediaViewSet exposes ordering on created and type. Worth recording why type counts: the model declares unique_together = (('identifier','type','organizer'),), and a composite index serves its leading column only, so it answers a sort on identifier and does nothing for one on type. The only Meta.indexes entry leads with updated. Both reported columns are therefore genuinely unindexed, and created is the auto_now_add stamp that identifies the table as accumulating."
+    },
+    {
+      "fingerprint": "93cdab990cb1de77",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/order.py",
+      "line": 1959,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/order.py:1959. InvoiceViewSet allows sorting by date, declared as DateField(default=today) with no index, on a table that gains a row per invoice issued and never loses one for legal reasons. Invoice indexes six other columns with explicit db_index=True, so this is an oversight rather than a policy. Meta.ordering is ('date','invoice_no'), meaning the unindexed sort is also the default for every list request. unique_together leads with organizer and does not help."
+    },
+    {
+      "fingerprint": "f45705d58e226dfd",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/order.py",
+      "line": 2114,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/order.py:2114. RevokedSecretViewSet exposes ordering on created, an auto_now_add column with no index. The neighbouring secret field carries db_index=True, which is the same file demonstrating the idiom one line away. Revoked ticket secrets are append-only by definition -- the table exists to record that a secret must never be honoured again -- so it grows monotonically with ticket reissues and is exactly the case where an unindexed sort degrades over the life of a deployment."
+    },
+    {
+      "fingerprint": "2e7390d47143720b",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/voucher.py",
+      "line": 63,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/voucher.py:63. VoucherViewSet allows sorting by max_usages and value, neither indexed. Voucher carries created as auto_now_add, which is what identifies it as accumulating; the sortable columns themselves are a PositiveIntegerField and a DecimalField. The code column has db_index=True, so the model indexes what it looks up by and not what the API sorts by. Large organisers generate vouchers in bulk campaigns, so the row count tracks marketing activity rather than being bounded by configuration."
+    },
+    {
+      "fingerprint": "9c740b79c8737f12",
+      "rule_id": "DJP-010",
+      "verdict": "true_positive",
+      "file": "src/pretix/api/views/waitinglist.py",
+      "line": 52,
+      "reviewer": "Zambagarrah",
+      "reviewed": "2026-08-07",
+      "note": "api/views/waitinglist.py:52. WaitingListViewSet exposes ordering on created and email, neither indexed, on a model with no Meta.indexes at all. created is auto_now_add. Meta.ordering is ('-priority','created','pk'), so the default list plan already sorts on an unindexed column and a client may additionally request email. Waiting lists accumulate for the lifetime of an event and are precisely the table that is small in staging and large for a sold-out show, which is the failure mode this rule exists to catch."
     }
   ]
 }

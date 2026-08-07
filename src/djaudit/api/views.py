@@ -254,6 +254,15 @@ class ViewNode:
     """``filterset_fields`` as written, kept unevaluated so ``'__all__'`` and a
     list are distinguishable without a second pass."""
 
+    ordering_fields_node: ast.expr | None = None
+    """``ordering_fields`` as written -- the columns a client may sort by.
+
+    Read by DJP-010, and kept unevaluated for the same reason as
+    ``filterset_fields``: ``'__all__'`` exposes every column and a list exposes
+    the ones named, and those are different findings. Inert without an ordering
+    backend, exactly as ``filterset_fields`` is inert without django-filter's.
+    """
+
     throttle_refs: tuple[str, ...] = ()
     throttle_scope: str | None = None
     throttles_unset: bool = True
@@ -454,6 +463,7 @@ class _Availability:
     filter_backend_refs: tuple[str, ...] = ()
     filterset_ref: str | None = None
     filterset_fields_node: ast.expr | None = None
+    ordering_fields_node: ast.expr | None = None
     throttle_refs: tuple[str, ...] = ()
     throttle_scope: str | None = None
     throttles_unset: bool = True
@@ -485,6 +495,8 @@ def _read_availability(chain: Sequence[ClassRecord]) -> _Availability:
             out.filterset_fields_node = _assigned(body, "filterset_fields") or _assigned(
                 body, "filter_fields"
             )
+        if out.ordering_fields_node is None:
+            out.ordering_fields_node = _assigned(body, "ordering_fields")
         if out.throttles_unset:
             throttles = _class_refs(body, "throttle_classes")
             if throttles or _assigned(body, "throttle_classes") is not None:
@@ -595,6 +607,7 @@ def build_view(record: ClassRecord, index: ClassIndex) -> ViewNode:
         filter_backend_refs=availability.filter_backend_refs,
         filterset_ref=availability.filterset_ref,
         filterset_fields_node=availability.filterset_fields_node,
+        ordering_fields_node=availability.ordering_fields_node,
         throttle_refs=availability.throttle_refs,
         throttle_scope=availability.throttle_scope,
         throttles_unset=availability.throttles_unset,
