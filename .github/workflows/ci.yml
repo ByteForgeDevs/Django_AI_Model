@@ -60,6 +60,15 @@ jobs:
       - name: benchmark verdicts are a completed review
         run: uv run python scripts/check_triage.py
 
+      # A triage layer is only as meaningful as the corpus it is scored on. If
+      # a baseline that reads nothing scores well on both directions at once,
+      # or the set of findings the reviewer was ever in two minds about shrinks
+      # to nothing, then triage on this corpus has become trivial and any
+      # figure measured against it is decoration. Printed on every commit, so
+      # the floor a model must clear is a number rather than a claim.
+      - name: triage baselines still discriminate
+        run: uv run python scripts/triage_baselines.py
+
       # The rule reference is generated from the registry, so an edit to a
       # rule's grade or wording that never reaches the page turns published
       # security documentation into a description of a tool we no longer ship.

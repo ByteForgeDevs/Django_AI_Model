@@ -5495,7 +5495,59 @@ remove from them, and `6.5.3` asserts that by trying.
   model calling an accepted risk a true positive wastes a reviewer's afternoon.
   A model calling a true positive an accepted risk is the failure this project
   exists to prevent, and it is reported on its own line rather than averaged
-  into a single score that can hide it.
+  into a single score that can hide it. **Done.**
+
+  `src/djaudit/llm/evaluate.py` and `scripts/triage_baselines.py`, now a CI
+  gate. Ground truth is the 245 hand-written verdicts in `benchmarks/*.json`.
+
+  **The measurement changed the phase's argument, which is what it was for.**
+
+  Of the 245 verdicts, 194 are `true_positive`. A classifier that reads nothing
+  and says "true positive" therefore scores 79.2%, so the harness produces **no
+  combined accuracy number at all** — there is no `accuracy` property to reach
+  for, and `recall` will not answer without being told which class it is being
+  asked about. `beats` requires a model to win or tie on *both* directions, so
+  trading one error for the other cannot read as progress.
+
+  | baseline | TP recall | AR recall | downgrades | upgrades |
+  |---|---|---|---|---|
+  | always-true-positive | 100.0% | 0.0% | 0 | 51 |
+  | always-accepted-risk | 0.0% | 100.0% | 194 | 0 |
+  | always-abstain | 0.0% | 0.0% | 0 | 0 |
+  | by-rule *(fitted)* | 99.0% | 84.3% | 2 | 8 |
+  | **by-rule (held out)** | **97.9%** | **51.0%** | 4 | 25 |
+
+  The first version of this gate **failed**, and correctly: a lookup table
+  keyed on rule id alone scored 99.0%/84.3%. That table was fitted on its own
+  test set. Held out — fitted on two targets, scored on the third, folds pooled
+  rather than averaged so pretix's 141 findings outweigh healthchecks' 33 — it
+  scores **97.9% / 51.0%**. The gap between 84.3% and 51.0% is memorisation
+  being graded on its own homework, and reporting the first would have
+  overstated the deterministic floor.
+
+  **The headroom is far smaller than 245 suggests.** 22 of 29 rules are
+  unanimous here: every finding that rule produced was judged the same way. For
+  those the rule id already *is* the verdict, and asking a model can only
+  introduce a disagreement with a reviewer who was right. Only seven rules are
+  ever contested — `DJA-011`, `DJA-014`, `DJA-015`, `DJD-002`, `DJP-004`,
+  `DJS-009`, `DJS-010` — covering 110 findings, and 81 of those are `DJP-004`
+  at 81:2. **The genuinely contested set is around 25 findings.**
+
+  Two consequences, both binding on the rest of this phase:
+  1. `djaudit triage` (6.2.2) should spend a call only on a finding under a
+     contested rule. That is ~90% fewer calls *and* ~90% fewer chances to
+     contradict a correct deterministic answer.
+  2. Binary triage is not where this layer earns its place. Explanation (6.3)
+     and patch authoring (6.4) have no deterministic baseline to beat, because
+     the engine produces no prose and no diffs at all.
+
+  The gate is shown failing on both of its defects: a corpus where every rule
+  is unanimous, and one a blind baseline solves outright. `always-abstain`
+  scores 0.0%/0.0% rather than "no data", because recall is computed over what
+  a human reviewed — declining costs exactly what answering wrong costs, so a
+  model cannot post a good score by attempting only the easy half.
+
+  Measured: 13 mutations, **13 caught** by 37 tests.
 
 ### Step 6.2 — Triage
 

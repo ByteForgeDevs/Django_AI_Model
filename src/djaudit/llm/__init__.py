@@ -10,6 +10,17 @@ mechanism and ``docs/architecture/llm-layer.md`` for the argument.
 from djaudit.llm.budget import Budget, Metered, RateLimit
 from djaudit.llm.cache import Cache, Cached, key_for
 from djaudit.llm.config import Credential, LLMConfig
+from djaudit.llm.evaluate import (
+    ReviewedFinding,
+    Score,
+    Triager,
+    Verdict,
+    baselines,
+    contested_rules,
+    headroom,
+    load_ground_truth,
+    score,
+)
 from djaudit.llm.provider import (
     Answer,
     Declined,
@@ -41,7 +52,16 @@ __all__ = [
     "RateLimit",
     "Reply",
     "ResponseSchema",
+    "ReviewedFinding",
     "SchemaViolationError",
+    "Score",
+    "Triager",
     "Usage",
+    "Verdict",
+    "baselines",
+    "contested_rules",
+    "headroom",
     "key_for",
+    "load_ground_truth",
+    "score",
 ]
