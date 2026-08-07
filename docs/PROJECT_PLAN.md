@@ -5896,7 +5896,53 @@ remove from them, and `6.5.3` asserts that by trying.
   Mutation found one more: line numbering has to **step over removed lines**, or
   a secret *below* a change is mislocated by one and the window is never
   narrowed. Every test written until then had put the key above the fix.
-- **6.4.3** — Verification loop: apply to a scratch copy, re-run djaudit and the target's own test suite, and discard any patch that fails either.
+- **6.4.3** — Verification loop: apply to a scratch copy, re-run djaudit and the target's own test suite, and discard any patch that fails either. **Done** — `llm/verify.py`, `djaudit fix --verify [--test-command]`, 47 tests, mutation **28/28**.
+
+  **What "verified" means, and what it does not.** The default check is static
+  and establishes four things: the patch applies, the result still parses, the
+  finding it targeted is gone, and no new finding appeared. That is a real
+  claim, and it is not the claim "this is safe to merge" — nothing has been
+  executed. `Level` names the difference (`STATIC` / `TESTED` / `FAILED`) so a
+  static pass can never be printed as a tested one.
+
+  **The test command is never auto-detected.** Detecting `manage.py test` or a
+  `pytest.ini` and running it would mean *executing the audited project*, which
+  the static tier exists not to do — importing a target's settings module runs
+  whatever that module runs. So the suite runs only when an operator names it
+  on the command line, where they could equally have typed it into their own
+  shell. Convenience here would have quietly traded away the property the whole
+  tier is built on.
+
+  **Bisecting only on failure.** Verifying each patch separately would cost one
+  engine run per patch. The batch is tried once, which is the common case; only
+  when it fails is each patch checked alone, and then the survivors are checked
+  *together* again — patches that each hold up alone can still conflict, and
+  what ships is the set, so the set is what has to hold. If the surviving set
+  fails together, nothing ships.
+
+  **The loop found a real bug in 6.4.2.** A verify test disagreed with the
+  patch text, and the cause was `Fix.after` being a *stored* field while
+  `combined()` re-derived the same text from `edits`. Two representations of
+  one value, free to drift, and the one being checked was not the one that
+  would ship. `after` is now computed from `edits`. Recorded as measurement
+  discipline **#94**.
+
+  **An unverified run must not claim verification.** The first CLI test wrote
+  `assert "Not verified" in flat or "Verified" not in flat` — an `or` whose
+  second clause was trivially satisfiable, so it asserted nothing (**#95**).
+  Fixing the assertion exposed the real defect behind it: `level` defaulted to
+  `Level.STATIC`, so a run *without* `--verify` still printed "Verified
+  statically only" over a patch nothing had looked at. The level is now `None`
+  until a check actually runs.
+
+  **Mutation, 28 mutants, all caught** — but 19/28 on the first pass. Four
+  survivors, and two of them were the same lesson: in every real run a patch
+  that fails to parse *also* carries a `problem` string, so the five conditions
+  in `accepted` each silently backstopped the others and any one of them could
+  be deleted without changing an outcome (**#79** again, through a new door).
+  The fix was to construct each defect in isolation. The other two survivors
+  were paths nothing had reached: a suite that times out, and a surviving set
+  that fails when re-verified together.
 - **6.4.4** — Deterministic fixes for the mechanical rules, with no model involved — most `DJS` settings fixes need no intelligence at all.
 
 ### Step 6.5 — Guardrails

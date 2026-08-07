@@ -667,3 +667,77 @@ class TestFixCommand:
 
         assert applied.returncode == 0, applied.stderr
         assert "DEBUG = False" in (root / "config" / "settings" / "base.py").read_text()
+
+    def test_verify_says_what_it_established(self) -> None:
+        result = runner.invoke(
+            app, ["fix", str(self.PROJECT), "--min-confidence", "tentative", "--verify"]
+        )
+        flat = " ".join(result.output.split())
+
+        assert result.exit_code == 0
+        assert "Verified statically only" in flat
+        assert "not established" in flat
+
+    def test_a_test_command_upgrades_the_claim(self, tmp_path: Path) -> None:
+        root = tmp_path / "project"
+        shutil.copytree(self.PROJECT, root)
+
+        result = runner.invoke(
+            app,
+            [
+                "fix",
+                str(root),
+                "--min-confidence",
+                "tentative",
+                "--test-command",
+                "true",
+            ],
+        )
+        flat = " ".join(result.output.split())
+
+        assert result.exit_code == 0
+        assert "and `true` passed" in flat
+        assert "statically only" not in flat
+
+    def test_a_failing_command_drops_every_patch(self, tmp_path: Path) -> None:
+        root = tmp_path / "project"
+        shutil.copytree(self.PROJECT, root)
+
+        result = runner.invoke(
+            app,
+            [
+                "fix",
+                str(root),
+                "--min-confidence",
+                "tentative",
+                "--test-command",
+                "exit 1",
+            ],
+        )
+        flat = " ".join(result.output.split())
+
+        assert result.exit_code == 0
+        assert "dropped" in flat
+        assert "own tests failed" in flat
+
+    def test_verifying_never_writes_to_the_project(self, tmp_path: Path) -> None:
+        root = tmp_path / "project"
+        shutil.copytree(self.PROJECT, root)
+        before = {p: p.read_bytes() for p in sorted(root.rglob("*.py"))}
+
+        runner.invoke(
+            app,
+            ["fix", str(root), "--min-confidence", "tentative", "--test-command", "true"],
+        )
+
+        assert {p: p.read_bytes() for p in sorted(root.rglob("*.py"))} == before
+
+    def test_without_verify_nothing_is_executed(self) -> None:
+        """The static-tier property, held at the CLI boundary."""
+        result = runner.invoke(
+            app,
+            ["fix", str(self.PROJECT), "--min-confidence", "tentative"],
+        )
+        flat = " ".join(result.output.split())
+
+        assert "Not verified" in flat or "Verified" not in flat

@@ -43,6 +43,7 @@ from djaudit.llm.suggest import render, suggest
 # Imported by name rather than as a module: `djaudit.llm` re-exports a `triage`
 # function, which shadows the submodule of the same name.
 from djaudit.llm.triage import TriageRun, triage
+from djaudit.llm.verify import Level, explain_rejection, verified
 from djaudit.models import Confidence, Family, Severity
 from djaudit.registry import all_rules
 from djaudit.reporters import OutputFormat, json_reporter, sarif, terminal
@@ -590,6 +591,23 @@ def fix_command(
         bool,
         typer.Option("--refusals", help="List every finding no fix was offered for, and why."),
     ] = False,
+    check: Annotated[
+        bool,
+        typer.Option(
+            "--verify",
+            help="Apply each patch to a throwaway copy and re-run djaudit against it, "
+            "dropping any that fails. Your own project is never written to.",
+        ),
+    ] = False,
+    suite: Annotated[
+        str | None,
+        typer.Option(
+            "--test-command",
+            help="Also run this command in the copy and drop patches that make it fail, "
+            "e.g. 'pytest -q'. Implies --verify. Never guessed: naming it is how you "
+            "accept that djaudit will execute your project.",
+        ),
+    ] = None,
 ) -> None:
     """Propose changes for the findings whose fix the rule already decided.
 
@@ -613,6 +631,21 @@ def fix_command(
     proposed, refused = fixes(result, path)
     console = Console()
 
+    level: Level | None = None
+    if proposed and (check or suite):
+        report = verified(proposed, path, result.findings, min_confidence, suite)
+        for rejection in report.rejected:
+            for dropped in rejection.fixes:
+                console.print(
+                    f"[red]dropped[/red] {dropped.finding.rule_id} "
+                    f"{dropped.finding.location.file}:{dropped.finding.location.line} "
+                    f"— {explain_rejection(rejection)}"
+                )
+        proposed = report.accepted
+        level = report.confidence
+        if proposed:
+            console.print()
+
     if not proposed:
         console.print("[dim]No finding in this project has a fix its rule decided.[/dim]")
         _print_refusals(console, refused, show_refusals)
@@ -622,7 +655,9 @@ def fix_command(
     conditional = [f for f in proposed if not f.ready]
 
     if ready:
-        console.print(f"[bold]{len(ready)} change(s) ready to apply[/bold]\n")
+        console.print(f"[bold]{len(ready)} change(s) ready to apply[/bold]")
+        console.print(_verification_note(level, suite), highlight=False)
+        console.print()
         console.print(Syntax(patch(ready), "diff", theme="ansi_dark", background_color="default"))
 
     if conditional:
@@ -632,6 +667,26 @@ def fix_command(
             console.print(Syntax(fix.patch, "diff", theme="ansi_dark", background_color="default"))
 
     _print_refusals(console, refused, show_refusals)
+
+
+def _verification_note(level: Level | None, suite: str | None) -> str:
+    """Say exactly what was established, so nothing overstates itself.
+
+    `None` means verification never ran, which is not the same as running and
+    establishing the weaker claim. Conflating them printed "Verified statically
+    only" over a patch nothing had checked.
+    """
+    if level is None:
+        return "[dim]Not verified. Pass --verify to check these against a throwaway copy.[/dim]"
+    if level is Level.TESTED:
+        return f"[dim]Verified: applied to a copy, djaudit re-run, and `{suite}` passed.[/dim]"
+    if level is Level.STATIC:
+        return (
+            "[dim]Verified statically only: the patch applies, the result parses, the "
+            "finding is gone and no new one appeared. Whether the application still "
+            "works is not established — pass --test-command to check that.[/dim]"
+        )
+    return "[dim]Not verified. Re-run with --verify to check these against a copy.[/dim]"
 
 
 def _print_refusals(console: Console, refused: Sequence[Refusal], show_all: bool) -> None:

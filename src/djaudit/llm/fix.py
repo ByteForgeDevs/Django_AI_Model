@@ -136,10 +136,21 @@ class Fix:
     finding: Finding
     path: Path
     before: str
-    after: str
     edits: tuple[Edit, ...]
     confirm: str | None
     context: int = DIFF_CONTEXT
+
+    @property
+    def after(self) -> str:
+        """The patched text, derived rather than stored.
+
+        It was a field until a test in 6.4.3 set it to something the edits did
+        not produce and `verify` never noticed -- because `combined` composes
+        from `edits`, which is what actually ships. Two representations of one
+        thing will eventually disagree, and the one being checked would have
+        been the one nobody applies.
+        """
+        return apply(self.before, self.edits)
 
     @property
     def patch(self) -> str:
@@ -228,7 +239,6 @@ def fix_for(
         finding=finding,
         path=path,
         before=source,
-        after=after,
         edits=(edit,),
         confirm=fixer.confirm,
         context=safe_context(source, after, finding.location.file, held),
