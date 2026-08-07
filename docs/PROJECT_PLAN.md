@@ -4388,6 +4388,95 @@ We therefore build the dataflow foundation first, and we default this family to
 
 - **3.5.1** — Taint source model: `request.GET`, `POST`, `data`, `body`, `headers`, `COOKIES`, `FILES`, and view kwargs. **Done — built in 3.4.1**, which could not be written without it. `src/djaudit/dataflow/taint.py` carries the three-valued lattice and `src/djaudit/dataflow/strings.py` the composition shapes it propagates through; the design record is in the 3.4.1 entry above.
 - **3.5.2** — `DJI-007` `eval`, `exec`, `pickle.loads`, or `yaml.load` on tainted data.
+  **Done.** The substep title names four sinks and one of them turned out to be
+  wrong, which is the whole story of the entry.
+
+  The sinks divide into three kinds. `eval` and `exec` run what they are given
+  and need no qualification. `pickle`, `cPickle`, `dill`, `marshal` and
+  `jsonpickle` reconstruct objects by calling whatever the payload names, so a
+  pickle is a program rather than data. YAML is the one that had to be measured.
+
+  **"Flag bare `yaml.load`" is obsolete advice.** PyYAML 6's signature is
+  `load(stream, Loader)` with the loader *required*, so `yaml.load(x)` raises
+  `TypeError` and parses nothing; on PyYAML 5.x an omitted loader defaulted to
+  `FullLoader`, which refuses the attack. A missing loader is a crash or a
+  non-event, never the vulnerability it is conventionally reported as. What
+  decides is which loader is named, and that was established by running each one
+  in its own process against `!!python/object/apply:os.system` and checking for
+  a **filesystem side effect the return value could not fake**:
+
+  | loader | side effect | result |
+  |---|---|---|
+  | `Loader` | **yes** | returned the command's exit status |
+  | `UnsafeLoader` | **yes** | returned the command's exit status |
+  | `CLoader` | **yes** | returned the command's exit status |
+  | `FullLoader` | no | `ConstructorError` |
+  | `SafeLoader` | no | `ConstructorError` |
+  | `CSafeLoader` | no | `ConstructorError` |
+  | `CFullLoader` | no | `ConstructorError` |
+  | `BaseLoader` | no | returned the tag's argument as plain strings |
+
+  The sentinel mattered. A first attempt grepped stdout for the marker word and
+  reported `BaseLoader` as executing, because the word appeared in the *repr* of
+  the value it returned. The tool had committed the error it exists to catch.
+
+  **The loader lookup is a condition of shipping, not a refinement.** All three
+  `yaml.load_all` calls in the corpus pass `Loader=yaml.SafeLoader`. Two of them
+  reach the loader lookup and are declined by it — the diagnostic prints
+  `sink=0` for each, so the guard is shown running rather than assumed. The
+  third, netbox's bulk import, is dropped earlier because its file contains no
+  request word at all and its payload is a method parameter, so taint would be
+  `UNKNOWN` regardless. Ignoring the keyword would have given the rule three
+  false positives and no true ones: the same trap `DJI-005` met in the
+  class-based-view idiom and `DJI-006` met in netbox's ordering allowlist, now
+  three substeps running.
+
+  **The corpus is silent, and the funnel says why.** Across 3,091 files there
+  are ten sink-shaped calls: three `exec`, one `compile`, three `yaml.load_all`
+  and three `yaml.safe_load`. Only one survives to taint analysis —
+  `extras/utils.py:139`, whose payload is `UNKNOWN` — and `UNKNOWN` is never
+  reported. That leaves the rule reporting nothing on mature code, which is the
+  correct answer and the reason the differentiator is the taint edge rather than
+  the call name: ruff and bandit already flag these calls without regard to
+  their input, and doing it again would be reinventing under principle 3.
+
+  **The prefilter had to be measured twice, and the second time was the point.**
+  Every sink is either a bare `eval`/`exec` or an attribute whose *immediate*
+  holder is one of the module names, so a file naming none of those words cannot
+  produce a finding and need not be parsed. The first version tested plain
+  substrings and cost a full second on pretix, because `exec` matches `execute`,
+  `eval` matches `retrieval`, `load` matches `payload` and `decode` matches every
+  `.decode()` — 46/83/139 files reached the AST walk for nothing. Matching whole
+  identifiers is *sound* rather than merely tighter: Python names are whole
+  tokens, so a boundary can never hide a real `eval(x)`. That took the walk to
+  0/8/3 files and 0.00s/0.07s/0.01s.
+
+  It also moved the cost rather than removing it. Profiling the stages showed
+  0.464s of pretix's remaining 0.476s was now the *scan itself*: `re`'s
+  eight-way alternation with `\b` cannot use the fast substring path, and even
+  behind a cheap substring pre-gate it still cost 0.20s. A hand-written
+  `str.find` plus a character-class boundary check agreed with the regex on all
+  3,091 files and cost 0.02s/0.12s/0.09s against 0.07s/0.57s/0.46s. The lesson
+  generalises past this rule: a prefilter is on the whole-project path, so it is
+  worth profiling as its own stage rather than assuming the obvious spelling of
+  it is free.
+
+  Of 31 injection defects aimed at the rule, one survivor was a genuinely
+  missing test — dropping the function-name check made `pickle.dumps(request.body)`
+  a finding, and serialising request data is an ordinary thing to do. Two others
+  were *equivalent* mutants that had to be rewritten before they could say
+  anything: a missing loader already fell out of `_tail(None)`, and adding
+  `safe_load` to the loader set changes nothing because it takes no loader. A
+  third was unreachable behind an early return and had to be re-aimed at the
+  branch it was meant to attack. Six more attack the prefilter, since a filter
+  that decides what is analysed at all is the one place a narrowing bug is
+  silent: dropping any single token, stopping the scan at a token's first
+  occurrence, and refusing a token that opens the file are each caught.
+
+  *Done when:* 27 tests, 150/166 injection with every survivor a widening, an
+  equivalent or a dead-by-design branch, the loader table established by
+  side-effect rather than by return value, and the two visible `SafeLoader`
+  calls shown declined by the loader lookup itself.
 - **3.5.3** — `DJI-008` `subprocess` with `shell=True` or `os.system` on tainted data.
 - **3.5.4** — `DJI-009` **SSRF** — outbound HTTP request to a tainted URL.
 - **3.5.5** — `DJI-010` open redirect — `redirect()` or `HttpResponseRedirect` with a tainted target.
@@ -4758,9 +4847,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **61 rules are
+document specifies, and most of it is still only specified: **62 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first ten of Phase 3's and the first six of its injection family.
+2, plus the first ten of Phase 3's and the first seven of its injection family.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

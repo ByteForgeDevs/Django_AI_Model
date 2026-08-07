@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJI` — injection and untrusted input
 
-6 rules on the boundary between text the project wrote and text the
+7 rules on the boundary between text the project wrote and text the
 client sent. Every one of them is about the same mistake in a different
 costume: a value that should have travelled beside a command ends up inside
 it, and something that was meant to be data is read as syntax.
@@ -56,6 +56,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJI-004`](#dji-004--request-data-interpolated-into-a-rawsql-or-func-expression) | Request data interpolated into a RawSQL or Func expression | critical | firm |
 | [`DJI-005`](#dji-005--request-data-expanded-into-queryset-keyword-arguments) | Request data expanded into queryset keyword arguments | high | firm |
 | [`DJI-006`](#dji-006--ordering-field-chosen-by-request-data-with-no-allowlist) | Ordering field chosen by request data with no allowlist | medium | firm |
+| [`DJI-007`](#dji-007--request-data-evaluated-or-deserialised-by-an-executing-loader) | Request data evaluated or deserialised by an executing loader | critical | firm |
 
 ---
 
@@ -192,3 +193,27 @@ $ djaudit run . --min-severity info --min-confidence tentative
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#order-by>
 - <https://www.django-rest-framework.org/api-guide/filtering/#orderingfilter>
 - <https://cwe.mitre.org/data/definitions/213.html>
+
+---
+
+### DJI-007 — Request data evaluated or deserialised by an executing loader
+
+**Severity** critical · **Confidence** firm · **Tier** static
+
+**What it means.** These sinks do not parse data, they follow instructions. A pickle names the callables to invoke while it rebuilds, eval and exec run their argument outright, and PyYAML's Loader, UnsafeLoader and CLoader construct whatever object the document asks for -- all three were measured executing os.system through a !!python/object/apply tag. When the payload arrives from a request, the attacker is not supplying data to the process, they are supplying code to it, and the result is remote code execution with the application's own privileges.
+
+**How to fix it.** Parse the format instead of executing it: json.loads for structured data, yaml.safe_load or an explicit Loader=yaml.SafeLoader for YAML. Where a Python value must genuinely cross a boundary, sign it -- django.core.signing carries the same data with a tamper check, which is what Django itself switched sessions to. If a request must select behaviour, map its value through a dict of permitted callables rather than evaluating it.
+
+**What this rule cannot see.**
+
+- A payload is reported only when taint analysis proves it came from the request. Deserialising an opaque value is not reported here, because ruff and bandit already flag these calls without regard to their input.
+- Taint is tracked within one function, so a payload that arrives through a helper's parameter, a model field or a cache read is unknown rather than tainted and is not reported.
+- A yaml.load call whose Loader is a variable rather than a named loader is not reported, because the rule cannot show the loader is one of the three measured to execute a payload.
+- The compile builtin is not treated as a sink. It produces a code object without running it, so the defect only exists once that object reaches an eval or exec, which is what the rule reports instead.
+
+**References**
+
+- <https://docs.python.org/3/library/pickle.html#module-pickle>
+- <https://pyyaml.org/wiki/PyYAMLDocumentation>
+- <https://docs.djangoproject.com/en/stable/topics/signing/>
+- <https://cwe.mitre.org/data/definitions/502.html>
