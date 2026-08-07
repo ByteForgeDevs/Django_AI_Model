@@ -5340,7 +5340,39 @@ remove from them, and `6.5.3` asserts that by trying.
 
 ### Step 6.1 — Provider abstraction
 
-- **6.1.1** — Provider interface with structured output support; no vendor lock-in.
+- **6.1.1** — Provider interface with structured output support; no vendor lock-in. **Done.**
+
+  `src/djaudit/llm/provider.py`. One protocol with one method, and a request
+  that carries the shape of the answer it will accept. No runtime dependency
+  was added; `ResponseSchema.as_json_schema()` renders to the dialect OpenAI's
+  structured outputs and Anthropic's tool inputs both take, so a vendor is an
+  adapter rather than an edit here. That render is checked by tests against the
+  shape those APIs document; it has not been checked against a live endpoint,
+  and the plan should not claim otherwise until it has.
+
+  **The safety property is the type, not the docstring.** A caller declares its
+  fields before asking, and `validate` refuses a reply carrying a field nobody
+  declared. So a model has no route by which to return `{"is_defect": false}`
+  and be believed — not a guarded route, an absent one. It refuses loudly
+  rather than dropping the key, because dropping it would also keep it out of
+  the finding list while leaving nothing behind when a provider starts
+  answering a different question than the one it was asked.
+
+  The schema language is three types and a closed set of strings, and stops
+  there on purpose. Every question this layer asks has an answer that is a word
+  from a list the caller wrote, a sentence, a number, or a flag. A language rich
+  enough for nested objects is rich enough to express a structure nobody checked.
+
+  `Declined` is a return value rather than an exception, so every caller has to
+  decide what it does without a model. `NullProvider` always declines and is
+  what CI uses, which makes degradation the tested path rather than the one
+  that gets exercised when somebody's key expires.
+
+  Measured: six mutations of the validator — dropping the unknown-field
+  rejection, silently filtering instead of raising, dropping the closed set,
+  admitting a `bool` where an integer was declared (it subclasses `int`, so the
+  obvious check lets it through), dropping the required-field check, and
+  admitting a list — **all six caught** by the 25 tests.
 - **6.1.2** — Configuration, credential handling, and an explicit offline mode.
 - **6.1.3** — Response caching keyed by finding fingerprint plus prompt version, so cost is bounded and results are reproducible.
 - **6.1.4** — Token budget, rate limiting, and graceful degradation to deterministic output.
