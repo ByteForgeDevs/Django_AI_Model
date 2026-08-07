@@ -5449,7 +5449,46 @@ remove from them, and `6.5.3` asserts that by trying.
     *midway* separates a truncated entry from no entry.
   - The third was my own bad mutant, guarded by a condition that was never
     true. Rewritten to make the key readable rather than hashed, it is caught.
-- **6.1.4** — Token budget, rate limiting, and graceful degradation to deterministic output.
+- **6.1.4** — Token budget, rate limiting, and graceful degradation to deterministic output. **Done.**
+
+  `src/djaudit/llm/budget.py`. The interesting question was never how to count
+  tokens; it is what a run does at the limit. The answer enforced here is
+  **exactly what it would have done with no model at all** — the path
+  `NullProvider` already exercises on every commit. There is no separate
+  low-budget mode to get wrong, which makes the budget safe to set
+  aggressively: a run capped at a thousand tokens returns a complete, correct
+  finding list with commentary on the first few, not a truncated audit.
+
+  Exhaustion is a `Declined`, not an exception, for the same reason declining
+  is a return value everywhere else in this package. The reason names *which*
+  ceiling was hit and shows the arithmetic, because a user told only "budget
+  spent" cannot tell whether to raise the limit by ten percent or ten times.
+
+  The estimator rounds against us — three characters per token, not the usual
+  four, since code is denser than prose — and a provider that reports no usage
+  is charged the estimate rather than nothing, which is otherwise how a budget
+  is escaped. Cache hits cost neither tokens nor calls, so a cached re-run is
+  not limited to the same number of findings the first one was. Refusals are
+  counted separately from spend, so a summary can say "40 of 200 findings were
+  reviewed" instead of quietly reporting on 40.
+
+  **One limitation, stated rather than papered over.** The check runs before a
+  call, against the prompt, and a response's size cannot be known in advance —
+  a schema with a free-text field has no upper bound. A ceiling can therefore
+  be overshot by at most one response. Both halves of that are tested: the
+  overshoot happens, and no further call starts after it.
+
+  Two bugs found in my own first draft. `going_offline` expressed "stop now" as
+  a call ceiling equal to the number already spent — which is zero before the
+  first call, and a ceiling of zero means unlimited, so switching the model off
+  before using it turned every limit *off*. Stopping is not a quantity; it is
+  now a flag. And the first refusal tests passed a ceiling the prompt fit
+  under, so they were measuring the response cost rather than the guard.
+
+  Measured: 19 mutations, **19 caught** by 33 tests. Deleting the rate-limiter
+  call survived the first round — the only test naming it asserted a *refused*
+  call does not sleep, which a provider that never sleeps also satisfies. A
+  test that an allowed call does wait closes it.
 - **6.1.5** — **The evaluation harness, before anything asks a model a question.**
   Scores a triage run against the 245 recorded human verdicts: agreement rate,
   and separately the two error directions, because they are not equally bad. A
