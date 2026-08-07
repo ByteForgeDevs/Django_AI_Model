@@ -5642,7 +5642,55 @@ remove from them, and `6.5.3` asserts that by trying.
   fixtures `"c"` and `"m"`, which sort into the expected answer alphabetically,
   so zeroing severity outright still passed; and nothing exercised the new
   gate's failure path at all.
-- **6.2.3** — False-positive suggestion — proposes suppressions, never applies them.
+- **6.2.3** — **Suppression proposals: only a model verdict may justify one.**
+  **Done.** `llm/suggest.py` turns an accepted-risk verdict into a rule-scoped
+  `# djaudit: ignore[DJS-001] reason` comment, rendered as a one-line unified
+  diff. Nothing is ever written; `--suggest` prints, the reviewer applies.
+
+  The safety property is that **a corpus verdict is not grounds for a
+  suppression.** The prior ranks findings from what three projects happened to
+  agree on, which is fine and reversible; a comment committed to somebody's
+  source is neither. So only `Source.MODEL` qualifies, and an offline djaudit —
+  the default, and the CI path — proposes nothing at all and says so. On the DRF
+  fixture that is visible: `DJA-010` is judged an accepted risk from the corpus
+  and is refused out loud rather than silently offered.
+
+  **The defect this substep actually found.** The first version built its patch
+  from `finding.location.snippet`. Settings rules *mask* the value they report,
+  so the snippet for `SECRET_KEY = "3t(5n^s..."` is `SECRET_KEY =
+  "*x<redacted:50 chars>"`. Applying that proposal would have overwritten a live
+  credential with the redaction marker, and the diff would have looked entirely
+  reasonable. Eight tests about the shape of the comment passed. The one test
+  that copied a fixture, applied a proposal to the real file and re-ran the
+  engine caught it in its first run. `propose` now takes the on-disk line,
+  `source_line_of` reads it, and a `REDACTION_MARKER` guard refuses a masked
+  line as defence in depth.
+
+  Mutation: **25 of 25 caught**, after reading five survivors rather than
+  believing them. Three were real gaps and are now tested — the two constants
+  (`MINIMUM_JUSTIFICATION`, `MAXIMUM_LINE`) were checked by tests that *built
+  their input from the constant*, so mutating 120 to 100000 survived; and the
+  round-trip check that re-parses the generated comment is unreachable while
+  `comment_for` is correct, so it is now reached by monkeypatching a bare
+  `# noqa`. One was a bad anchor of mine. One (`n=0` → `n=3` in the diff) is
+  **equivalent** — a one-line sequence has no context to add, verified
+  byte-for-byte.
+
+  The harness lied twice before it was believed. Its self-proof step passed on
+  `No module named pytest` — a failure that proves nothing ran — so it now
+  demands pytest exit code **1** specifically, and uses a *behavioural* canary
+  rather than renaming a function, which broke the package import and produced a
+  collection error instead of a test failure.
+
+  Also pinned: `djaudit.llm` re-exports `suggest` and `triage` over its own
+  submodules, so `from djaudit.llm import suggest` is the function. Deliberate,
+  and now a test, because monkeypatching the wrong object makes a test pass for
+  no reason.
+
+  Timing gate failed locally at 4.17s against 3.5s. Interleaved A/B against
+  `HEAD` in a second worktree: old best 3.52s, new best 3.64s, distributions
+  identical, load average 4.2 on 8 cores — and `e8b56d2` is green in CI with
+  byte-identical engine source. The machine, not the change. Second time.
 - **6.2.4** — Grouping of related findings into a single reviewable theme.
 
 ### Step 6.3 — Explanation

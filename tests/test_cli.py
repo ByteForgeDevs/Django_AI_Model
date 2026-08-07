@@ -414,6 +414,38 @@ class TestTriageCommand:
         result = runner.invoke(app, ["triage", str(tmp_path / "nope")])
         assert result.exit_code == EXIT_ERROR
 
+    def test_suggest_offers_nothing_when_no_model_was_consulted(self, orm_project):
+        """The whole point of the flag, on the path everyone will actually take.
+
+        Offline, every verdict is borrowed from the corpus or absent, and
+        neither is grounds for writing a permanent comment into someone's
+        source. The command has to say so rather than print an empty section.
+        """
+        result = runner.invoke(app, ["triage", str(orm_project), "--suggest"])
+
+        assert result.exit_code == EXIT_OK
+        assert "no suppression is justified by this run" in result.output
+
+    def test_a_corpus_accepted_risk_is_refused_out_loud(self, drf_project):
+        """The dangerous case: a verdict that *looks* like grounds and is not.
+
+        DJA-010 is in the corpus prior as an accepted risk, so this run judges
+        it acceptable without asking anyone. Ranking on that basis is fine and
+        reversible. Writing `# djaudit: ignore[DJA-010]` into the file on that
+        basis is neither, so it must be refused and the refusal must be said.
+        """
+        result = runner.invoke(app, ["triage", str(drf_project), "--suggest"])
+
+        assert "1 not offered" in result.output
+        assert "DJA-010" in result.output
+        assert "corpus verdict cannot justify" in result.output.replace("\n", " ")
+
+    def test_suggest_is_off_unless_asked_for(self, orm_project):
+        result = runner.invoke(app, ["triage", str(orm_project)])
+
+        assert "suppression" not in result.output
+        assert "not offered" not in result.output
+
     def test_it_refuses_an_incomplete_run(self, tmp_path):
         root = tmp_path / "proj"
         (root / "conf").mkdir(parents=True)

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
+from rich.syntax import Syntax
 from rich.table import Table
 
 from djaudit import __version__, engine
@@ -30,6 +31,7 @@ from djaudit.llm.budget import Budget, Metered
 from djaudit.llm.cache import Cache, Cached
 from djaudit.llm.evaluate import Verdict
 from djaudit.llm.provider import NullProvider, Provider
+from djaudit.llm.suggest import render, suggest
 
 # Imported by name rather than as a module: `djaudit.llm` re-exports a `triage`
 # function, which shadows the submodule of the same name.
@@ -44,6 +46,10 @@ if TYPE_CHECKING:
 EXIT_OK = 0
 EXIT_FINDINGS = 1
 EXIT_ERROR = 2
+
+# A run with hundreds of corpus verdicts refuses hundreds of times, and the
+# refusals are all the same sentence; showing every one buries the diffs above.
+_REFUSALS_SHOWN = 5
 
 app = typer.Typer(
     name="djaudit",
@@ -315,6 +321,14 @@ def triage_command(
             "Off unless both this and [tool.djaudit.llm] enable it.",
         ),
     ] = None,
+    show_suggestions: Annotated[
+        bool,
+        typer.Option(
+            "--suggest",
+            help="Also print suppression comments for findings judged an accepted risk. "
+            "Nothing is written; the diffs are for you to apply.",
+        ),
+    ] = False,
 ) -> None:
     """Rank findings by whether they are worth a reviewer's time.
 
@@ -336,7 +350,10 @@ def triage_command(
 
     provider = _build_provider(config)
     run = triage(result.findings, provider)
-    _print_triage(Console(), run, provider_name=provider.name)
+    console = Console()
+    _print_triage(console, run, provider_name=provider.name)
+    if show_suggestions:
+        _print_suggestions(console, run, path)
 
     if any(d.blocking for d in result.context.diagnostics):
         Console(stderr=True).print(
@@ -412,6 +429,32 @@ def _print_triage(console: Console, run: TriageRun, *, provider_name: str) -> No
             "[yellow]no model was consulted[/yellow]: every undecided finding above is "
             "one this corpus cannot settle, and needs a person."
         )
+
+
+def _print_suggestions(console: Console, run: TriageRun, root: Path) -> None:
+    """Print the suppressions this run would justify, and the ones it would not.
+
+    An offline run reaches here and prints nothing but refusals, which is the
+    designed outcome: the corpus prior ranks findings, and ranking is reversible
+    in a way that a comment committed to somebody's source is not.
+    """
+    proposals, refused = suggest(run, root)
+
+    console.print()
+    if proposals:
+        console.print("[bold]suggested suppressions[/bold] (not applied):")
+        console.print(Syntax(render(proposals), "diff", theme="ansi_dark"))
+    else:
+        console.print("[bold]no suppression is justified by this run[/bold]")
+
+    if refused:
+        # The refusals are the point when nothing is proposed, and worth seeing
+        # even when something is: they say which findings stay a human's problem.
+        console.print(f"[dim]{len(refused)} not offered:[/dim]")
+        for reason in refused[:_REFUSALS_SHOWN]:
+            console.print(f"  [dim]- {reason}[/dim]")
+        if len(refused) > _REFUSALS_SHOWN:
+            console.print(f"  [dim]... and {len(refused) - _REFUSALS_SHOWN} more[/dim]")
 
 
 @app.command()
