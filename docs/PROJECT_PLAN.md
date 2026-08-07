@@ -4548,7 +4548,57 @@ We therefore build the dataflow foundation first, and we default this family to
   execution table established by filesystem sentinel rather than by return
   value, and the quoting guard shown declining four shapes that taint analysis
   had already marked tainted.
-- **3.5.4** — `DJI-009` **SSRF** — outbound HTTP request to a tainted URL.
+- **3.5.4** — `DJI-009` **SSRF** — outbound HTTP request to a tainted URL. **Done.**
+
+  Two measurements shaped this rule and both contradict the conventional lint.
+
+  The first is what a name-keyed matcher would select. Counting
+  `{client,session}.{get,post}` across the three benchmarks found **over 4,400
+  sites and not one an HTTP request**: `self.client.get(...)`,
+  `token_client.post(...)` and `device_client.get(...)` are Django's *test
+  client*, and `request.session.get("last_project_id")` is a dictionary. This is
+  the sharpest case yet for reading only a call's immediate holder as a module
+  name — the discipline `DJI-007` and `DJI-008` already use — which leaves 14
+  non-constant URLs across 3,091 files.
+
+  The second is that **`urljoin` is a sink and concatenation is not**, which is
+  the opposite of the way the shape is usually flagged. Against a constant base,
+  `urljoin(BASE, p)` resolves to *evil.com* for `http://evil.com/x` and for the
+  protocol-relative `//evil.com/x`, while `BASE + p` keeps the base's host for
+  every payload tried. A constant base is no defence at all, and string building
+  — the thing lints flag — cannot move the authority.
+
+  So the rule asks not "was this URL built from a request" but **"can the request
+  choose the authority"**, walking a concatenation or f-string left to right and
+  stopping at the first constant that reaches past the host. A tainted path on a
+  fixed host is left to 3.5.7 rather than reported here.
+
+  Two defects surfaced during the work rather than after it. Probing whether the
+  low-confidence branch was reachable found it was not — the rule resolves a name
+  to its definition *before* reporting, so every finding has a source to name —
+  and an unreachable branch was removed rather than shipped. And a test asserting
+  `BASE + tainted` was silent turned out to pass for the wrong reason: `BASE` is
+  bound at module level, unreadable, and the rule walked straight past it. An
+  unreadable part is far more often a whole base URL than a bare scheme, so it now
+  ends the reasoning.
+
+  Of 36 injection defects aimed at the rule, nine survived the first pass and one
+  of them was a real bug: **`urljoin` is symmetric and only one argument was being
+  read**. Measured both ways round, `urljoin(TAINTED, "/health")` takes the host
+  from the base while `urljoin(TAINTED, "http://good/x")` takes it from the
+  reference — so which argument chooses depends on the other, and a tainted base
+  with a relative reference was being missed entirely. Two more survivors were
+  equivalent mutants and were re-aimed; the rest were genuine test gaps, including
+  a `?` and a `#` boundary that an earlier test had never isolated because its
+  fixture also contained a `/`, and a `urljoin` test that a mutant deleting the
+  entire `urljoin` handling still passed, because the call is opaque and therefore
+  tainted in its own right. Asserting *which* expression was named is what told
+  them apart.
+
+  *Done when:* 41 tests, 208/228 injection with every survivor a widening,
+  `authority()` shown declining six shapes that taint analysis had already marked
+  `TAINTED`, and the rule shown reaching 32 real fetch sites across the benchmarks
+  so its silence there is measured rather than assumed.
 - **3.5.5** — `DJI-010` open redirect — `redirect()` or `HttpResponseRedirect` with a tainted target.
 - **3.5.6** — `DJI-011` `mark_safe` or `format_html` applied to tainted data (XSS).
 - **3.5.7** — `DJI-012` path traversal — file open or `FileResponse` on a tainted path.
@@ -4917,9 +4967,9 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **63 rules are
+document specifies, and most of it is still only specified: **64 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first ten of Phase 3's and the first eight of its injection family.
+2, plus the first ten of Phase 3's and the first nine of its injection family.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

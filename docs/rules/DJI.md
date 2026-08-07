@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJI` — injection and untrusted input
 
-8 rules on the boundary between text the project wrote and text the
+9 rules on the boundary between text the project wrote and text the
 client sent. Every one of them is about the same mistake in a different
 costume: a value that should have travelled beside a command ends up inside
 it, and something that was meant to be data is read as syntax.
@@ -58,6 +58,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJI-006`](#dji-006--ordering-field-chosen-by-request-data-with-no-allowlist) | Ordering field chosen by request data with no allowlist | medium | firm |
 | [`DJI-007`](#dji-007--request-data-evaluated-or-deserialised-by-an-executing-loader) | Request data evaluated or deserialised by an executing loader | critical | firm |
 | [`DJI-008`](#dji-008--request-data-used-to-build-a-shell-command) | Request data used to build a shell command | critical | firm |
+| [`DJI-009`](#dji-009--request-data-chooses-the-host-of-an-outbound-request) | Request data chooses the host of an outbound request | high | certain |
 
 ---
 
@@ -243,3 +244,28 @@ $ djaudit run . --min-severity info --min-confidence tentative
 - <https://docs.python.org/3/library/shlex.html#shlex.quote>
 - <https://cwe.mitre.org/data/definitions/78.html>
 - <https://owasp.org/www-community/attacks/Command_Injection>
+
+---
+
+### DJI-009 — Request data chooses the host of an outbound request
+
+**Severity** high · **Confidence** certain · **Tier** static
+
+**What it means.** An application server usually sits somewhere a client does not: inside the VPC, next to the metadata service, able to reach the database's admin port and every internal API that trusts the network instead of a token. When a request chooses the host, it borrows that position, and the response often comes back in the page. This is why SSRF is judged on the authority rather than on whether a URL was built from user input at all: a tainted path on a fixed host stays inside a service that was already reachable.
+
+**How to fix it.** Do not let a request supply a host. Where the target genuinely varies, resolve it from a fixed mapping rather than from the value, so the client selects a key and the server selects the URL. If an arbitrary URL is unavoidable, parse it, require the scheme to be http or https, resolve the name and reject addresses that are private, loopback or link-local -- and re-check after every redirect, because the first response can send the client somewhere else.
+
+**What this rule cannot see.**
+
+- A URL is reported only when taint analysis proves it came from the request. A host read from a model field, a setting or a helper's parameter is unknown rather than tainted and is not reported.
+- Only the authority is reported. A request value appended after a slash was measured unable to move the host, so it is left to the path traversal rule rather than reported as request forgery here.
+- The fetching module must be named at the call, as requests.get or httpx.post. A session object held on self is not recognised, because matching receivers by name was measured to select over 4,400 Django test client calls and dictionary reads across the benchmarks.
+- Redirects are not followed. A constant URL that redirects to a host the request chose is a real defect this rule cannot see, since it would need the response rather than the source.
+- A part of the URL that cannot be read, such as a base imported from settings, ends the reasoning. It is far more often a whole base URL than a bare scheme, so what follows it is treated as path and a host appended to an unresolvable prefix is not reported.
+
+**References**
+
+- <https://cwe.mitre.org/data/definitions/918.html>
+- <https://owasp.org/www-community/attacks/Server_Side_Request_Forgery>
+- <https://docs.python.org/3/library/urllib.parse.html#urllib.parse.urljoin>
+- <https://requests.readthedocs.io/en/latest/user/advanced/>
