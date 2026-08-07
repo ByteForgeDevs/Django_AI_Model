@@ -5853,7 +5853,49 @@ remove from them, and `6.5.3` asserts that by trying.
   `X = beta1`) to get there. The third was the proof helper — tested directly,
   never tested as *called*, so deleting the call from `apply` left everything
   green.
-- **6.4.2** — `djaudit fix --dry-run` producing a unified diff.
+- **6.4.2** — **`djaudit fix --dry-run` producing a unified diff. Done.**
+  `llm/fix.py`, `djaudit fix`, 47 + 14 tests, mutation 26/26.
+
+  An autofixer earns trust by what it declines. Measured across the 27 `DJS`
+  findings the fixtures produce, the value is decided by the *rule* rather than
+  by the *project* for **four rules out of twenty-seven** — `DJS-001`,
+  `DJS-008`, `DJS-011`, `DJS-018`. Everything else needs a hostname, an origin
+  list, a key rotation or a restructuring, and is refused **by name with a
+  reason**, because a silent skip reads as "nothing to do here".
+
+  **The agreement gate.** A fixer may only write a value its own rule already
+  names: a test asserts `"{setting} = {value}"` appears verbatim in that rule's
+  `remediation`, for every entry in the table. So the table cannot drift from
+  the advice, and a fixer cannot become a second, unreviewed rule engine hiding
+  inside the first.
+
+  **`SECURE_HSTS_SECONDS` is the case that proves the gate is necessary and not
+  sufficient.** It is the easiest-looking fix here and `DJS-007` names `31536000`
+  outright, so a table entry would pass the gate. It is still refused, because
+  the same remediation says to *ramp up rather than jump* — HSTS is sticky for
+  the max-age it arrived with, so a one-step year is unrecoverable for a year if
+  anything on the domain cannot do HTTPS. `test_hsts_is_deliberately_not_fixable`
+  pins the reasoning rather than leaving it as an absence.
+
+  **The gate then fired on an honest entry, and was not widened.** `DJS-018`
+  said "set `SECURE_CONTENT_TYPE_NOSNIFF` back to True" in prose — the same
+  meaning, not the same characters. A fuzzy match would have gutted the check,
+  so the *rule* was amended to state the assignment plainly. The requirement
+  stands: a remediation a machine may act on has to name the value literally.
+
+  **A patch's context republished a secret, which is the 6.3.1 leak arriving
+  through a different door.** Fixing `DEBUG` two lines under `SECRET_KEY` printed
+  the key as unchanged context — into a terminal, a pull request and CI logs —
+  while changing something else entirely. The run already knows which lines
+  those are, because a rule masked them, so `safe_context` narrows the window
+  until every flagged line falls outside it, rather than masking (which would
+  make the patch unappliable, and an unappliable patch is not a fix). On the
+  fixture the window drops 3 → 1 and the planted key disappears.
+  `test_the_patch_applies_with_git_apply` keeps the output honest about itself.
+
+  Mutation found one more: line numbering has to **step over removed lines**, or
+  a secret *below* a change is mislocated by one and the window is never
+  narrowed. Every test written until then had put the key above the fix.
 - **6.4.3** — Verification loop: apply to a scratch copy, re-run djaudit and the target's own test suite, and discard any patch that fails either.
 - **6.4.4** — Deterministic fixes for the mechanical rules, with no model involved — most `DJS` settings fixes need no intelligence at all.
 

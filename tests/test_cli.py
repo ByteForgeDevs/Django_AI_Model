@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -11,6 +12,7 @@ from typer.testing import CliRunner
 from djaudit import engine
 from djaudit.baseline import Baseline
 from djaudit.cli import EXIT_ERROR, EXIT_FINDINGS, EXIT_OK, app
+from djaudit.models import Confidence
 from djaudit.triage import Triage, Verdict
 
 runner = CliRunner()
@@ -563,3 +565,105 @@ class TestExplainCommand:
         result = runner.invoke(app, ["explain", fingerprint, str(orm_project)])
 
         assert "model" not in result.output.lower()
+
+
+class TestFixCommand:
+    """Proposing patches, and refusing to be an applier."""
+
+    PROJECT = Path("tests/fixtures/vulnerable_project")
+
+    def test_it_prints_a_patch(self) -> None:
+        result = runner.invoke(app, ["fix", str(self.PROJECT), "--min-confidence", "tentative"])
+
+        assert result.exit_code == 0
+        assert "ready to apply" in result.output
+        assert "DEBUG = False" in result.output
+
+    def test_it_writes_nothing(self) -> None:
+        before = (self.PROJECT / "config" / "settings" / "production.py").read_bytes()
+
+        runner.invoke(app, ["fix", str(self.PROJECT), "--min-confidence", "tentative"])
+
+        assert (self.PROJECT / "config" / "settings" / "production.py").read_bytes() == before
+
+    def test_applying_is_refused_rather_than_silently_ignored(self) -> None:
+        result = runner.invoke(app, ["fix", str(self.PROJECT), "--no-dry-run"])
+
+        assert result.exit_code != 0
+        assert "not implemented" in result.output
+
+    def test_the_planted_key_is_never_printed(self) -> None:
+        base = (self.PROJECT / "config" / "settings" / "base.py").read_text()
+        key = base.split('SECRET_KEY = "', 1)[1].split('"', 1)[0]
+
+        result = runner.invoke(app, ["fix", str(self.PROJECT), "--min-confidence", "tentative"])
+
+        assert key not in result.output
+
+    def test_conditional_fixes_are_separated_and_carry_the_condition(self) -> None:
+        result = runner.invoke(app, ["fix", str(self.PROJECT), "--min-confidence", "tentative"])
+        flat = " ".join(result.output.split())
+
+        assert "to confirm first" in flat
+        assert "DJS-008" in flat
+        assert "only if every subdomain is served over HTTPS" in flat
+
+    def test_refusals_are_counted_by_default(self) -> None:
+        result = runner.invoke(app, ["fix", str(self.PROJECT), "--min-confidence", "tentative"])
+
+        assert "no automatic fix" in " ".join(result.output.split())
+
+    def test_refusals_are_explained_when_asked(self) -> None:
+        result = runner.invoke(
+            app,
+            ["fix", str(self.PROJECT), "--min-confidence", "tentative", "--refusals"],
+        )
+        flat = " ".join(result.output.split())
+
+        assert "DJS-013" in flat
+        assert "depends on the project" in flat
+
+    def test_a_clean_project_says_so(self, tmp_path: Path) -> None:
+        (tmp_path / "manage.py").write_text("# nothing here\n")
+
+        result = runner.invoke(app, ["fix", str(tmp_path)])
+
+        assert result.exit_code == 0
+        assert "no finding" in result.output.lower() or "has a fix" in result.output
+
+    def test_a_missing_path_fails(self) -> None:
+        result = runner.invoke(app, ["fix", "does/not/exist"])
+
+        assert result.exit_code != 0
+
+    def test_the_patch_applies_with_git_apply(self, tmp_path: Path) -> None:
+        """The claim the output makes about itself, checked against git.
+
+        A diff that looks right and does not apply is not a fix, and the
+        context narrowing that keeps a key out of the patch is exactly the kind
+        of change that could quietly break applicability.
+        """
+        import shutil
+        import subprocess
+
+        root = tmp_path / "project"
+        shutil.copytree(self.PROJECT, root)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        result = runner.invoke(app, ["fix", str(root), "--min-confidence", "tentative"])
+        assert result.exit_code == 0
+
+        from djaudit.llm.fix import fixes, patch
+
+        proposed, _ = fixes(engine.run(root, min_confidence=Confidence.TENTATIVE), root)
+        text = patch([f for f in proposed if f.ready])
+        applied = subprocess.run(
+            ["git", "apply", "--unidiff-zero", "-"],
+            check=False,
+            cwd=root,
+            input=text,
+            text=True,
+            capture_output=True,
+        )
+
+        assert applied.returncode == 0, applied.stderr
+        assert "DEBUG = False" in (root / "config" / "settings" / "base.py").read_text()

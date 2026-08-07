@@ -16,6 +16,7 @@ worse outcome than a red one.
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -32,6 +33,7 @@ from djaudit.llm.cache import Cache, Cached
 from djaudit.llm.evaluate import Verdict
 from djaudit.llm.explain import FingerprintError, explain, find
 from djaudit.llm.explain import render as render_explanation
+from djaudit.llm.fix import Refusal, fixes, patch
 from djaudit.llm.group import collapsed, group
 from djaudit.llm.impact import impact
 from djaudit.llm.impact import render as render_impact
@@ -564,6 +566,91 @@ def explain_command(
     if show_impact:
         console.print()
         console.print(render_impact(impact(finding, result.findings)), highlight=False)
+
+
+@app.command(name="fix")
+def fix_command(
+    path: Annotated[
+        Path,
+        typer.Argument(help="Path to the Django project to propose changes for."),
+    ] = Path(),
+    min_confidence: Annotated[
+        Confidence,
+        typer.Option("--min-confidence", help="Findings below this are not considered."),
+    ] = Confidence.FIRM,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--no-dry-run",
+            help="Print the patch instead of writing it. Writing is not implemented yet, "
+            "so --no-dry-run is refused rather than silently ignored.",
+        ),
+    ] = True,
+    show_refusals: Annotated[
+        bool,
+        typer.Option("--refusals", help="List every finding no fix was offered for, and why."),
+    ] = False,
+) -> None:
+    """Propose changes for the findings whose fix the rule already decided.
+
+    Most findings do not get one. A value that depends on your hostnames, your
+    front-end origins or your key management is a decision, and this writes
+    only what its own rule names -- checked in tests against each rule's own
+    remediation text, so the two cannot drift apart.
+
+    Nothing is written to disk. Pipe the output to `git apply` when you agree
+    with it, and read the "confirm first" section before you do.
+    """
+    if not path.is_dir():
+        _fail(f"path is not a directory: {path}")
+    if not dry_run:
+        _fail(
+            "--no-dry-run is not implemented: this proposes patches, it does not apply them. "
+            "Pipe the output to `git apply` once you have read it."
+        )
+
+    result = engine.run(path, min_confidence=min_confidence)
+    proposed, refused = fixes(result, path)
+    console = Console()
+
+    if not proposed:
+        console.print("[dim]No finding in this project has a fix its rule decided.[/dim]")
+        _print_refusals(console, refused, show_refusals)
+        return
+
+    ready = [f for f in proposed if f.ready]
+    conditional = [f for f in proposed if not f.ready]
+
+    if ready:
+        console.print(f"[bold]{len(ready)} change(s) ready to apply[/bold]\n")
+        console.print(Syntax(patch(ready), "diff", theme="ansi_dark", background_color="default"))
+
+    if conditional:
+        console.print(f"\n[bold]{len(conditional)} change(s) to confirm first[/bold]")
+        for fix in conditional:
+            console.print(f"\n[yellow]{fix.finding.rule_id}[/yellow] — only if {fix.confirm}")
+            console.print(Syntax(fix.patch, "diff", theme="ansi_dark", background_color="default"))
+
+    _print_refusals(console, refused, show_refusals)
+
+
+def _print_refusals(console: Console, refused: Sequence[Refusal], show_all: bool) -> None:
+    """Name what was declined. A silent skip reads as 'nothing to do here'."""
+    if not refused:
+        return
+    if not show_all:
+        console.print(
+            f"\n[dim]{len(refused)} finding(s) have no automatic fix. "
+            "Re-run with --refusals to see why.[/dim]"
+        )
+        return
+    console.print(f"\n[bold]{len(refused)} finding(s) with no automatic fix[/bold]")
+    for refusal in refused:
+        location = refusal.finding.location
+        console.print(
+            f"  [dim]{refusal.finding.rule_id}  {location.file}:{location.line}[/dim] "
+            f"— {refusal.reason}"
+        )
 
 
 @app.command()

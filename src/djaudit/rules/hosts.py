@@ -662,7 +662,7 @@ class ContentTypeSniffingAllowed(SecurityMiddlewareSetting):
             "that is Content-Disposition, not this."
         ),
         remediation=(
-            "Remove the assignment, or set SECURE_CONTENT_TYPE_NOSNIFF back to True, and "
+            "Remove the assignment, or set SECURE_CONTENT_TYPE_NOSNIFF = True, and "
             "keep 'django.middleware.security.SecurityMiddleware' in MIDDLEWARE, since "
             "that is what sends the header. If it was turned off to make a particular "
             "response display in the browser, send that response with an explicit "
