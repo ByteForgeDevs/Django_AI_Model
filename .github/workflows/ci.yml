@@ -82,6 +82,14 @@ jobs:
       - name: rule reference matches the registry
         run: uv run python scripts/gen_rule_docs.py --check
 
+      # A failure-modes note is the one kind of documentation where being stale
+      # is worse than being absent: absent, a reader goes and looks; stale,
+      # they believe it. Every checkable claim in the LLM architecture note --
+      # cited paths, measured figures, the size of the corpus prior, which
+      # rules `fix` will write -- is compared against the code.
+      - name: llm architecture note matches the code
+        run: uv run python scripts/check_llm_doc.py
+
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch
       # cache. Every other method clones the queryset and re-queries, so the

@@ -6021,7 +6021,41 @@ remove from them, and `6.5.3` asserts that by trying.
   *label*, only its provenance, so `label=""` shipped a provenance attached to
   nothing.
 - **6.5.2** — Evaluation set for triage quality, measured against human triage from Phases 1–5. **Moved to `6.1.5`** — it is the measurement, and it goes first.
-- **6.5.3** — Documented failure modes and a written statement of what the model is never permitted to do.
+- **6.5.3** — Documented failure modes and a written statement of what the model is never permitted to do. **Done** — `docs/architecture/llm-layer.md`, `scripts/check_llm_doc.py`, 10 tests, all seven drift classes shown failing.
+
+  **Taken after `6.5.4`**, because the note cites the hostile-provider test and
+  a document citing a file that does not exist is precisely the failure this
+  note exists to prevent. *(Bookkeeping: the note itself was swept into
+  `6.5.4`'s commit by `git add -A`. Recorded rather than rewritten — the tree
+  was green at both commits, and the history is more useful honest.)*
+
+  **A failure-modes document is the one kind where stale is worse than absent.**
+  Absent, a reader goes and looks; stale, they believe it. So every checkable
+  claim is checked by `scripts/check_llm_doc.py`, wired into CI beside
+  `check_plan` and `gen_rule_docs`: cited paths must exist, `MINIMUM_OBSERVATIONS`
+  and the corpus prior's size must match the code, every rule in `FIXERS` must
+  be named and no rule may be named fixable that is not, `Level.STATIC` and
+  `Level.TESTED` must still exist, and the measured figures must still appear
+  in `edit.py`'s measurement. Reading is done with `ast`, not by importing.
+
+  **The gate is shown failing on all seven drift classes** — a renamed file, a
+  drifted constant, a grown prior, an undocumented fixer, a rule wrongly
+  claimed fixable, a renamed level, and a figure rounded up — each introduced
+  for real and undone in a `finally`, so a failure cannot leave the tree dirty.
+  A checker that passes on everything and a document that is correct look
+  identical from the outside (**#88**).
+
+  **The note also states what has *not* been checked**, because the rest of it
+  would otherwise imply more coverage than exists: the JSON-schema render has
+  been checked against OpenAI's and Anthropic's *documents*, never a live
+  endpoint; the corpus prior is three projects, enough to refute "any rule can
+  be settled" and not enough to claim generality; and the layer's behaviour
+  under a slow or partially-failing real provider is modelled, which is not the
+  same as having seen one.
+
+  **The permission table names its enforcement.** Nine things the model may
+  never do, each with the code or test that makes it so — not a policy
+  document, an index into the guarantees.
 - **6.5.4** — **Prove the structural guarantee by attacking it.** A hostile
   provider that returns every field it is allowed to return, plus fields it is
   not, and asserts the finding list is byte-identical before and after. The
