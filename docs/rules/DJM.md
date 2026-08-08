@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJM` — migration safety
 
-4 rules on what a migration does to a running database at the moment it
+5 rules on what a migration does to a running database at the moment it
 is applied: a lock it holds, a table it rewrites, a statement that aborts part
 way through. These are the defects that pass every test and fail only on
 production data, because the table is empty in CI and the lock nobody waits on
@@ -57,6 +57,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJM-002`](#djm-002--alterfield-holds-an-exclusive-lock-for-the-length-of-the-table) | AlterField holds an exclusive lock for the length of the table | high | firm |
 | [`DJM-003`](#djm-003--addindex-blocks-writes-for-the-length-of-the-index-build) | AddIndex blocks writes for the length of the index build | medium | firm |
 | [`DJM-004`](#djm-004--removefield-drops-a-column-the-running-release-still-selects) | RemoveField drops a column the running release still selects | high | firm |
+| [`DJM-005`](#djm-005--rename-moves-a-name-the-running-release-still-queries) | Rename moves a name the running release still queries | high | firm |
 
 ---
 
@@ -145,3 +146,25 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/migration-operations/#separatedatabaseandstate>
 - <https://docs.djangoproject.com/en/stable/topics/migrations/>
+
+---
+
+### DJM-005 — Rename moves a name the running release still queries
+
+**Severity** high · **Confidence** firm · **Tier** static
+
+**What it means.** During a rolling deploy the previous release is still serving when the migration runs, and it queries the old name. A rename cannot be split across two releases the way a removal can, because a column has only one name at a time, so every query the old release makes against the model fails until the last old instance is gone.
+
+**How to fix it.** Do not move the column. Keep the field where it is with `db_column='<old name>'`, or the model with `db_table`, so the rename becomes a Python-side change that emits no DDL and the release still running keeps finding its data. Drop the pin later, in its own migration, once no old release is left.
+
+**What this rule cannot see.**
+
+- Static analysis cannot tell which migrations have been applied, so only the leaf of each app's history is reported. The live tier reads `django_migrations` and does not have to guess.
+- Assumes the project deploys by rolling release. A project that takes downtime for migrations, or runs a single instance, has no window in which two releases overlap and nothing here applies.
+- A model whose table was already fixed by a `db_table` in its own `Meta` is compared against the name Django would otherwise have given it, because the replay does not track model options. Such a model can be reported when its table does not in fact move.
+- A `db_column` or `db_table` whose value is not a literal string cannot be compared, so the rename is left unreported rather than reported on a guess.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/fields/#db-column>
+- <https://docs.djangoproject.com/en/stable/ref/migration-operations/#renamefield>

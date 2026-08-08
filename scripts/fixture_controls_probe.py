@@ -273,6 +273,13 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
         "        ),",
         'migrations.RemoveField(model_name="entry", name="posted"),',
     ),
+    (
+        "DJM-005",
+        "rename the column without pinning it back with db_column",
+        MCONTROL,
+        'field=models.DateTimeField(auto_now_add=True, db_column="created"),',
+        "field=models.DateTimeField(auto_now_add=True),",
+    ),
 )
 
 FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...], str], ...] = (

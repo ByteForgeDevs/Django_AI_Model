@@ -26,6 +26,11 @@ query the previous release makes against `invoice` fails -- not only those
 reading `settled`. Its twin in `ledger` drops the equivalent column through the
 `SeparateDatabaseAndState` half that says the state change already shipped, and
 the two are otherwise the same operation on the same kind of column.
+
+`DJM-005` is the fifth: renaming `created` to `opened`, which moves the column
+the previous release still names in every `SELECT` it makes. Its twin in
+`ledger` renames the same column and then pins it with `db_column`, so the
+attribute moves and the column does not.
 """
 
 from django.db import migrations, models
@@ -52,5 +57,10 @@ class Migration(migrations.Migration):
         migrations.RemoveField(
             model_name="invoice",
             name="settled",
+        ),
+        migrations.RenameField(
+            model_name="invoice",
+            old_name="created",
+            new_name="opened",
         ),
     ]

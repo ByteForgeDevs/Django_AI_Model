@@ -23,10 +23,19 @@ column. The replay flattens that wrapper away, so this arrives at the rule as a
 bare `RemoveField` and is told apart from the reckless version only by its
 provenance. That makes it the control the rule most needs.
 
+The `DJM-005` control is the `RenameField` below, with the `AlterField` that
+follows it. It renames `created` to `opened` exactly as `billing` does, then
+pins the column with `db_column="created"` -- so the attribute moves and the
+data does not, and Django emits no rename statement at all because
+`_alter_field` guards it with `old_field.column != new_field.column`. The pin
+is written after the rename because that is the order `makemigrations`
+produces: the autodetector runs `generate_renamed_fields()` before
+`generate_altered_fields()`.
+
 `scripts/fixture_controls_probe.py` removes each fix in turn -- the `default=0`,
-the widened limit, and the concurrency -- and requires the matching rule to then
-report this file, so all three controls are known to be reachable rather than
-assumed to be.
+the widened limit, the concurrency, the wrapper and the pin -- and requires the
+matching rule to then report this file, so every control is known to be
+reachable rather than assumed to be.
 """
 
 from django.contrib.postgres.operations import AddIndexConcurrently
@@ -54,5 +63,15 @@ class Migration(migrations.Migration):
         ),
         migrations.SeparateDatabaseAndState(
             database_operations=[migrations.RemoveField(model_name="entry", name="posted")],
+        ),
+        migrations.RenameField(
+            model_name="entry",
+            old_name="created",
+            new_name="opened",
+        ),
+        migrations.AlterField(
+            model_name="entry",
+            name="opened",
+            field=models.DateTimeField(auto_now_add=True, db_column="created"),
         ),
     ]

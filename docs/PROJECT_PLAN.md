@@ -5517,7 +5517,59 @@ rules come first; the live tier is then built for consumers that exist.
   185 `RemoveField`s in the three histories are behind a leaf, and none of the
   three projects uses `SeparateDatabaseAndState` at all, so the guard that
   matters most rests on fixture evidence alone. Corpus totals unchanged at 257.
-- **4.3.5** — `DJM-005` `RenameField` or `RenameModel`, which cannot be rolled out without downtime.
+- **4.3.5** — `DJM-005` `RenameField` or `RenameModel`, which cannot be rolled out without downtime. **Done** —
+  `src/djaudit/rules/djm_rename_rolling_deploy.py`, 35 tests, mutation
+  **85/85**. **0 findings on all three corpora**, as the pre-write probe
+  predicted: all 51 renames sit behind a leaf.
+
+  A rename is `DJM-004`'s problem without `DJM-004`'s escape. A removal can be
+  split across two releases — stop selecting the column, then drop it. A rename
+  cannot, because the old name and the new one are the same column and it can
+  only have one name at a time, so whichever release is not the one that
+  renamed it is wrong. The fix is therefore not to rename the column at all but
+  to pin it with `db_column`, which makes the change Python-side and emits no
+  DDL. That is read out of Django rather than assumed:
+  `RenameField.database_forwards` calls `schema_editor.alter_field`, and
+  `_alter_field` guards its rename statement with `if old_field.column !=
+  new_field.column`.
+
+  **The corpora decided the rule's shape twice, in opposite directions.**
+
+  - **The `SeparateDatabaseAndState` guard has real evidence here**, unlike
+    `DJM-004`'s, where the same guard rests on fixture evidence alone. NetBox's
+    `tenancy.0020_remove_contactgroupmembership` renames a table and a column
+    inside the wrapper to convert an explicit through-model into an implicit
+    M2M — expert hand-written work, and precisely what a name match would have
+    flagged.
+  - **Reading the replay alone would have got the common case wrong.** pretix's
+    `0254_alter_logentry_organizer_link_and_more` pins `db_column` *before* the
+    rename, so the pin is already in the state the replay carries in, and a
+    guard reading only `Applied.existing_field` passes it. But Django's
+    autodetector runs `generate_renamed_fields()` before
+    `generate_altered_fields()`, so a **generated** migration pins the column
+    *after* the rename — meaning the one shape the corpus contains is the one
+    shape Django does not produce. The rule scans the migration for the pin
+    under either name, and both orders are tested.
+
+  Two further findings came out of mutation testing rather than review:
+
+  - **`RenameIndex` carries `old_name` and `new_name` too.** The operation-name
+    check therefore has to be positive; a rule asking "does this have two
+    names" would report every renamed index as a moved column. Nothing in the
+    hand-written tests covered it, and the survivor at the guard is what
+    surfaced it.
+  - **The `not old or not new` guard is killed only through `RenameModel`.**
+    On the field path it is subsumed by a downstream `None` check, so removing
+    it changes nothing a test can see — the type checker is what rejects it,
+    not the suite. The model path derives its destination table from the new
+    name, so that is where the guard has observable work to do, and that is the
+    shape the test uses.
+
+  A renamed many-to-many is the lesser case again, reported a rank lower:
+  `_alter_many_to_many` calls `alter_db_table` when the through table's name
+  changes, so ordinary queries survive and only traversal breaks. The one
+  documented gap is a model whose table was already fixed by a `db_table` in
+  its own `Meta`, which the replay does not track.
 - **4.3.6** — `DJM-006` `RunPython` with no reverse, blocking rollback.
 - **4.3.7** — `DJM-007` `RunPython` iterating an unbounded queryset.
 - **4.3.8** — `DJM-008` schema and data operations in one atomic migration, holding a lock during a backfill.
@@ -6098,7 +6150,7 @@ remove from them, and `6.5.3` asserts that by trying.
   Answers four questions a non-specialist actually asks — *who this affects*,
   *what it costs*, *how widespread it is*, *how urgent it is* — plus a fifth
   the vendors never print: **when this does not apply to you.** That last one
-  is free, because a measurement showed **all 71 rules carry `limitations`**,
+  is free, because a measurement showed **all 72 rules carry `limitations`**,
   the field recording what the rule cannot see. Those caveats are rendered
   **verbatim from `RuleMeta.limitations`**, never paraphrased; a mutant that
   truncated them to twenty characters was caught.
@@ -6485,10 +6537,10 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **71 rules are
+document specifies, and most of it is still only specified: **72 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-and the first four of Phase 4's migration rules.
+and the first five of Phase 4's migration rules.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against
