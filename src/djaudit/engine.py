@@ -56,11 +56,16 @@ def _why_not_live(ctx: ProjectContext, tiers: set[Tier]) -> str:
     Distinguishes the three ways a live rule fails to run, because they need
     three different actions: give consent, install a virtualenv, or nothing.
     """
+    if ctx.live:
+        return "the live tier ran"
+    # Checked before the tier set, because a request that failed downgrades the
+    # tiers to static and would otherwise report itself as never having been
+    # made -- telling the reader to pass a flag they already passed.
+    if ctx.live_problem is not None:
+        return f"the live tier was requested but {ctx.live_problem}"
     if Tier.LIVE not in tiers:
         return "the live tier was not requested"
-    if not ctx.live:
-        return "the live tier was requested but the target's environment is unavailable"
-    return "the live tier ran"
+    return "the live tier was requested but the target's environment is unavailable"
 
 
 def _passes_threshold(finding: Finding, min_severity: Severity, min_confidence: Confidence) -> bool:

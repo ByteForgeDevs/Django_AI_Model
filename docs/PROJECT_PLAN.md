@@ -5387,6 +5387,44 @@ cost is real, so it stays opt-in, sandboxed, and time-limited.
 
 - **4.1.5** — `--live` / `--no-live` CLI flags, defaulting to off, with a clear consent message explaining that target code will be executed.
 
+  **Done.** `src/djaudit/live/consent.py`, 30 tests, mutation **32/32**. Step
+  4.1 is complete.
+
+  The live tier imports the audited project's settings module and everything
+  that module imports, on the auditing machine, with the caller's file system
+  and network. That is reasonable to do to your own project and unreasonable to
+  have happen by surprise, so `--live` is off, and passing it prints the
+  interpreter and the `manage.py` before anything of the target's runs. The
+  ordering is tested rather than asserted in a comment: the target writes a
+  marker file on import, and the announce hook records whether it already
+  exists — a disclosure that arrives after the code has run is a changelog.
+
+  **Consent is the flag, not a prompt.** This runs in CI more often than at a
+  terminal, and a tool that blocks on a question nobody can answer is a tool
+  that gets run with `yes |` in front of it. The notice goes to **stderr**, so
+  `--format json` still parses; that is a test, not an intention.
+
+  Verified against a real project with its own virtualenv: the header goes from
+  `Django version unknown` to `Django 6.1` — the *target's* Django, not
+  djaudit's 6.0.7 — which is the whole tier in one observable difference.
+
+  **A second defect of the same shape as 4.1.4's.** `--live` initially derived
+  the tier set from the flag, so a project with no virtualenv would still have
+  *selected* every live rule and run it with nothing live behind it. The tier
+  set now follows availability rather than the request: `engine.run` already
+  derived it from `ctx.live`, so the fix was to stop passing `tiers=` at all.
+  `ProjectContext.live_problem` carries *why* — "no virtualenv was found" and
+  "the target's Django did not start: ImproperlyConfigured" send the reader to
+  two different places, and 4.1.4's report now says which. A request that failed
+  is reported as requested-and-failed rather than never-made, because telling
+  someone to pass the flag they just passed is the wrong instruction.
+
+  A live tier that will not start is a warning and not an abandoned audit — the
+  static tier still has 76 rules — and the test that says so is paired with a
+  control proving exit 2 is still reachable for a project djaudit genuinely
+  cannot read.
+
+
 ### Step 4.2 — Migration graph
 
 **Ordering note.** Step 4.2 and Step 4.3 are taken before Step 4.1. The live

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -27,6 +28,9 @@ from rich.table import Table
 
 from djaudit import __version__, engine
 from djaudit.baseline import Baseline, BaselineError
+from djaudit.context import ProjectContext
+from djaudit.discovery import build_context
+from djaudit.live import consent
 from djaudit.llm import config as llm_config
 from djaudit.llm.budget import Budget, Metered
 from djaudit.llm.cache import Cache, Cached
@@ -126,6 +130,14 @@ def run(
         Path | None,
         typer.Option("--baseline", help="Suppress findings recorded in this baseline file."),
     ] = None,
+    live: Annotated[
+        bool,
+        typer.Option(
+            "--live/--no-live",
+            help="Run live-tier rules by executing the target's own interpreter and "
+            "manage.py. Off by default: this runs the audited project's code.",
+        ),
+    ] = False,
     write_baseline: Annotated[
         Path | None,
         typer.Option(
@@ -151,8 +163,13 @@ def run(
     # Writing a baseline must capture everything, otherwise findings hidden by
     # the thresholds today would surface as "new" the moment someone lowers them.
     writing = write_baseline is not None
+    # No `tiers=` argument: the engine derives it from `ctx.live`, so asking for
+    # the live tier and not getting one runs the static rules rather than live
+    # rules with nothing live behind them.
+    ctx = _with_live(build_context(path), live)
     result = engine.run(
         path,
+        context=ctx,
         families=set(family) if family else None,
         include={s.upper() for s in select} if select else None,
         exclude={i.upper() for i in ignore} if ignore else None,
@@ -197,6 +214,33 @@ def run(
     if worst is not None and worst.rank >= fail_on.rank:
         raise typer.Exit(EXIT_FINDINGS)
     raise typer.Exit(EXIT_OK)
+
+
+def _with_live(ctx: ProjectContext, granted: bool) -> ProjectContext:
+    """Resolve `--live` into a context, disclosing before anything runs.
+
+    The notice goes to stderr and is printed by `consent.resolve` *before* it
+    executes the target, not after: a disclosure that arrives once the code has
+    already run is a changelog.
+    """
+    if not granted:
+        return ctx
+    stderr = Console(stderr=True)
+    outcome = consent.resolve(
+        ctx.root,
+        ctx.manage_py,
+        granted=True,
+        announce=lambda text: stderr.print(f"[bold yellow]{text}[/bold yellow]"),
+    )
+    if outcome.context is None:
+        stderr.print(f"[yellow]warning:[/yellow] live tier unavailable: {outcome.problem}")
+        return replace(ctx, live_problem=outcome.problem)
+    return replace(
+        ctx,
+        live=True,
+        django_version=outcome.context.django_version or ctx.django_version,
+        settings_entrypoint=outcome.context.settings_module or ctx.settings_entrypoint,
+    )
 
 
 def _emit(result: engine.RunResult, output_format: OutputFormat, output: Path | None) -> None:

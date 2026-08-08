@@ -102,6 +102,14 @@ class ProjectContext:
     live: bool = False
     """Whether the target's virtualenv is available for live-tier rules."""
 
+    live_problem: str | None = None
+    """Why the live tier is unavailable, when it was asked for and did not start.
+
+    "Unavailable" is not an action. "no virtualenv was found in the target" and
+    "the target's Django did not start: ImproperlyConfigured" send the reader to
+    two different places, so the reason travels with the flag.
+    """
+
     _trees: dict[Path, ast.Module | None] = field(default_factory=dict, repr=False)
     _source: dict[Path, str | None] = field(default_factory=dict, repr=False)
     _lines: dict[Path, list[str]] = field(default_factory=dict, repr=False)
