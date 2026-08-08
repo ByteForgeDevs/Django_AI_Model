@@ -6471,7 +6471,55 @@ rules come first; the live tier is then built for consumers that exist.
 
   Also fixed here: `migration_project` was missing from the recall gate, so the
   only fixture with a known answer for `DJM` was scored on no machine but mine.
-- **4.6.3** — Verify lock classification against actual Postgres `pg_locks` output.
+- **4.6.3** — Verify lock classification against actual Postgres `pg_locks` output. **Done.**
+
+  The existing check ran each statement inside a transaction and read
+  `pg_locks` from its own backend, which covered eighteen classifications.
+  Three things it could not see, all found by measuring rather than reading:
+
+  **The `CONCURRENTLY` test could not fail.** It started a watcher that slept
+  50ms, then looked for a blocking lock and asserted there was none. The index
+  build finishes in 86ms on a fifty-row table, so the watcher was reading
+  `pg_locks` after the statement had ended. Pointed at a plain `CREATE INDEX`,
+  which takes `SHARE`, it still reported `LOCK=none` and passed. It is now
+  measured by *blocking* the statement instead: a third connection holds
+  `ACCESS EXCLUSIVE`, the build's request sits in `pg_locks` with
+  `granted = false` naming the mode it wants, and the probe waits for a row to
+  appear rather than for an interval to elapse. Its control asserts the same
+  probe reports `SHARE` for the non-concurrent form — the contrast the old
+  test had no way to draw.
+
+  **`CONCURRENTLY` was classified `Lock.NONE`, and takes
+  `SHARE UPDATE EXCLUSIVE`.** Both readings agree on what a user cares about,
+  since neither blocks reads or writes, so `blocking` and `dangerous` are
+  unchanged. But `Lock` is documented as the mode a statement takes, and
+  `explain()` was emitting "takes none on t" for a statement that locks the
+  table. `docs/rules/DJM.md` had said `SHARE UPDATE EXCLUSIVE` all along; the
+  table was the thing out of step. `Lock.NONE` now documents what it does mean
+  — no lock ordinary traffic can wait on — and the two rules that keep it are
+  exempted from mode verification by name, with the exemption itself checked
+  against `RULES` so a reworded rule cannot silently widen it.
+
+  **The mode names were verified; what they block was not.** `blocks_reads`
+  and `blocks_writes` are what `dangerous` is computed from, and nothing had
+  ever held a lock and tried. `TestWhatTheModesActuallyBlock` holds each mode
+  on one connection and attempts a `SELECT` and an `INSERT` on another under
+  `lock_timeout`, so waiting arrives as an error and not as a duration. This
+  needs two simultaneous connections, which `psql` subprocesses can only fake
+  with sleeps, so `psycopg[binary]` joins the dev group. All ten predictions
+  hold, including that `SHARE UPDATE EXCLUSIVE` blocks neither.
+
+  A coverage gate closes the loop: every entry in `RULES` must be reached by a
+  statement that was actually run, matched by the `why` string it produces.
+  Adding a rule without measuring it now fails by name.
+
+  Also fixed: `observe()` resolved the table by name *after* running the
+  statement, so `DROP TABLE t` found no row and reported no lock — the
+  strongest lock in the system reading as none. It captures the oid first.
+
+  Five defects were injected to show each new gate failing: `SHARE` not
+  blocking writes, an unmeasured rule, an exemption naming no rule,
+  `CONCURRENTLY` back to `Lock.NONE`, and a probe that swallows its timeout.
 - **4.6.4** — `docs/rules/DJM.md` and `docs/live-tier.md`, including the security model for executing target code.
 
 ---

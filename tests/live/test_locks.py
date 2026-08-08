@@ -12,9 +12,12 @@ unverified, which is why the skip says so.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import subprocess
+import threading
+import time
 from collections.abc import Iterator
 
 import pytest
@@ -54,8 +57,41 @@ MEASURED: tuple[tuple[str, Lock], ...] = (
     ("ALTER TABLE t ADD CONSTRAINT uq UNIQUE (name)", Lock.ACCESS_EXCLUSIVE),
     ("ALTER TABLE t DROP CONSTRAINT ck2", Lock.ACCESS_EXCLUSIVE),
     ("ALTER TABLE t SET (fillfactor = 90)", Lock.SHARE_UPDATE_EXCLUSIVE),
-    ("CREATE TABLE t2 (id serial primary key)", Lock.NONE),
+    ("ALTER TABLE t ADD COLUMN c3 uuid DEFAULT gen_random_uuid()", Lock.ACCESS_EXCLUSIVE),
+    ("TRUNCATE t", Lock.ACCESS_EXCLUSIVE),
+    ("DROP TABLE t", Lock.ACCESS_EXCLUSIVE),
 )
+
+CONCURRENT: tuple[tuple[str, Lock], ...] = (
+    ("CREATE INDEX CONCURRENTLY i_conc ON t (num)", Lock.SHARE_UPDATE_EXCLUSIVE),
+    ("DROP INDEX CONCURRENTLY i1", Lock.SHARE_UPDATE_EXCLUSIVE),
+)
+"""Measured by `requested()` instead: these cannot run inside a transaction."""
+
+# Our enum, and the name `LOCK TABLE ... IN <mode> MODE` knows it by.
+HOLDABLE: tuple[tuple[Lock, str], ...] = (
+    (Lock.SHARE_UPDATE_EXCLUSIVE, "SHARE UPDATE EXCLUSIVE"),
+    (Lock.SHARE, "SHARE"),
+    (Lock.ACCESS_EXCLUSIVE, "ACCESS EXCLUSIVE"),
+)
+
+ORDINARY: tuple[str, ...] = ("ACCESS SHARE", "ROW EXCLUSIVE")
+"""What a `SELECT` and an `INSERT` take. `Lock.NONE` claims these block nothing."""
+
+UNMEASURABLE: frozenset[str] = frozenset(
+    {
+        "a new table has no existing traffic to block",
+        "not a schema change, so it takes no lock a schema change would take",
+    }
+)
+"""The two rules whose `Lock.NONE` is not a claim about a mode on an existing
+table, and so cannot be checked by taking one and reading it back.
+
+`CREATE TABLE` is a tautology -- nothing can be queued on a relation that did
+not exist a moment ago. The DML rule is a claim about `ACCESS SHARE` and
+`ROW EXCLUSIVE`, which have no member here because no migration takes them;
+`TestWhatTheModesActuallyBlock` holds both and shows they block nothing.
+"""
 
 postgres = pytest.mark.skipif(
     not DSN,
@@ -74,20 +110,108 @@ def psql(sql: str) -> subprocess.CompletedProcess[str]:
 
 
 def observe(statement: str) -> Lock:
-    """Run the statement and read back the lock its own backend holds."""
+    """Run the statement and read back the lock its own backend holds.
+
+    The table's oid is captured *before* the statement runs. Resolving `t` by
+    name afterwards silently reports no lock for the two statements that make
+    the name stop resolving -- `DROP TABLE t` finds nothing and `RENAME`
+    finds nothing under the old name -- which reads exactly like the strongest
+    lock in the system not being taken at all.
+    """
     psql(SETUP)
     result = psql(
-        f"BEGIN;\n{statement};\n"
+        "BEGIN;\n"
+        "CREATE TEMP TABLE _subject AS SELECT 't'::regclass::oid AS oid;\n"
+        f"{statement};\n"
         "SELECT 'LOCK=' || coalesce(string_agg(DISTINCT mode, '+' ORDER BY mode), 'none') "
-        "FROM pg_locks WHERE relation IN "
-        "(SELECT oid FROM pg_class WHERE relname IN ('t','t_renamed')) "
-        "AND pid = pg_backend_pid();\nROLLBACK;"
+        "FROM pg_locks WHERE relation = (SELECT oid FROM _subject) "
+        "AND locktype = 'relation' AND pid = pg_backend_pid();\nROLLBACK;"
     )
     found = re.search(r"LOCK=(\S+)", result.stdout)
     assert found, f"no lock read back for {statement!r}: {result.stderr}"
     modes = [OBSERVED[m] for m in found.group(1).split("+") if m in OBSERVED]
     strength = {Lock.SHARE_UPDATE_EXCLUSIVE: 1, Lock.SHARE: 2, Lock.ACCESS_EXCLUSIVE: 3}
     return max(modes, key=lambda m: strength[m], default=Lock.NONE)
+
+
+WAIT = 30.0
+"""Seconds to wait for a lock request to appear. A ceiling, not an interval:
+the probes below wait for a row and return the moment one exists."""
+
+
+def requested(statement: str) -> Lock:
+    """The mode a statement *asks* for, read while it is being refused.
+
+    For statements that cannot run inside a transaction there is no window in
+    which to catch a granted lock. So the statement is blocked instead: one
+    connection holds ACCESS EXCLUSIVE, which conflicts with every mode there
+    is, and the statement's request sits in `pg_locks` ungranted, naming the
+    mode it wants. A separate observer connection is needed because reading
+    `pg_locks` from the holder would end the holder's transaction.
+    """
+    import psycopg
+
+    psql(SETUP)
+    holder = psycopg.connect(DSN)
+    observer = psycopg.connect(DSN, autocommit=True)
+    worker: threading.Thread | None = None
+    try:
+        holder.execute("LOCK TABLE t IN ACCESS EXCLUSIVE MODE")
+
+        def run() -> None:
+            with contextlib.suppress(Exception), psycopg.connect(DSN, autocommit=True) as conn:
+                conn.execute(statement)
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        deadline = time.monotonic() + WAIT
+        while time.monotonic() < deadline:
+            rows = observer.execute(
+                "SELECT mode FROM pg_locks WHERE relation = 't'::regclass "
+                "AND locktype = 'relation' AND NOT granted"
+            ).fetchall()
+            if rows:
+                found = {OBSERVED[row[0]] for row in rows if row[0] in OBSERVED}
+                strength = {
+                    Lock.SHARE_UPDATE_EXCLUSIVE: 1,
+                    Lock.SHARE: 2,
+                    Lock.ACCESS_EXCLUSIVE: 3,
+                }
+                return max(found, key=lambda m: strength[m], default=Lock.NONE)
+            time.sleep(0.02)
+        raise AssertionError(f"{statement!r} never asked for a lock within {WAIT}s")
+    finally:
+        # Releasing the holder unblocks the statement, which then runs for
+        # real. It is waited for here so it cannot finish in the middle of a
+        # later test and lock a table that test is trying to rebuild.
+        holder.close()
+        observer.close()
+        if worker is not None:
+            worker.join(WAIT)
+
+
+def blocked(mode: str, statement: str) -> bool:
+    """Whether `statement` has to wait while `mode` is held on `t`.
+
+    `lock_timeout` turns waiting into an error, so the answer arrives as an
+    exception rather than as a duration -- there is no threshold here that a
+    slow machine could cross.
+    """
+    import psycopg
+    from psycopg import errors
+
+    holder = psycopg.connect(DSN)
+    try:
+        holder.execute(f"LOCK TABLE t IN {mode} MODE")
+        try:
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                conn.execute("SET lock_timeout = '750ms'")
+                conn.execute(statement)
+        except errors.LockNotAvailable:
+            return True
+        return False
+    finally:
+        holder.close()
 
 
 class TestAgainstARealPostgres:
@@ -108,25 +232,99 @@ class TestAgainstARealPostgres:
         assert observe("CREATE INDEX i9 ON t (num)") != observe("ALTER TABLE t DROP COLUMN dead")
 
     @postgres
-    def test_concurrently_takes_nothing_that_blocks(self) -> None:
-        """Cannot run inside a transaction, so it is watched from outside."""
-        psql(SETUP)
-        watcher = subprocess.Popen(
-            [
-                "psql",
-                DSN,
-                "-tAc",
-                "SELECT pg_sleep(0.05); SELECT 'LOCK=' || coalesce(string_agg(mode, '+'), 'none') "
-                "FROM pg_locks WHERE relation = 't'::regclass "
-                "AND mode IN ('ShareLock', 'AccessExclusiveLock')",
-            ],
-            stdout=subprocess.PIPE,
-            text=True,
+    def test_concurrently_takes_share_update_exclusive(self) -> None:
+        """What CONCURRENTLY *requests*, read from `pg_locks` while it waits.
+
+        It cannot run inside a transaction, so it cannot be caught the way
+        every other statement here is caught, and it finishes in 86ms on this
+        fixture -- far too fast to be observed by sleeping and looking.
+
+        So it is made to wait. A third connection holds ACCESS EXCLUSIVE, which
+        conflicts with everything, and the index build then sits in `pg_locks`
+        with `granted = false` naming the mode it wants. The wait is for an
+        *event* -- a row appearing -- not for a duration, so there is no
+        interval to guess and nothing to be flaky about.
+        """
+        assert requested("CREATE INDEX CONCURRENTLY i_conc ON t (num)") == (
+            Lock.SHARE_UPDATE_EXCLUSIVE
         )
-        psql("CREATE INDEX CONCURRENTLY i_conc ON t (num)")
-        out, _ = watcher.communicate(timeout=60)
-        assert "LOCK=none" in out
-        assert classify("CREATE INDEX CONCURRENTLY i_conc ON t (num)").lock is Lock.NONE
+        assert classify("CREATE INDEX CONCURRENTLY i_conc ON t (num)").lock is (
+            Lock.SHARE_UPDATE_EXCLUSIVE
+        )
+
+    @postgres
+    def test_dropping_concurrently_does_too(self) -> None:
+        assert requested("DROP INDEX CONCURRENTLY i1") == Lock.SHARE_UPDATE_EXCLUSIVE
+        assert classify("DROP INDEX CONCURRENTLY i1").lock is Lock.SHARE_UPDATE_EXCLUSIVE
+
+    @postgres
+    def test_the_control_the_same_probe_sees_a_stronger_request(self) -> None:
+        """Without this, a probe that reported SHARE UPDATE EXCLUSIVE for
+        everything would satisfy both assertions above. The predecessor of this
+        test asserted an *absence* of blocking locks and passed while watching
+        a plain `CREATE INDEX`, which takes one -- it had raced the statement
+        and read `pg_locks` after it had already finished."""
+        assert requested("CREATE INDEX i9 ON t (num)") == Lock.SHARE
+
+
+class TestWhatTheModesActuallyBlock:
+    """`blocks_reads` and `blocks_writes` decide `dangerous`, and `dangerous`
+    decides whether a migration is reported at all -- so these two properties,
+    not the mode names, are what a wrong answer here would cost.
+
+    They are checked by holding the mode on one connection and attempting a
+    read and a write on another under `lock_timeout`. Waiting becomes an error
+    rather than a duration, so there is no threshold for a slow machine to
+    cross.
+    """
+
+    @postgres
+    @pytest.mark.parametrize(("lock", "mode"), HOLDABLE, ids=[m for _, m in HOLDABLE])
+    def test_it_blocks_writes_exactly_when_we_say_it_does(self, lock: Lock, mode: str) -> None:
+        assert blocked(mode, "INSERT INTO t (num) VALUES (1)") is lock.blocks_writes
+
+    @postgres
+    @pytest.mark.parametrize(("lock", "mode"), HOLDABLE, ids=[m for _, m in HOLDABLE])
+    def test_it_blocks_reads_exactly_when_we_say_it_does(self, lock: Lock, mode: str) -> None:
+        assert blocked(mode, "SELECT count(*) FROM t") is lock.blocks_reads
+
+    @postgres
+    @pytest.mark.parametrize("mode", ORDINARY)
+    def test_ordinary_traffic_blocks_nothing(self, mode: str) -> None:
+        """`Lock.NONE`'s claim, for the statements that are not schema changes."""
+        assert blocked(mode, "SELECT count(*) FROM t") is False
+        assert blocked(mode, "INSERT INTO t (num) VALUES (1)") is False
+
+    @postgres
+    def test_the_control_the_probe_can_report_blocked(self) -> None:
+        """Five of the assertions above are `is False`. A probe that swallowed
+        its timeout would satisfy every one of them."""
+        assert blocked("ACCESS EXCLUSIVE", "SELECT count(*) FROM t") is True
+
+
+class TestEveryRuleWasMeasured:
+    """A rule added without a measurement is a guess with a citation attached.
+
+    This is the gate that makes that impossible: it maps each entry in `RULES`
+    to the statements above by the `why` string the entry produces, and fails
+    naming any rule no statement reaches.
+    """
+
+    def test_every_rule_has_a_statement_that_was_run_against_postgres(self) -> None:
+        reached = {classify(text).why for text, _ in MEASURED + CONCURRENT}
+        unreached = {why for *_, why in RULES} - reached - UNMEASURABLE
+        assert not unreached, f"no measured statement exercises: {sorted(unreached)}"
+
+    def test_the_exemptions_are_real_rules(self) -> None:
+        """An exemption for a rule that no longer exists would silently widen
+        the gate the next time a rule's wording changed."""
+        assert {why for *_, why in RULES} >= UNMEASURABLE
+
+    def test_no_measured_statement_falls_through_to_unknown(self) -> None:
+        """A typo in a measurement would otherwise be checked against the
+        fallback verdict rather than against the rule it was written for."""
+        for text, _ in MEASURED + CONCURRENT:
+            assert classify(text).why != UNKNOWN, text
 
 
 class TestTheTwoAxesAreBothNeeded:

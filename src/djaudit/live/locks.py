@@ -42,9 +42,26 @@ class Lock(StrEnum):
     Ordered by what they exclude, which is the order that matters to a reader:
     `NONE` blocks nothing, `SHARE_UPDATE_EXCLUSIVE` blocks only schema changes,
     `SHARE` blocks writes, and `ACCESS_EXCLUSIVE` blocks reads as well.
+
+    Every member's `blocks_reads` and `blocks_writes` was measured by holding
+    the mode on one connection and attempting a `SELECT` and an `INSERT` on
+    another under `lock_timeout`; see `TestWhatTheModesActuallyBlock`.
     """
 
     NONE = "none"
+    """No lock that ordinary traffic can wait on.
+
+    Not a claim that the statement takes no lock at all. `INSERT` takes
+    `ROW EXCLUSIVE` and `SELECT` takes `ACCESS SHARE`, and both were measured
+    to block neither reads nor writes. `CREATE TABLE` is the literal case:
+    there is no prior table to lock.
+
+    `CONCURRENTLY` is deliberately *not* here. It reads as the same thing to a
+    user -- it blocks neither reads nor writes -- but it really does take
+    `SHARE UPDATE EXCLUSIVE`, and saying `none` made `explain()` emit "takes
+    none on t", which is not true of any statement that touches a table.
+    """
+
     SHARE_UPDATE_EXCLUSIVE = "SHARE UPDATE EXCLUSIVE"
     SHARE = "SHARE"
     ACCESS_EXCLUSIVE = "ACCESS EXCLUSIVE"
@@ -167,13 +184,13 @@ happen on one of the most common columns anybody adds.
 RULES: tuple[tuple[str, Lock, Work, str], ...] = (
     (
         r"^CREATE\s+(UNIQUE\s+)?INDEX\s+CONCURRENTLY\b",
-        Lock.NONE,
+        Lock.SHARE_UPDATE_EXCLUSIVE,
         Work.SCAN,
         "CONCURRENTLY builds the index without blocking reads or writes",
     ),
     (
         r"^DROP\s+INDEX\s+CONCURRENTLY\b",
-        Lock.NONE,
+        Lock.SHARE_UPDATE_EXCLUSIVE,
         Work.CATALOGUE,
         "CONCURRENTLY drops the index without blocking reads or writes",
     ),
