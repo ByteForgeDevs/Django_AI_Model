@@ -41,7 +41,15 @@ way back. Its twin in `ledger` is the same backfill with
 formality: unapplying drops the column the backfill wrote, so undoing the data
 pass really is a no-op.
 
-`DJM-007` is the seventh: `recount_retries` loops over every matching row, so
+`DJM-008` is the seventh, and it needed nothing added: this migration already
+makes five schema changes and then runs a backfill, all in one transaction,
+because `atomic` is left at its default. Postgres holds a lock until that
+transaction ends, so the `ACCESS EXCLUSIVE` taken by the first `AddField` is
+still held while the backfill runs, and for however long it runs. Its twin in
+`ledger` carries `atomic = False`, so each operation commits and releases on
+its own.
+
+`DJM-007` is the eighth: `recount_retries` loops over every matching row, so
 the queryset is evaluated into a list before the first iteration and the
 migration's peak memory is the size of the table. Note what it is *not*: it is
 not an N+1 write, because it accumulates and issues one `bulk_update`. That is

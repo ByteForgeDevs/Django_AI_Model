@@ -5727,6 +5727,45 @@ rules come first; the live tier is then built for consumers that exist.
   `.iterator(chunk_size=500)` and flushes per chunk. 7 of 7 controls in that
   fixture are proven load-bearing, 31 of 31 across all fixtures.
 - **4.3.8** — `DJM-008` schema and data operations in one atomic migration, holding a lock during a backfill.
+  **Done.** HIGH/FIRM. Reports a leaf migration that is atomic and runs a data
+  operation *after* a schema operation on a table that already holds rows.
+
+  **Order is the whole rule.** Postgres holds a lock "until the end of the
+  transaction" (quoted verbatim in the rule's docstring from
+  `explicit-locking.html`), so a data pass placed after an `ACCESS EXCLUSIVE`
+  operation extends that lock for its entire duration. The same two operations
+  in the other order are close to harmless — the lock is taken and released at
+  the end regardless, and nothing waits on it in between. This is also what
+  separates `DJM-008` from `DJM-006`: `DJM-006` is about rollback, is
+  order-independent, and looks at reverse code. Measured zero shared findings
+  at leaf.
+
+  **The corpus was probed before the rule was designed.** 75 migrations mix
+  schema and data (hc 0 / nb 41 / px 34) and 67 are schema-before-data and
+  atomic, but only **one** is at leaf: pretix `pretixmultidomain.0003`, which
+  takes `ACCESS EXCLUSIVE` on `knowndomain` twice and then runs a full-table
+  `UPDATE` inside the same transaction. Triaged `true_positive`.
+
+  **Two measurements changed the implementation.** First, a `RunPython` nested
+  in `SeparateDatabaseAndState` was not being reported: `state.replay` emits the
+  *effective* stream, so `applied.operation` is the inner operation and is never
+  identical to any member of `migration.operations`. Any rule reasoning about
+  operation order must take its stream from `ctx.migration_history` rather than
+  from what was written. Doing so deleted every hand-rolled flattening helper.
+  Second, the rule initially named the table this very migration creates. A lock
+  on a brand-new table blocks nobody, because no other session can see it until
+  commit. `populated()` cannot answer that question — it reports the state
+  *preceding* the operation, so before a `CreateModel` the table has no creator
+  on record and reads as one that has been there all along. Named the case
+  explicitly rather than reusing `model_tracked`, which is false in the same
+  place for an unrelated reason.
+
+  Fixture: the shape was already present — `billing/0002` is atomic with five
+  schema operations before its backfills — so only the manifest, probe and
+  docstring needed wiring; adding the docstring shifted every anchor by 8 lines
+  and they were re-derived from the engine rather than by hand. Mutation
+  **37/37**, `migration_project` 8/8 at 100% precision and recall, controls
+  probe 8/8, corpus hc 0 / nb 0 / px 1.
 - **4.3.9** — `DJM-009` `AddConstraint` validated immediately rather than `NOT VALID` then validated.
 
 ### Step 4.4 — Live lock classification
@@ -6304,7 +6343,7 @@ remove from them, and `6.5.3` asserts that by trying.
   Answers four questions a non-specialist actually asks — *who this affects*,
   *what it costs*, *how widespread it is*, *how urgent it is* — plus a fifth
   the vendors never print: **when this does not apply to you.** That last one
-  is free, because a measurement showed **all 74 rules carry `limitations`**,
+  is free, because a measurement showed **all 75 rules carry `limitations`**,
   the field recording what the rule cannot see. Those caveats are rendered
   **verbatim from `RuleMeta.limitations`**, never paraphrased; a mutant that
   truncated them to twenty characters was caught.
@@ -6691,10 +6730,10 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **74 rules are
+document specifies, and most of it is still only specified: **75 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-and the first seven of Phase 4's migration rules.
+and the first eight of Phase 4's migration rules.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

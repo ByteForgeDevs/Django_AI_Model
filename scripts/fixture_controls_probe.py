@@ -289,6 +289,13 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
         "            code=backfill_attempts,\n",
     ),
     (
+        "DJM-008",
+        "run the schema changes and the backfill in one transaction",
+        MCONTROL,
+        "\n    atomic = False\n",
+        "\n",
+    ),
+    (
         "DJM-007",
         "fetch the whole table instead of iterating it in chunks",
         MCONTROL,

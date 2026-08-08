@@ -45,6 +45,12 @@ The `DJM-007` control is `recount_attempts`, which does the same work as
 each chunk rather than accumulating the whole table. Both halves matter: the
 iterator bounds the fetch, and the flush bounds the list the fetch feeds.
 
+The `DJM-008` control is `atomic = False` on the line below, which is already
+here because `AddIndexConcurrently` cannot run inside a transaction. One line
+therefore serves two rules, and the probe un-fixes it once and checks both:
+without it Postgres would hold every lock these schema operations take until
+the backfill at the end of the list finished.
+
 `scripts/fixture_controls_probe.py` removes each fix in turn -- the `default=0`,
 the widened limit, the concurrency, the wrapper, the pin, the reverse and the iterator -- and
 requires the matching rule to then report this file, so every control is known

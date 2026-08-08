@@ -1495,6 +1495,16 @@
       "note": "Verified against source. `EventSettingsStore.objects.filter(key='returnurl_prefix')` is iterated directly, with a `cache.delete()` and a `save()` per row. The shape is exactly what the rule describes and the fix is one call, so it is a true positive; in fairness to pretix the filter bounds the result to events that configured this plugin, which on any real install is a small number, so the practical risk is lower than the shape suggests. This is the finding the syntactic fallback exists for: `Event_SettingsStore` is created by django-hierarkey rather than declared in a models.py, so the def-use chains resolve the queryset but cannot name the model, and a rule requiring a known model -- as `DJP-007` does -- reports nothing here.",
       "reviewed": "2026-08-04",
       "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "9fe48db81752ca5c",
+      "rule_id": "DJM-008",
+      "verdict": "true_positive",
+      "file": "src/pretix/multidomain/migrations/0003_alternativedomainassignment_knowndomain_mode_and_more.py",
+      "line": 41,
+      "note": "Verified against source. The migration is atomic and runs, in order: `CreateModel` for a new table, `AddField` and `AlterField` on `knowndomain`, then `RunSQL UPDATE pretixmultidomain_knowndomain SET mode = 'event' WHERE event_id IS NOT NULL` over the whole table, then `AddConstraint`. The two operations on `knowndomain` take `ACCESS EXCLUSIVE` and Postgres holds it to commit, so the unindexed full-table UPDATE runs with every reader and writer of that table blocked behind it. The rule correctly names only `knowndomain` and not the `AlternativeDomainAssignment` table this same migration creates -- a lock on a table no other session can see yet blocks nobody. In pretix's favour, `knowndomain` is a small configuration table, so the real hold is short; the shape is what is being reported, and on a large table it is an outage. Reordering the `RunSQL` before the schema operations would fix it without splitting the migration.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     }
   ]
 }

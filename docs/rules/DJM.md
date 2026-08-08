@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJM` — migration safety
 
-7 rules on what a migration does to a running database at the moment it
+8 rules on what a migration does to a running database at the moment it
 is applied: a lock it holds, a table it rewrites, a statement that aborts part
 way through. These are the defects that pass every test and fail only on
 production data, because the table is empty in CI and the lock nobody waits on
@@ -60,6 +60,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJM-005`](#djm-005--rename-moves-a-name-the-running-release-still-queries) | Rename moves a name the running release still queries | high | firm |
 | [`DJM-006`](#djm-006--irreversible-data-operation-blocks-rollback-of-a-schema-change) | Irreversible data operation blocks rollback of a schema change | medium | firm |
 | [`DJM-007`](#djm-007--data-migration-iterates-a-queryset-with-no-bound-on-the-rows-fetched) | Data migration iterates a queryset with no bound on the rows fetched | medium | firm |
+| [`DJM-008`](#djm-008--data-operation-runs-in-the-same-transaction-as-an-earlier-schema-change) | Data operation runs in the same transaction as an earlier schema change | high | firm |
 
 ---
 
@@ -214,3 +215,25 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#iterator>
 - <https://docs.djangoproject.com/en/stable/topics/db/optimization/#retrieve-individual-objects-using-a-unique-filtering-attribute>
+
+---
+
+### DJM-008 — Data operation runs in the same transaction as an earlier schema change
+
+**Severity** high · **Confidence** firm · **Tier** static
+
+**What it means.** Postgres holds a lock until the end of the transaction, and every `ALTER TABLE` takes `ACCESS EXCLUSIVE`, which blocks reads as well as writes. Django wraps a migration in one transaction unless `atomic = False`, so a data pass placed after a schema change does not merely take its own time -- it extends the window in which that earlier lock is still held. A backfill of a few minutes turns a millisecond lock into a few-minute outage on the table, and queries that queue behind it hold their own locks while they wait.
+
+**How to fix it.** Move the data operation into a migration of its own, so the schema transaction commits and releases its locks before the backfill starts. Where the two genuinely must ship together, `atomic = False` on the migration lets each operation commit separately -- at the cost of partial application if one of them fails, so the operations then have to be individually safe to re-run. Reordering so the data pass comes first is only a fix when the backfill does not depend on the schema change.
+
+**What this rule cannot see.**
+
+- Static analysis cannot tell which migrations have been applied, so only the leaf of each app's history is reported. The live tier reads `django_migrations` and does not have to guess.
+- How long the lock is held is how long the data operation takes, which is not knowable from source. A backfill over an empty table costs nothing and is reported the same as one over a hundred million rows.
+- The lock modes named here are Postgres's. SQLite serialises writers regardless and has no comparable `ACCESS EXCLUSIVE`, so on SQLite this reports a shape that costs less than it says.
+- An operation this tool does not recognise is not assumed to emit DDL, so a third-party lock-taking operation before a backfill is not reported.
+
+**References**
+
+- <https://www.postgresql.org/docs/current/explicit-locking.html>
+- <https://docs.djangoproject.com/en/stable/howto/writing-migrations/#non-atomic-migrations>
