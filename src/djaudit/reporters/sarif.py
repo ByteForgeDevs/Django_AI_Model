@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,7 @@ from djaudit import __version__
 from djaudit.engine import RunResult
 from djaudit.fingerprint import FINGERPRINT_VERSION
 from djaudit.models import Confidence, Family, Finding, Severity
+from djaudit.provenance import DETERMINISTIC, Verdict
 from djaudit.registry import RuleError, get
 
 SARIF_SCHEMA = (
@@ -177,7 +179,11 @@ def _region(finding: Finding) -> dict[str, Any]:
     return region
 
 
-def _result(finding: Finding, rule_index: int) -> dict[str, Any]:
+def _result(
+    finding: Finding,
+    rule_index: int,
+    verdict: Verdict | None = None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "ruleId": finding.rule_id,
         "ruleIndex": rule_index,
@@ -199,9 +205,12 @@ def _result(finding: Finding, rule_index: int) -> dict[str, Any]:
             "family": finding.family.value,
             "tier": finding.tier.value,
             "remediation": finding.remediation,
+            "provenance": DETERMINISTIC.as_properties(),
             **finding.properties,
         },
     }
+    if verdict is not None:
+        payload["properties"]["triage"] = verdict.as_properties()
     if finding.fingerprint:
         payload["partialFingerprints"] = {FINGERPRINT_VERSION: finding.fingerprint}
     return payload
@@ -226,7 +235,10 @@ def _notifications(result: RunResult, index_of: dict[str, int]) -> list[dict[str
     return notifications
 
 
-def build(result: RunResult) -> dict[str, Any]:
+def build(
+    result: RunResult,
+    verdicts: Mapping[str, Verdict] | None = None,
+) -> dict[str, Any]:
     first_by_rule: dict[str, Finding] = {}
     for finding in result.findings:
         first_by_rule.setdefault(finding.rule_id, finding)
@@ -260,11 +272,18 @@ def build(result: RunResult) -> dict[str, Any]:
                         "toolExecutionNotifications": _notifications(result, index_of),
                     }
                 ],
-                "results": [_result(f, index_of[f.rule_id]) for f in result.findings],
+                "results": [
+                    _result(
+                        f,
+                        index_of[f.rule_id],
+                        (verdicts or {}).get(f.fingerprint),
+                    )
+                    for f in result.findings
+                ],
             }
         ],
     }
 
 
-def render(result: RunResult) -> str:
-    return json.dumps(build(result), indent=2) + "\n"
+def render(result: RunResult, verdicts: Mapping[str, Verdict] | None = None) -> str:
+    return json.dumps(build(result, verdicts), indent=2) + "\n"

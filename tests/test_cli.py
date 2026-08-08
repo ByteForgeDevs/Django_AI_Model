@@ -1,7 +1,10 @@
 """CLI contract: exit codes and output routing are what CI depends on."""
 
 import json
+import re
+import shutil
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -9,6 +12,7 @@ from typer.testing import CliRunner
 from djaudit import engine
 from djaudit.baseline import Baseline
 from djaudit.cli import EXIT_ERROR, EXIT_FINDINGS, EXIT_OK, app
+from djaudit.models import Confidence
 from djaudit.triage import Triage, Verdict
 
 runner = CliRunner()
@@ -365,3 +369,375 @@ class TestJobSummary:
         out = tmp_path / "nested" / "deeper" / "summary.md"
         runner.invoke(app, ["eval", str(vulnerable_project), "--summary", str(out)])
         assert out.is_file()
+
+
+class TestTriageCommand:
+    """The command must be useful with no model, and honest that it had none."""
+
+    def test_it_ranks_the_orm_fixture_without_a_model(self, orm_project):
+        result = runner.invoke(app, ["triage", str(orm_project)])
+
+        assert result.exit_code == EXIT_OK
+        assert "no model was consulted" in result.output
+
+    def test_settled_rules_are_labelled_as_borrowed(self, orm_project):
+        result = runner.invoke(app, ["triage", str(orm_project)])
+
+        # DJP-001 ships in the corpus prior, so it must be judged without a
+        # call and marked as coming from the corpus rather than from a model.
+        assert "corpus" in result.output
+        assert "true_positive" in result.output
+
+    def test_unsettled_findings_are_undecided_rather_than_dismissed(self, orm_project):
+        """The failure that would matter.
+
+        With no model, a finding the corpus cannot settle must surface as
+        undecided. Rendering it as an accepted risk would be the tool quietly
+        telling someone to ignore a defect nobody looked at.
+        """
+        result = runner.invoke(app, ["triage", str(orm_project)])
+
+        assert "abstained" in result.output
+        assert "no model answered" in result.output
+        assert "0 judged acceptable" in result.output
+
+    def test_no_llm_overrides_a_config_that_enables_one(self, tmp_path, orm_project):
+        project = tmp_path / "proj"
+        shutil.copytree(orm_project, project)
+        project.joinpath("pyproject.toml").write_text(
+            '[tool.djaudit.llm]\nenabled = true\nprovider = "openai"\napi_key_env = "NOPE_KEY"\n'
+        )
+
+        result = runner.invoke(app, ["triage", str(project), "--no-llm"])
+
+        assert result.exit_code == EXIT_OK
+        assert "no model was consulted" in result.output
+
+    def test_a_missing_path_is_a_tool_error(self, tmp_path):
+        result = runner.invoke(app, ["triage", str(tmp_path / "nope")])
+        assert result.exit_code == EXIT_ERROR
+
+    def test_suggest_offers_nothing_when_no_model_was_consulted(self, orm_project):
+        """The whole point of the flag, on the path everyone will actually take.
+
+        Offline, every verdict is borrowed from the corpus or absent, and
+        neither is grounds for writing a permanent comment into someone's
+        source. The command has to say so rather than print an empty section.
+        """
+        result = runner.invoke(app, ["triage", str(orm_project), "--suggest"])
+
+        assert result.exit_code == EXIT_OK
+        assert "no suppression is justified by this run" in result.output
+
+    def test_a_corpus_accepted_risk_is_refused_out_loud(self, drf_project):
+        """The dangerous case: a verdict that *looks* like grounds and is not.
+
+        DJA-010 is in the corpus prior as an accepted risk, so this run judges
+        it acceptable without asking anyone. Ranking on that basis is fine and
+        reversible. Writing `# djaudit: ignore[DJA-010]` into the file on that
+        basis is neither, so it must be refused and the refusal must be said.
+        """
+        result = runner.invoke(app, ["triage", str(drf_project), "--suggest"])
+
+        assert "1 not offered" in result.output
+        assert "DJA-010" in result.output
+        assert "corpus verdict cannot justify" in result.output.replace("\n", " ")
+
+    def test_group_collapses_repeats_of_one_rule_in_one_file(self, orm_project):
+        result = runner.invoke(app, ["triage", str(orm_project), "--group"])
+
+        assert result.exit_code == EXIT_OK
+        assert "themes" in result.output
+        assert "fewer things to read" in result.output
+
+    def test_the_grouped_view_still_says_no_model_was_consulted(self, orm_project):
+        """The one place a summary could mislead badly.
+
+        A grouped table looks more authoritative than a flat one -- fewer rows,
+        each standing for several findings. If the provenance line went missing
+        from this view, "abstained" would read as a considered judgement.
+        """
+        result = runner.invoke(app, ["triage", str(orm_project), "--group"])
+
+        assert "no model was consulted" in result.output
+        assert "settled from the recorded corpus" in result.output
+
+    def test_grouping_changes_the_presentation_and_not_the_count(self, orm_project):
+        flat = runner.invoke(app, ["triage", str(orm_project)])
+        grouped = runner.invoke(app, ["triage", str(orm_project), "--group"])
+
+        count = re.search(r"(\d+) findings", flat.output)
+        assert count and f"{count.group(1)} findings in " in grouped.output
+
+    def test_group_is_off_unless_asked_for(self, orm_project):
+        result = runner.invoke(app, ["triage", str(orm_project)])
+
+        assert "themes" not in result.output
+
+    def test_suggest_is_off_unless_asked_for(self, orm_project):
+        result = runner.invoke(app, ["triage", str(orm_project)])
+
+        assert "suppression" not in result.output
+        assert "not offered" not in result.output
+
+    def test_it_refuses_an_incomplete_run(self, tmp_path):
+        root = tmp_path / "proj"
+        (root / "conf").mkdir(parents=True)
+        (root / "manage.py").write_text("import os\n")
+        (root / "conf" / "settings.py").write_text(
+            "from configurations import Configuration\n\n"
+            "class Base(Configuration):\n    SECRET_KEY = 'x'\n    DEBUG = True\n"
+        )
+
+        result = runner.invoke(app, ["triage", str(root)])
+
+        assert result.exit_code == EXIT_ERROR
+
+
+class TestExplainCommand:
+    """Explain must be useful offline, and must refuse rather than guess."""
+
+    @staticmethod
+    def a_fingerprint(project) -> str:
+        result = runner.invoke(app, ["run", str(project), "--format", "json"])
+        fingerprint = json.loads(result.output)["findings"][0]["fingerprint"]
+        assert isinstance(fingerprint, str)
+        return fingerprint
+
+    def test_it_explains_a_real_finding(self, orm_project):
+        fingerprint = self.a_fingerprint(orm_project)
+
+        result = runner.invoke(app, ["explain", fingerprint, str(orm_project)])
+
+        assert result.exit_code == EXIT_OK
+        assert "What is wrong" in result.output
+        assert "What to do" in result.output
+        assert "References" in result.output
+
+    def test_a_prefix_is_enough(self, orm_project):
+        fingerprint = self.a_fingerprint(orm_project)
+
+        result = runner.invoke(app, ["explain", fingerprint[:8], str(orm_project)])
+
+        assert result.exit_code == EXIT_OK
+        assert "What is wrong" in result.output
+
+    def test_an_unknown_fingerprint_is_a_tool_error(self, orm_project):
+        result = runner.invoke(app, ["explain", "0123456789abcdef", str(orm_project)])
+
+        assert result.exit_code == EXIT_ERROR
+        # Rich wraps at the terminal width and leaves the trailing space
+        # before the break, so both have to be collapsed.
+        assert "may have been fixed" in " ".join(result.output.split())
+
+    def test_a_prefix_too_short_to_mean_anything_is_refused(self, orm_project):
+        result = runner.invoke(app, ["explain", "ab", str(orm_project)])
+
+        assert result.exit_code == EXIT_ERROR
+        assert "too short" in result.output
+
+    def test_a_missing_path_is_a_tool_error(self, tmp_path):
+        result = runner.invoke(app, ["explain", "abcdef", str(tmp_path / "nope")])
+
+        assert result.exit_code == EXIT_ERROR
+
+    def test_impact_adds_the_framing_for_a_non_specialist(self, orm_project):
+        fingerprint = self.a_fingerprint(orm_project)
+
+        result = runner.invoke(app, ["explain", fingerprint, str(orm_project), "--impact"])
+
+        assert result.exit_code == EXIT_OK
+        assert "Who this affects" in result.output
+        assert "How urgent" in result.output
+        assert "When this does not apply to you" in result.output
+
+    def test_impact_is_off_unless_asked_for(self, orm_project):
+        fingerprint = self.a_fingerprint(orm_project)
+
+        result = runner.invoke(app, ["explain", fingerprint, str(orm_project)])
+
+        assert "Who this affects" not in result.output
+
+    def test_it_consults_no_model_and_says_nothing_about_one(self, orm_project):
+        """Offline is not a degraded mode here, so there is nothing to disclose."""
+        fingerprint = self.a_fingerprint(orm_project)
+
+        result = runner.invoke(app, ["explain", fingerprint, str(orm_project)])
+
+        assert "model" not in result.output.lower()
+
+
+class TestFixCommand:
+    """Proposing patches, and refusing to be an applier."""
+
+    PROJECT = Path("tests/fixtures/vulnerable_project")
+
+    def test_it_prints_a_patch(self) -> None:
+        result = runner.invoke(app, ["fix", str(self.PROJECT), "--min-confidence", "tentative"])
+
+        assert result.exit_code == 0
+        assert "ready to apply" in result.output
+        assert "DEBUG = False" in result.output
+
+    def test_it_writes_nothing(self) -> None:
+        before = (self.PROJECT / "config" / "settings" / "production.py").read_bytes()
+
+        runner.invoke(app, ["fix", str(self.PROJECT), "--min-confidence", "tentative"])
+
+        assert (self.PROJECT / "config" / "settings" / "production.py").read_bytes() == before
+
+    def test_applying_is_refused_rather_than_silently_ignored(self) -> None:
+        result = runner.invoke(app, ["fix", str(self.PROJECT), "--no-dry-run"])
+
+        assert result.exit_code != 0
+        assert "not implemented" in result.output
+
+    def test_the_planted_key_is_never_printed(self) -> None:
+        base = (self.PROJECT / "config" / "settings" / "base.py").read_text()
+        key = base.split('SECRET_KEY = "', 1)[1].split('"', 1)[0]
+
+        result = runner.invoke(app, ["fix", str(self.PROJECT), "--min-confidence", "tentative"])
+
+        assert key not in result.output
+
+    def test_conditional_fixes_are_separated_and_carry_the_condition(self) -> None:
+        result = runner.invoke(app, ["fix", str(self.PROJECT), "--min-confidence", "tentative"])
+        flat = " ".join(result.output.split())
+
+        assert "to confirm first" in flat
+        assert "DJS-008" in flat
+        assert "only if every subdomain is served over HTTPS" in flat
+
+    def test_refusals_are_counted_by_default(self) -> None:
+        result = runner.invoke(app, ["fix", str(self.PROJECT), "--min-confidence", "tentative"])
+
+        assert "no automatic fix" in " ".join(result.output.split())
+
+    def test_refusals_are_explained_when_asked(self) -> None:
+        result = runner.invoke(
+            app,
+            ["fix", str(self.PROJECT), "--min-confidence", "tentative", "--refusals"],
+        )
+        flat = " ".join(result.output.split())
+
+        assert "DJS-013" in flat
+        assert "depends on the project" in flat
+
+    def test_a_clean_project_says_so(self, tmp_path: Path) -> None:
+        (tmp_path / "manage.py").write_text("# nothing here\n")
+
+        result = runner.invoke(app, ["fix", str(tmp_path)])
+
+        assert result.exit_code == 0
+        assert "no finding" in result.output.lower() or "has a fix" in result.output
+
+    def test_a_missing_path_fails(self) -> None:
+        result = runner.invoke(app, ["fix", "does/not/exist"])
+
+        assert result.exit_code != 0
+
+    def test_the_patch_applies_with_git_apply(self, tmp_path: Path) -> None:
+        """The claim the output makes about itself, checked against git.
+
+        A diff that looks right and does not apply is not a fix, and the
+        context narrowing that keeps a key out of the patch is exactly the kind
+        of change that could quietly break applicability.
+        """
+        import shutil
+        import subprocess
+
+        root = tmp_path / "project"
+        shutil.copytree(self.PROJECT, root)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        result = runner.invoke(app, ["fix", str(root), "--min-confidence", "tentative"])
+        assert result.exit_code == 0
+
+        from djaudit.llm.fix import fixes, patch
+
+        proposed, _ = fixes(engine.run(root, min_confidence=Confidence.TENTATIVE), root)
+        text = patch([f for f in proposed if f.ready])
+        applied = subprocess.run(
+            ["git", "apply", "--unidiff-zero", "-"],
+            check=False,
+            cwd=root,
+            input=text,
+            text=True,
+            capture_output=True,
+        )
+
+        assert applied.returncode == 0, applied.stderr
+        assert "DEBUG = False" in (root / "config" / "settings" / "base.py").read_text()
+
+    def test_verify_says_what_it_established(self) -> None:
+        result = runner.invoke(
+            app, ["fix", str(self.PROJECT), "--min-confidence", "tentative", "--verify"]
+        )
+        flat = " ".join(result.output.split())
+
+        assert result.exit_code == 0
+        assert "Verified statically only" in flat
+        assert "not established" in flat
+
+    def test_a_test_command_upgrades_the_claim(self, tmp_path: Path) -> None:
+        root = tmp_path / "project"
+        shutil.copytree(self.PROJECT, root)
+
+        result = runner.invoke(
+            app,
+            [
+                "fix",
+                str(root),
+                "--min-confidence",
+                "tentative",
+                "--test-command",
+                "true",
+            ],
+        )
+        flat = " ".join(result.output.split())
+
+        assert result.exit_code == 0
+        assert "and `true` passed" in flat
+        assert "statically only" not in flat
+
+    def test_a_failing_command_drops_every_patch(self, tmp_path: Path) -> None:
+        root = tmp_path / "project"
+        shutil.copytree(self.PROJECT, root)
+
+        result = runner.invoke(
+            app,
+            [
+                "fix",
+                str(root),
+                "--min-confidence",
+                "tentative",
+                "--test-command",
+                "exit 1",
+            ],
+        )
+        flat = " ".join(result.output.split())
+
+        assert result.exit_code == 0
+        assert "dropped" in flat
+        assert "own tests failed" in flat
+
+    def test_verifying_never_writes_to_the_project(self, tmp_path: Path) -> None:
+        root = tmp_path / "project"
+        shutil.copytree(self.PROJECT, root)
+        before = {p: p.read_bytes() for p in sorted(root.rglob("*.py"))}
+
+        runner.invoke(
+            app,
+            ["fix", str(root), "--min-confidence", "tentative", "--test-command", "true"],
+        )
+
+        assert {p: p.read_bytes() for p in sorted(root.rglob("*.py"))} == before
+
+    def test_without_verify_nothing_is_executed(self) -> None:
+        """The static-tier property, held at the CLI boundary."""
+        result = runner.invoke(
+            app,
+            ["fix", str(self.PROJECT), "--min-confidence", "tentative"],
+        )
+        flat = " ".join(result.output.split())
+
+        assert "Not verified" in flat or "Verified" not in flat

@@ -5285,6 +5285,41 @@ and patch authoring. Nothing in the detection path changes.
 triage is genuinely a burden. If it is not, this phase is premature and should
 wait.
 
+**Amendment — this phase was pulled forward, and runs after Phase 3.** The
+entry criterion has two halves and they came apart. The second half is met: 245
+findings across five families have been triaged by hand, and it is a burden.
+The first half was a proxy for the second, written when it was not yet clear
+how quickly the corpus would grow, and it stopped being informative once the
+thing it was proxying for could be observed directly.
+
+Nothing here depends on Phases 4 or 5 in any case. This layer consumes
+`Finding`, which has not changed shape since Phase 0. `DJM` and `DJX` would
+give it more findings to reason about; they would not unblock the reasoning.
+Phases 4 and 5 keep their numbers and follow this one, because renumbering
+would invalidate every cross-reference in this document to buy nothing.
+
+**Amendment — the evaluation set moves first.** It was written as `6.5.2`, near
+the end. Every previous phase built its measurement before the thing it
+measured, and the one time that order was reversed — carrying a mutation score
+in prose rather than re-deriving it — the number was wrong by 26 mutants and
+had been wrong for two sessions. An LLM layer is the worst possible place to
+build blind, because plausible output is exactly what it produces when it is
+wrong. So `6.1.5` is the eval harness, and it exists before anything asks a
+model a question.
+
+The ground truth is the 245 verdicts in `benchmarks/*.json`, with their notes.
+That is one reviewer's judgement rather than an oracle, and the harness says so
+in its output. It is still the only honest yardstick available, and it has the
+property that matters: it was written before any model saw it, for a different
+purpose, so it cannot have been shaped to flatter one.
+
+**Amendment — no third-party API is called from this repository's CI, ever.**
+Sending a target project's source to a model is the user's decision to make
+about their own code, taken with their own credentials. It is not a thing this
+project's test suite may do on their behalf, and a gate that needs network and
+a paid account is a gate that gets disabled. Every test runs against a recorded
+provider. See `6.1.2`.
+
 **Exit criteria.** Every LLM output is either verifiable (a patch that compiles
 and passes tests) or clearly labelled as advisory. No finding is ever created or
 suppressed by a model without a deterministic rule behind it.
@@ -5295,37 +5330,776 @@ that a deterministic rule already produced, with the evidence already attached.
 That keeps the failure mode at "unhelpful" rather than "confidently wrong about
 your security posture".
 
+**And the constraint is structural, not a promise.** A rule stated in a document
+is obeyed until someone is in a hurry. The response types the providers return
+carry no field that can express "this is a defect" or "this is not one", so
+there is no code path from a model's output to the finding list — not one that
+is guarded, one that does not exist. `djaudit triage` may reorder and annotate
+the findings a deterministic rule produced. It cannot add to them and it cannot
+remove from them, and `6.5.3` asserts that by trying.
+
 ### Step 6.1 — Provider abstraction
 
-- **6.1.1** — Provider interface with structured output support; no vendor lock-in.
-- **6.1.2** — Configuration, credential handling, and an explicit offline mode.
-- **6.1.3** — Response caching keyed by finding fingerprint plus prompt version, so cost is bounded and results are reproducible.
-- **6.1.4** — Token budget, rate limiting, and graceful degradation to deterministic output.
+- **6.1.1** — Provider interface with structured output support; no vendor lock-in. **Done.**
+
+  `src/djaudit/llm/provider.py`. One protocol with one method, and a request
+  that carries the shape of the answer it will accept. No runtime dependency
+  was added; `ResponseSchema.as_json_schema()` renders to the dialect OpenAI's
+  structured outputs and Anthropic's tool inputs both take, so a vendor is an
+  adapter rather than an edit here. That render is checked by tests against the
+  shape those APIs document; it has not been checked against a live endpoint,
+  and the plan should not claim otherwise until it has.
+
+  **The safety property is the type, not the docstring.** A caller declares its
+  fields before asking, and `validate` refuses a reply carrying a field nobody
+  declared. So a model has no route by which to return `{"is_defect": false}`
+  and be believed — not a guarded route, an absent one. It refuses loudly
+  rather than dropping the key, because dropping it would also keep it out of
+  the finding list while leaving nothing behind when a provider starts
+  answering a different question than the one it was asked.
+
+  The schema language is three types and a closed set of strings, and stops
+  there on purpose. Every question this layer asks has an answer that is a word
+  from a list the caller wrote, a sentence, a number, or a flag. A language rich
+  enough for nested objects is rich enough to express a structure nobody checked.
+
+  `Declined` is a return value rather than an exception, so every caller has to
+  decide what it does without a model. `NullProvider` always declines and is
+  what CI uses, which makes degradation the tested path rather than the one
+  that gets exercised when somebody's key expires.
+
+  Measured: six mutations of the validator — dropping the unknown-field
+  rejection, silently filtering instead of raising, dropping the closed set,
+  admitting a `bool` where an integer was declared (it subclasses `int`, so the
+  obvious check lets it through), dropping the required-field check, and
+  admitting a list — **all six caught** by the 25 tests.
+- **6.1.2** — Configuration, credential handling, and an explicit offline mode. **Done.**
+
+  `src/djaudit/llm/config.py`. **The default is offline, and not "offline if we
+  cannot find credentials".** Offline until asked, so that installing djaudit
+  never sends source anywhere because an environment variable happened to be
+  set in CI. A config file may name a provider and a model without turning one
+  on; only `enabled = true` or the CLI flag does that, so checking out a
+  repository that describes a model does not start making calls.
+
+  **It refuses to hold a key.** djaudit reports `DJS-002`…`DJS-005` for secrets
+  in source, and a tool that then invited you to paste an API key into its own
+  config would deserve to be ignored. `api_key`, `key`, `token`, `secret` and
+  `password` are rejected by name, and any value shaped like a credential is
+  rejected whatever it is called, so renaming the field is not the way around.
+  The error names `DJS-002` and truncates what it echoes, because an error
+  message is a place secrets leak into logs.
+
+  A `Credential` holds the *name* of an environment variable and reads it at
+  the moment of use. The key is therefore not on the object, so it cannot be
+  serialised into a cache entry or a log line by accident, and rotating it
+  needs no restart. Measured against the four vendor key shapes and a set of
+  ordinary values: `openai`, `gpt-4o-mini`, `claude-3-5-sonnet-20241022` and
+  `OPENAI_API_KEY` all pass; the OpenAI, Anthropic, Google and GitHub shapes are
+  all caught, as is any opaque 40-character run.
+
+  `usable` returns a reason rather than a bare `False`, because "you did not ask
+  for a model", "you named no provider" and "the variable is not set" are three
+  different problems and a user told only that nothing happened debugs the
+  wrong one. An empty variable counts as absent, since `export KEY=` is how
+  people turn one off.
+
+  Measured: eight mutations — defaulting to online, treating a described
+  provider as an enabled one, dropping either secret check, letting a key be
+  pasted as a variable name, treating an empty variable as present, letting the
+  config file beat an explicit flag, and swallowing malformed TOML — **all
+  eight caught** by 29 tests.
+- **6.1.3** — Response caching keyed by finding fingerprint plus prompt version, so cost is bounded and results are reproducible. **Done.**
+
+  `src/djaudit/llm/cache.py`. A cache buys affordability, but the reason it is
+  here first is reproducibility: a triage run that is run twice should not
+  reorder itself because a sampler rolled differently. That only holds if the
+  key covers every input, and **a key that misses one is worse than no cache**,
+  because it serves a confident answer to a question nobody asked.
+
+  The key is the finding fingerprint, the prompt version, the system and user
+  text, the rendered response schema and the model, hashed together. The prompt
+  text is in there as well as its version because a version somebody has to
+  remember to bump is a version that does not get bumped.
+
+  **The schema digest is the part I got wrong first.** I wrote it to normalise
+  field order away, reasoning that the same fields declared in a different
+  order ask the same question. Reading `as_json_schema` says otherwise:
+  `properties` is built in field order and `enum` in choice order, so both
+  reach the provider. The digest now hashes the rendered document, which
+  requires no judgement about which parts of a request matter.
+
+  Nothing secret is stored, and that is checked by reading the bytes back off
+  disk rather than by inspecting the object that went in -- a cache directory
+  ends up in tarballs and CI artifacts. The entry holds a validated reply and a
+  model name; not the credential, not the prompt, not the source it quoted. The
+  filename is a hash, since a path is visible to anyone who can list a
+  directory. **A refusal is never cached**, because declining is about the
+  state of the machine -- no key, no network, budget spent -- and storing one
+  would make a transient condition permanent for the user who exports their key
+  and re-runs.
+
+  Measured: 21 mutations, **21 caught** by 35 tests, but only after three
+  survivors were run down rather than written off.
+  - Normalising field order survived, because `required` is a list and list
+    order outlives sorting a document's keys -- the test was passing for the
+    wrong reason. A case with two *optional* fields removes that backstop.
+  - Writing straight to the destination survived, because the only failing
+    write under test failed before any bytes existed. A test that fails
+    *midway* separates a truncated entry from no entry.
+  - The third was my own bad mutant, guarded by a condition that was never
+    true. Rewritten to make the key readable rather than hashed, it is caught.
+- **6.1.4** — Token budget, rate limiting, and graceful degradation to deterministic output. **Done.**
+
+  `src/djaudit/llm/budget.py`. The interesting question was never how to count
+  tokens; it is what a run does at the limit. The answer enforced here is
+  **exactly what it would have done with no model at all** — the path
+  `NullProvider` already exercises on every commit. There is no separate
+  low-budget mode to get wrong, which makes the budget safe to set
+  aggressively: a run capped at a thousand tokens returns a complete, correct
+  finding list with commentary on the first few, not a truncated audit.
+
+  Exhaustion is a `Declined`, not an exception, for the same reason declining
+  is a return value everywhere else in this package. The reason names *which*
+  ceiling was hit and shows the arithmetic, because a user told only "budget
+  spent" cannot tell whether to raise the limit by ten percent or ten times.
+
+  The estimator rounds against us — three characters per token, not the usual
+  four, since code is denser than prose — and a provider that reports no usage
+  is charged the estimate rather than nothing, which is otherwise how a budget
+  is escaped. Cache hits cost neither tokens nor calls, so a cached re-run is
+  not limited to the same number of findings the first one was. Refusals are
+  counted separately from spend, so a summary can say "40 of 200 findings were
+  reviewed" instead of quietly reporting on 40.
+
+  **One limitation, stated rather than papered over.** The check runs before a
+  call, against the prompt, and a response's size cannot be known in advance —
+  a schema with a free-text field has no upper bound. A ceiling can therefore
+  be overshot by at most one response. Both halves of that are tested: the
+  overshoot happens, and no further call starts after it.
+
+  Two bugs found in my own first draft. `going_offline` expressed "stop now" as
+  a call ceiling equal to the number already spent — which is zero before the
+  first call, and a ceiling of zero means unlimited, so switching the model off
+  before using it turned every limit *off*. Stopping is not a quantity; it is
+  now a flag. And the first refusal tests passed a ceiling the prompt fit
+  under, so they were measuring the response cost rather than the guard.
+
+  Measured: 19 mutations, **19 caught** by 33 tests. Deleting the rate-limiter
+  call survived the first round — the only test naming it asserted a *refused*
+  call does not sleep, which a provider that never sleeps also satisfies. A
+  test that an allowed call does wait closes it.
+- **6.1.5** — **The evaluation harness, before anything asks a model a question.**
+  Scores a triage run against the 245 recorded human verdicts: agreement rate,
+  and separately the two error directions, because they are not equally bad. A
+  model calling an accepted risk a true positive wastes a reviewer's afternoon.
+  A model calling a true positive an accepted risk is the failure this project
+  exists to prevent, and it is reported on its own line rather than averaged
+  into a single score that can hide it. **Done.**
+
+  `src/djaudit/llm/evaluate.py` and `scripts/triage_baselines.py`, now a CI
+  gate. Ground truth is the 245 hand-written verdicts in `benchmarks/*.json`.
+
+  **The measurement changed the phase's argument, which is what it was for.**
+
+  Of the 245 verdicts, 194 are `true_positive`. A classifier that reads nothing
+  and says "true positive" therefore scores 79.2%, so the harness produces **no
+  combined accuracy number at all** — there is no `accuracy` property to reach
+  for, and `recall` will not answer without being told which class it is being
+  asked about. `beats` requires a model to win or tie on *both* directions, so
+  trading one error for the other cannot read as progress.
+
+  | baseline | TP recall | AR recall | downgrades | upgrades |
+  |---|---|---|---|---|
+  | always-true-positive | 100.0% | 0.0% | 0 | 51 |
+  | always-accepted-risk | 0.0% | 100.0% | 194 | 0 |
+  | always-abstain | 0.0% | 0.0% | 0 | 0 |
+  | by-rule *(fitted)* | 99.0% | 84.3% | 2 | 8 |
+  | **by-rule (held out)** | **97.9%** | **51.0%** | 4 | 25 |
+
+  The first version of this gate **failed**, and correctly: a lookup table
+  keyed on rule id alone scored 99.0%/84.3%. That table was fitted on its own
+  test set. Held out — fitted on two targets, scored on the third, folds pooled
+  rather than averaged so pretix's 141 findings outweigh healthchecks' 33 — it
+  scores **97.9% / 51.0%**. The gap between 84.3% and 51.0% is memorisation
+  being graded on its own homework, and reporting the first would have
+  overstated the deterministic floor.
+
+  **The headroom is far smaller than 245 suggests.** 22 of 29 rules are
+  unanimous here: every finding that rule produced was judged the same way. For
+  those the rule id already *is* the verdict, and asking a model can only
+  introduce a disagreement with a reviewer who was right. Only seven rules are
+  ever contested — `DJA-011`, `DJA-014`, `DJA-015`, `DJD-002`, `DJP-004`,
+  `DJS-009`, `DJS-010` — covering 110 findings, and 81 of those are `DJP-004`
+  at 81:2. **The genuinely contested set is around 25 findings.**
+
+  Two consequences, both binding on the rest of this phase:
+  1. `djaudit triage` (6.2.2) should spend a call only on a finding under a
+     contested rule. That is ~90% fewer calls *and* ~90% fewer chances to
+     contradict a correct deterministic answer.
+  2. Binary triage is not where this layer earns its place. Explanation (6.3)
+     and patch authoring (6.4) have no deterministic baseline to beat, because
+     the engine produces no prose and no diffs at all.
+
+  The gate is shown failing on both of its defects: a corpus where every rule
+  is unanimous, and one a blind baseline solves outright. `always-abstain`
+  scores 0.0%/0.0% rather than "no data", because recall is computed over what
+  a human reviewed — declining costs exactly what answering wrong costs, so a
+  model cannot post a good score by attempting only the easy half.
+
+  Measured: 13 mutations, **13 caught** by 37 tests.
 
 ### Step 6.2 — Triage
 
-- **6.2.1** — Prompt construction from a finding plus its evidence and surrounding code.
-- **6.2.2** — `djaudit triage`: rank findings by exploitability in this codebase's context.
-- **6.2.3** — False-positive suggestion — proposes suppressions, never applies them.
-- **6.2.4** — Grouping of related findings into a single reviewable theme.
+- **6.2.1** — **Prompt construction from a finding plus its evidence and
+  surrounding code — and the redaction that stands between them and a third
+  party.** `src/djaudit/llm/prompts.py`. **Done.**
+
+  A prompt is the first artefact in this project that leaves the machine. The
+  engine already masks secret *values* where it finds them — `mask()` in
+  `rules/_base.py` renders `SECRET_KEY` as `*x<redacted:50 chars>`, so a finding
+  never carries the key it is complaining about. That covers the values djaudit
+  went looking for. It does not cover a credential that happens to sit three
+  lines above one in a snippet, so the prompt builder redacts again on the way
+  out.
+
+  **I measured the wrong surface first and got the comforting answer.** Probing
+  snippets and evidence across all 245 corpus findings reported **zero** false
+  redactions. The test over the **full rendered prompt** — which also carries
+  the file path and the message — fired on **99 of 245**. The probe had been
+  clean because I pointed it at two of the prompt's four parts. *Measure the
+  artefact that actually ships.*
+
+  All 12 distinct false matches were file paths and squashed migration names
+  (`0001_initial_squashed_0043_...`). The separation is clean and not a matter
+  of taste: every false match contains `/` or `_`, and no vendor credential
+  shape contains either. So the regex is two tiers — prefix-anchored shapes
+  (`sk-`, `gh[pousr]_`, `AIza`, `xox`, JWT, PEM blocks) plus an opaque run
+  `\b[A-Za-z0-9+]{40,}={0,2}` that admits **no separators at all**.
+
+  Re-measured on the shipping artefact: **0 false redactions across all 245
+  rendered prompts, and 9 of 9 real key shapes caught.** The documented residual
+  gap is base64url, whose `-` and `_` the opaque tier will not match; anything
+  in that alphabet is only caught if it carries a vendor prefix.
+
+  `worth_asking` is the hook for 6.1.5's finding: it exists so `djaudit triage`
+  can spend a call only where the rule id does not already decide the verdict.
+  The response schema admits `unsure` as a third verdict, because a model with
+  nothing to add should be able to say so rather than guess.
+
+  Measured: 15 mutations, **15 caught** by 39 tests.
+- **6.2.2** — **`djaudit triage`: rank findings by whether they are worth a
+  reviewer's time, and spend a call only where the answer is in doubt.**
+  `src/djaudit/llm/triage.py`, `scripts/gen_triage_prior.py`, a CI gate, and the
+  `triage` command. **Done.**
+
+  **This substep corrects `6.1.5`.** That measurement found 22 of 29 rules
+  unanimous and concluded a model need only be asked about the other seven.
+  Building the runtime path made the 22 look thinner than they read: most were
+  unanimous across **one or two** findings. "Every reviewer who saw this agreed"
+  and "the one reviewer who saw it once agreed with himself" are the same
+  sentence when n is 1, and only one of them is evidence.
+
+  So the threshold was measured. Fitting the prior on two targets and applying
+  it to the third:
+
+  | minimum n | findings covered | agreement | downgrades | calls saved |
+  |---|---|---|---|---|
+  | 1 | 120 | 94.2% | **4** | 49.0% |
+  | 2 | 110 | 99.1% | **1** | 44.9% |
+  | 3 | 96 | 99.0% | **1** | 39.2% |
+  | **5** | **94** | **100.0%** | **0** | **38.4%** |
+  | 8 | 86 | 100.0% | 0 | 35.1% |
+  | 10 | 77 | 100.0% | 0 | 31.4% |
+
+  Five is the knee: the smallest floor that makes no mistakes on a codebase it
+  was not fitted on. Dropping to one buys eleven more points of savings and pays
+  with four downgrades — four real defects the table would have waved through on
+  its own authority, without anyone asking anything. That is the error this
+  layer exists to prevent and it is not for sale at eleven percent.
+
+  The shipped prior is therefore **five rules covering 109 reviewed findings**,
+  not twenty-two, and triage asks about 136 of the 245 rather than 110. On
+  pretix: 131 findings, 67 settled without a call, 64 undecided.
+
+  **Provenance is in every row.** A verdict borrowed from three other codebases
+  renders as `corpus` and carries the count it rests on; one produced by reading
+  this code renders as `model`. A run that asked and got nothing says *"no model
+  was consulted"* in as many words, because a table of verdicts looks equally
+  authoritative either way. A declined call becomes `abstained`, never
+  `accepted_risk` — the offline default must not quietly tell anyone to ignore a
+  defect nobody examined.
+
+  `scripts/gen_triage_prior.py --check` runs in CI so retriaging a finding
+  cannot leave a stale table suppressing questions, and it is shown failing on
+  exactly that defect.
+
+  Measured: 22 mutations, **22 caught** by 40 tests. The first round reported
+  1 of 22 — the harness copied the tree but the editable install pointed
+  `djaudit` back at the original `src`, so every mutant ran against unmutated
+  source. It now proves the copy is the code under test before believing any
+  verdict. Two genuine survivors followed: the ranking tests named their
+  fixtures `"c"` and `"m"`, which sort into the expected answer alphabetically,
+  so zeroing severity outright still passed; and nothing exercised the new
+  gate's failure path at all.
+- **6.2.3** — **Suppression proposals: only a model verdict may justify one.**
+  **Done.** `llm/suggest.py` turns an accepted-risk verdict into a rule-scoped
+  `# djaudit: ignore[DJS-001] reason` comment, rendered as a one-line unified
+  diff. Nothing is ever written; `--suggest` prints, the reviewer applies.
+
+  The safety property is that **a corpus verdict is not grounds for a
+  suppression.** The prior ranks findings from what three projects happened to
+  agree on, which is fine and reversible; a comment committed to somebody's
+  source is neither. So only `Source.MODEL` qualifies, and an offline djaudit —
+  the default, and the CI path — proposes nothing at all and says so. On the DRF
+  fixture that is visible: `DJA-010` is judged an accepted risk from the corpus
+  and is refused out loud rather than silently offered.
+
+  **The defect this substep actually found.** The first version built its patch
+  from `finding.location.snippet`. Settings rules *mask* the value they report,
+  so the snippet for `SECRET_KEY = "3t(5n^s..."` is `SECRET_KEY =
+  "*x<redacted:50 chars>"`. Applying that proposal would have overwritten a live
+  credential with the redaction marker, and the diff would have looked entirely
+  reasonable. Eight tests about the shape of the comment passed. The one test
+  that copied a fixture, applied a proposal to the real file and re-ran the
+  engine caught it in its first run. `propose` now takes the on-disk line,
+  `source_line_of` reads it, and a `REDACTION_MARKER` guard refuses a masked
+  line as defence in depth.
+
+  Mutation: **25 of 25 caught**, after reading five survivors rather than
+  believing them. Three were real gaps and are now tested — the two constants
+  (`MINIMUM_JUSTIFICATION`, `MAXIMUM_LINE`) were checked by tests that *built
+  their input from the constant*, so mutating 120 to 100000 survived; and the
+  round-trip check that re-parses the generated comment is unreachable while
+  `comment_for` is correct, so it is now reached by monkeypatching a bare
+  `# noqa`. One was a bad anchor of mine. One (`n=0` → `n=3` in the diff) is
+  **equivalent** — a one-line sequence has no context to add, verified
+  byte-for-byte.
+
+  The harness lied twice before it was believed. Its self-proof step passed on
+  `No module named pytest` — a failure that proves nothing ran — so it now
+  demands pytest exit code **1** specifically, and uses a *behavioural* canary
+  rather than renaming a function, which broke the package import and produced a
+  collection error instead of a test failure.
+
+  Also pinned: `djaudit.llm` re-exports `suggest` and `triage` over its own
+  submodules, so `from djaudit.llm import suggest` is the function. Deliberate,
+  and now a test, because monkeypatching the wrong object makes a test pass for
+  no reason.
+
+  Timing gate failed locally at 4.17s against 3.5s. Interleaved A/B against
+  `HEAD` in a second worktree: old best 3.52s, new best 3.64s, distributions
+  identical, load average 4.2 on 8 cores — and `e8b56d2` is green in CI with
+  byte-identical engine source. The machine, not the change. Second time.
+- **6.2.4** — **Themes: one rule in one file is one decision. Done.**
+  `llm/group.py` collapses a triaged run into themes and `djaudit triage
+  --group` renders them. On pretix, 131 findings become 68 themes.
+
+  **The key was measured against the 245 recorded verdicts, not chosen.** A
+  group is only useful if a reviewer can make one decision about it, so each
+  candidate was scored on how often it merges findings that were judged
+  *differently*:
+
+  | key | groups | multi-finding | mixed-verdict groups | findings caught in one |
+  |---|---|---|---|---|
+  | rule | 47 | 21 | 5 | 73 |
+  | rule + dir (2 levels) | 66 | 27 | 4 | 65 |
+  | rule + directory | 92 | 40 | 3 | 31 |
+  | **rule + file** | **149** | **45** | **0** | **0** |
+
+  **The compressive option is the wrong one.** Directory grouping yields 92
+  groups against 149 and looked clearly better until it was scored: three of its
+  groups mix a true positive with an accepted risk, covering 31 findings, 12.7%
+  of the corpus. `rule + file` is the only key that never merged a disagreement,
+  and it still moves 141 of 245 findings into a group. Compression was never the
+  objective.
+
+  A theme with members that disagree reports `verdict = None` and renders as
+  **mixed**, never as the majority. Suppressing a dissent inside a summary is
+  the failure that disqualified the alternative key, so it is not available in
+  the shipped one either. The invariant is tested directly: the judgements out
+  are the same objects as the judgements in.
+
+  A `--group` view is more authoritative-looking than a flat one, so the
+  provenance footer — including "no model was consulted" — was extracted into
+  `_print_provenance` and is shared, with a test that the grouped view still
+  prints it.
+
+  The purity table above is **re-derived from `benchmarks/*.json` by a test**
+  rather than trusted, along with its contrast: one test asserts `rule + file`
+  merges no disagreement, another asserts the directory key still does. A purity
+  check over zero rows is 100% pure, so a third test asserts the corpus actually
+  loaded and holds more than one verdict.
+
+  Mutation: **21 of 21 caught**, after the round found dead code in the module
+  itself. `where()` had an `if len(lines) == 1` special case that produced
+  byte-identical output to the general branch — joining a one-element list
+  already gives `file:12` — so removing the branch changed nothing anywhere.
+  Deleted rather than papered over with a test.
+
+  Timing gate again failed locally (3.99s against 3.5s, load average 4.95 on 8
+  cores). `git diff HEAD -- src/djaudit` shows no engine file changed at all, so
+  the gate is measuring the machine. Third occurrence.
 
 ### Step 6.3 — Explanation
 
-- **6.3.1** — `djaudit explain <fingerprint>` — a contextual explanation citing this code, not the generic rule text.
-- **6.3.2** — Business-impact framing for non-specialist reviewers.
+- **6.3.1** — **`djaudit explain <fingerprint>`, with no model at all. Done.**
+  Measured first: across the 245 corpus findings, **100% carry evidence,
+  references, a rationale and a remediation**, and 97% carry a snippet. The
+  material for a substantive explanation is already in the finding schema, put
+  there by the rule that fired — so `explain` assembles it, adds what else in
+  the file is wrong for the same reason, and consults nothing.
+
+  **The safety property: `explain` never reads the target's source.** Settings
+  rules mask the value they report, so a finding on a live key carries
+  `SECRET_KEY = "*x<redacted:50 chars>"`. An explanation that re-read the line
+  "for context" would print the real key to a terminal, into CI logs, and — once
+  6.3.2 exists — into a prompt. This is the exact inverse of 6.2.3, where
+  `propose` *must* read from disk because a patch has to match reality. A
+  description has to respect the redaction instead.
+
+  Asserting the secret is absent from the output is not enough; that passes for
+  a version that reads the file and happens not to print it. So the test makes
+  `Path.read_text`, `read_bytes` and `open` raise, then explains a masked
+  finding. The mutation round confirms it is load-bearing: a mutant that adds a
+  disk read is **caught**. A second test proves the contrast — that the fixture
+  really does hold a secret worth protecting.
+
+  An ambiguous fingerprint prefix is an error, never a first match: a wrong
+  explanation rendered under the right identifier looks entirely correct and
+  gives the reader no signal at all.
+
+  Mutation: **22 of 22 caught**, after three genuine survivors. Two were the
+  same trap as 6.2.4 — a test that builds its input from the constant it is
+  checking cannot see a wrong constant, so `MINIMUM_PREFIX` 6→5 survived — and
+  one was a case no test distinguished (`startswith` → `in`, which would resolve
+  `def012` to a fingerprint it merely appears inside). The third was a test that
+  varied two fields at once and so reached only one of two filters.
+- **6.3.2** — **Business-impact framing for non-specialist reviewers. Done.**
+  `llm/impact.py`, `djaudit explain --impact`, 28 tests, mutation 22/22.
+
+  Answers four questions a non-specialist actually asks — *who this affects*,
+  *what it costs*, *how widespread it is*, *how urgent it is* — plus a fifth
+  the vendors never print: **when this does not apply to you.** That last one
+  is free, because a measurement showed **all 67 rules carry `limitations`**,
+  the field recording what the rule cannot see. Those caveats are rendered
+  **verbatim from `RuleMeta.limitations`**, never paraphrased; a mutant that
+  truncated them to twenty characters was caught.
+
+  The honesty property: **no number appears in generated prose unless the run
+  counted it.** The `who`/`cost`/`urgency` templates are written digit-free,
+  the only numbers are the counted blast radius (occurrences and files), and
+  `no_invented_numbers` re-reads the rendered text and asserts every integer
+  in it is one of those counts. A percentage and a dollar figure smuggled into
+  the templates were both caught by that check.
+
+  **The check fired on honest text, and the fix was not to loosen it.**
+  `DJA-008`'s rule-authored caveat legitimately cites "DJA-010" and "two
+  findings". Relaxing the regex to tolerate those would have stopped it
+  catching anything. Instead `framing()` (generated prose, digit-checked) was
+  split from `render()` (framing plus verbatim caveats, checked by requiring
+  the rule's exact text to survive). Both guarantees kept, neither weakened.
+
+  The mutation round's **canary passed** — which is the finding. Blanking the
+  audience sentence left every test green, because they asserted the four
+  *headings* and never the values beneath them. The section would have been
+  structurally perfect and said nothing. Each heading is now pinned to its own
+  content, and two further tests require every family and every severity to
+  say something distinct, so a shared sentence cannot make the section
+  decorative.
 
 ### Step 6.4 — Patch generation
 
-- **6.4.1** — `libcst` integration for structure-preserving rewrites.
-- **6.4.2** — `djaudit fix --dry-run` producing a unified diff.
-- **6.4.3** — Verification loop: apply to a scratch copy, re-run djaudit and the target's own test suite, and discard any patch that fails either.
-- **6.4.4** — Deterministic fixes for the mechanical rules, with no model involved — most `DJS` settings fixes need no intelligence at all.
+- **6.4.1** — **Structure-preserving rewrites. Done — and `libcst` was measured
+  out rather than integrated.** `llm/edit.py`, `tests/test_dependencies.py`,
+  41 + 5 tests, mutation 26/26.
+
+  The substep was planned as "`libcst` integration". Before taking on a
+  dependency an order of magnitude larger than everything djaudit ships, the
+  cheaper option was measured: derive a byte range from `ast` position data,
+  slice it out, and re-parse it. Across the three benchmark targets and the
+  fixtures — **3,159 files, 86,783 assignment values**:
+
+  | result | count | share |
+  |---|---|---|
+  | slice re-parses to an identical tree | 86,601 | **99.790%** |
+  | slice does not | 182 | 0.210% |
+
+  Every one of the 182 is one shape: a value in parentheses that `ast` excludes
+  from its own range, so the slice is a fragment that only parses inside
+  brackets. That matters less than the fact that it is **detectable from
+  inside** — parse the slice, compare it to the node. `verified_span` returns
+  `None` when the comparison fails, so a ranged edit is not "99.79% safe", it is
+  safe and *available* 99.79% of the time. `libcst` would have bought the 0.21%
+  and would not have supplied the round-trip proof, which is the part that makes
+  an edit publishable. It is not a dependency and not an extra;
+  `tests/test_dependencies.py` pins the runtime list to `typer` + `rich` and
+  fails if anything imports `libcst`, Django, or an HTTP client.
+
+  `apply` re-derives the untouched text from both sides and requires it to
+  match, so "the edit was surgical" is checked rather than assumed. Overlapping
+  edits raise instead of being ordered by a rule that would silently decide
+  which fix wins.
+
+  **`ast` columns are UTF-8 byte offsets, not character offsets** — the trap
+  worth naming, because `len(line[:col])` produces a range that is off by n,
+  still parses, and edits the wrong bytes without raising.
+
+  Three mutants survived the first round, and they were the module's three core
+  guarantees. The round-trip comparison was **unreachable** by every existing
+  test: the parenthesised case exits earlier through `SyntaxError`, so nothing
+  ever reached the branch where a slice parses cleanly and means something else.
+  It took two texts of identical shape (`X = alpha` against a node from
+  `X = beta1`) to get there. The third was the proof helper — tested directly,
+  never tested as *called*, so deleting the call from `apply` left everything
+  green.
+- **6.4.2** — **`djaudit fix --dry-run` producing a unified diff. Done.**
+  `llm/fix.py`, `djaudit fix`, 47 + 14 tests, mutation 26/26.
+
+  An autofixer earns trust by what it declines. Measured across the 27 `DJS`
+  findings the fixtures produce, the value is decided by the *rule* rather than
+  by the *project* for **four rules out of twenty-seven** — `DJS-001`,
+  `DJS-008`, `DJS-011`, `DJS-018`. Everything else needs a hostname, an origin
+  list, a key rotation or a restructuring, and is refused **by name with a
+  reason**, because a silent skip reads as "nothing to do here".
+
+  **The agreement gate.** A fixer may only write a value its own rule already
+  names: a test asserts `"{setting} = {value}"` appears verbatim in that rule's
+  `remediation`, for every entry in the table. So the table cannot drift from
+  the advice, and a fixer cannot become a second, unreviewed rule engine hiding
+  inside the first.
+
+  **`SECURE_HSTS_SECONDS` is the case that proves the gate is necessary and not
+  sufficient.** It is the easiest-looking fix here and `DJS-007` names `31536000`
+  outright, so a table entry would pass the gate. It is still refused, because
+  the same remediation says to *ramp up rather than jump* — HSTS is sticky for
+  the max-age it arrived with, so a one-step year is unrecoverable for a year if
+  anything on the domain cannot do HTTPS. `test_hsts_is_deliberately_not_fixable`
+  pins the reasoning rather than leaving it as an absence.
+
+  **The gate then fired on an honest entry, and was not widened.** `DJS-018`
+  said "set `SECURE_CONTENT_TYPE_NOSNIFF` back to True" in prose — the same
+  meaning, not the same characters. A fuzzy match would have gutted the check,
+  so the *rule* was amended to state the assignment plainly. The requirement
+  stands: a remediation a machine may act on has to name the value literally.
+
+  **A patch's context republished a secret, which is the 6.3.1 leak arriving
+  through a different door.** Fixing `DEBUG` two lines under `SECRET_KEY` printed
+  the key as unchanged context — into a terminal, a pull request and CI logs —
+  while changing something else entirely. The run already knows which lines
+  those are, because a rule masked them, so `safe_context` narrows the window
+  until every flagged line falls outside it, rather than masking (which would
+  make the patch unappliable, and an unappliable patch is not a fix). On the
+  fixture the window drops 3 → 1 and the planted key disappears.
+  `test_the_patch_applies_with_git_apply` keeps the output honest about itself.
+
+  Mutation found one more: line numbering has to **step over removed lines**, or
+  a secret *below* a change is mislocated by one and the window is never
+  narrowed. Every test written until then had put the key above the fix.
+- **6.4.3** — Verification loop: apply to a scratch copy, re-run djaudit and the target's own test suite, and discard any patch that fails either. **Done** — `llm/verify.py`, `djaudit fix --verify [--test-command]`, 47 tests, mutation **28/28**.
+
+  **What "verified" means, and what it does not.** The default check is static
+  and establishes four things: the patch applies, the result still parses, the
+  finding it targeted is gone, and no new finding appeared. That is a real
+  claim, and it is not the claim "this is safe to merge" — nothing has been
+  executed. `Level` names the difference (`STATIC` / `TESTED` / `FAILED`) so a
+  static pass can never be printed as a tested one.
+
+  **The test command is never auto-detected.** Detecting `manage.py test` or a
+  `pytest.ini` and running it would mean *executing the audited project*, which
+  the static tier exists not to do — importing a target's settings module runs
+  whatever that module runs. So the suite runs only when an operator names it
+  on the command line, where they could equally have typed it into their own
+  shell. Convenience here would have quietly traded away the property the whole
+  tier is built on.
+
+  **Bisecting only on failure.** Verifying each patch separately would cost one
+  engine run per patch. The batch is tried once, which is the common case; only
+  when it fails is each patch checked alone, and then the survivors are checked
+  *together* again — patches that each hold up alone can still conflict, and
+  what ships is the set, so the set is what has to hold. If the surviving set
+  fails together, nothing ships.
+
+  **The loop found a real bug in 6.4.2.** A verify test disagreed with the
+  patch text, and the cause was `Fix.after` being a *stored* field while
+  `combined()` re-derived the same text from `edits`. Two representations of
+  one value, free to drift, and the one being checked was not the one that
+  would ship. `after` is now computed from `edits`. Recorded as measurement
+  discipline **#94**.
+
+  **An unverified run must not claim verification.** The first CLI test wrote
+  `assert "Not verified" in flat or "Verified" not in flat` — an `or` whose
+  second clause was trivially satisfiable, so it asserted nothing (**#95**).
+  Fixing the assertion exposed the real defect behind it: `level` defaulted to
+  `Level.STATIC`, so a run *without* `--verify` still printed "Verified
+  statically only" over a patch nothing had looked at. The level is now `None`
+  until a check actually runs.
+
+  **Mutation, 28 mutants, all caught** — but 19/28 on the first pass. Four
+  survivors, and two of them were the same lesson: in every real run a patch
+  that fails to parse *also* carries a `problem` string, so the five conditions
+  in `accepted` each silently backstopped the others and any one of them could
+  be deleted without changing an outcome (**#79** again, through a new door).
+  The fix was to construct each defect in isolation. The other two survivors
+  were paths nothing had reached: a suite that times out, and a surviving set
+  that fails when re-verified together.
+- **6.4.4** — Deterministic fixes for the mechanical rules, with no model involved — most `DJS` settings fixes need no intelligence at all. **Done** — `tests/llm/test_fixes_need_no_model.py`, 10 tests, each shown failing on a real violation.
+
+  This substep had almost nothing to *build*: 6.4.2 already wrote every fix
+  from its own rule's remediation text, so no model was involved. The work was
+  turning that from something true today into something that stays true, since
+  a property nothing checks is a property that quietly stops holding.
+
+  **Three proofs, because each covers the others' blind spot.** A transitive
+  walk of the import graph from `fix`, `edit` and `verify` — reading source
+  with `ast`, not `sys.modules`, which by mid-test-run holds the whole package
+  and would report everything as reachable from everything. Then the CLI's
+  `_build_provider` is replaced with one that raises, and `fix` (with and
+  without `--verify`) runs to completion. Then the socket layer is closed
+  while the whole library path runs.
+
+  **The socket closure replaced a test that could not fail.** The first version
+  sabotaged the names in `djaudit.llm.provider` — but since no fix module
+  imports them, nothing could ever have tripped it. Closing `socket.socket`,
+  `create_connection` and `getaddrinfo` instead assumes nothing about *how* a
+  model would be reached: any provider, under any name, in any package, has to
+  open one.
+
+  **Every guard is shown failing.** A clean import graph and a broken detector
+  produce identical output, so the walk is pointed at `djaudit.llm.triage`,
+  which genuinely does reach a provider, and required to notice. The CLI
+  sabotage is proven by running `triage` under it and requiring the failure.
+  The socket closure is proven by calling a socket. And the whole gate was
+  checked by adding a real `from djaudit.llm.provider import Provider` to
+  `edit.py` and confirming it fails.
+
+  **Also pinned: the same fixture patched twice is byte-identical.** That is
+  the property having no model actually buys, so it is worth a test of its own.
 
 ### Step 6.5 — Guardrails
 
-- **6.5.1** — Provenance labelling: every model-authored artefact marked as such in output and SARIF.
-- **6.5.2** — Evaluation set for triage quality, measured against human triage from Phases 1–5.
-- **6.5.3** — Documented failure modes and a written statement of what the model is never permitted to do.
+- **6.5.1** — Provenance labelling: every model-authored artefact marked as such in output and SARIF. **Done** — `src/djaudit/provenance.py`, `triage --format json|sarif`, 20 tests, mutation **28/28**.
+
+  **The dangerous case is no label, not a wrong one.** An unlabelled SARIF
+  result is indistinguishable from a labelled one to any consumer that does not
+  know to look, so "no model was involved" and "nobody said" collapse into the
+  same silence. Everything therefore carries provenance, including the
+  deterministic findings that are the overwhelming majority and appear not to
+  need it. `DETERMINISTIC` exists so that absence can never be read as a claim.
+
+  **A finding and a verdict about it are two statements, and merging them lied.**
+  The first implementation stamped one label per result. Running it produced
+  twenty-four findings marked `authorship: unavailable, reproducible: false` —
+  because the run was offline and no verdict was available. Every one of those
+  findings came from an AST rule and would reproduce byte for byte; a consumer
+  believing the label would have discarded solid results on the grounds that a
+  model had not spoken. A result now carries `provenance` (always
+  deterministic) *and*, when triage ran, `triage.verdict` with its own separate
+  provenance.
+
+  **`Authorship` is deliberately not a boolean.** "A model answered" and "a
+  model was asked and nothing came back" are different facts. So is "a recorded
+  human corpus settled it", which is `reproducible` without being
+  `deterministic` — the answer is fixed, but it was a person's, not a rule's.
+  A model may be *named*; nothing else may, since naming one on a corpus hit
+  implies an involvement that did not happen, and `Provenance.__post_init__`
+  raises rather than allowing it.
+
+  **`provenance.py` does not import the LLM layer.** Reporters need the
+  vocabulary, not the machinery, and pointing the dependency this way means
+  `djaudit report --format sarif` stamps provenance without the report path
+  being able to reach a provider at all.
+
+  **Mutation, 28 mutants — 23 on the first pass.** Two survivor clusters, both
+  instructive. `describe()` was **dead code**: written, tested, and called from
+  nowhere (**#89**), so it now backs the terminal's `source` column and the
+  substep's "in output" half is real rather than notional. And
+  `test_every_authorship_describes_differently` asserted only that the four
+  sentences were *distinct* — four wrong sentences are also four (**#91**
+  again, one level up: asserting shape, not value). Each rendering is now
+  pinned to its meaning. The second cluster: nothing asserted the verdict
+  *label*, only its provenance, so `label=""` shipped a provenance attached to
+  nothing.
+- **6.5.2** — Evaluation set for triage quality, measured against human triage from Phases 1–5. **Moved to `6.1.5`** — it is the measurement, and it goes first.
+- **6.5.3** — Documented failure modes and a written statement of what the model is never permitted to do. **Done** — `docs/architecture/llm-layer.md`, `scripts/check_llm_doc.py`, 10 tests, all seven drift classes shown failing.
+
+  **Taken after `6.5.4`**, because the note cites the hostile-provider test and
+  a document citing a file that does not exist is precisely the failure this
+  note exists to prevent. *(Bookkeeping: the note itself was swept into
+  `6.5.4`'s commit by `git add -A`. Recorded rather than rewritten — the tree
+  was green at both commits, and the history is more useful honest.)*
+
+  **A failure-modes document is the one kind where stale is worse than absent.**
+  Absent, a reader goes and looks; stale, they believe it. So every checkable
+  claim is checked by `scripts/check_llm_doc.py`, wired into CI beside
+  `check_plan` and `gen_rule_docs`: cited paths must exist, `MINIMUM_OBSERVATIONS`
+  and the corpus prior's size must match the code, every rule in `FIXERS` must
+  be named and no rule may be named fixable that is not, `Level.STATIC` and
+  `Level.TESTED` must still exist, and the measured figures must still appear
+  in `edit.py`'s measurement. Reading is done with `ast`, not by importing.
+
+  **The gate is shown failing on all seven drift classes** — a renamed file, a
+  drifted constant, a grown prior, an undocumented fixer, a rule wrongly
+  claimed fixable, a renamed level, and a figure rounded up — each introduced
+  for real and undone in a `finally`, so a failure cannot leave the tree dirty.
+  A checker that passes on everything and a document that is correct look
+  identical from the outside (**#88**).
+
+  **The note also states what has *not* been checked**, because the rest of it
+  would otherwise imply more coverage than exists: the JSON-schema render has
+  been checked against OpenAI's and Anthropic's *documents*, never a live
+  endpoint; the corpus prior is three projects, enough to refute "any rule can
+  be settled" and not enough to claim generality; and the layer's behaviour
+  under a slow or partially-failing real provider is modelled, which is not the
+  same as having seen one.
+
+  **The permission table names its enforcement.** Nine things the model may
+  never do, each with the code or test that makes it so — not a policy
+  document, an index into the guarantees.
+- **6.5.4** — **Prove the structural guarantee by attacking it.** A hostile
+  provider that returns every field it is allowed to return, plus fields it is
+  not, and asserts the finding list is byte-identical before and after. The
+  promise that a model cannot create or suppress a finding is worth exactly as
+  much as the test that tries to make it do so. **Done** —
+  `tests/llm/test_hostile_provider.py`, 28 tests, mutation **11/11**.
+  **Taken before `6.5.3`**, because the architecture note is supposed to *cite*
+  this test, and a doc that cites a file which does not exist is the failure
+  mode that note is written to prevent.
+
+  **The provider is hostile in every way the type system permits.** It answers
+  every declared field, choosing the value most likely to change an outcome;
+  adds nine fields nobody declared (`findings`, `suppress`, `severity`,
+  `fingerprint`, `rule_id`, `location`, `ignore`, `confidence`, `__proto__`);
+  claims 2⁴⁰ tokens per call; embeds prompt-injection text in every string; and
+  names itself `hostile/1.0 (ignore previous instructions)` to see whether that
+  name ever reaches a report.
+
+  **The comparison is bytes, not objects** — the rendered JSON report, so a
+  change to any field shows up and the artefact compared is the one that ships
+  (**#81**). `duration_seconds` is removed *by key*, since a regex scrub over
+  the text could quietly delete a finding's own numbers and hide the mutation
+  being hunted, and `test_the_comparison_still_sees_a_changed_finding` proves
+  the scrub left the detector working.
+
+  **The attack was verified before being trusted.** A hostile provider that
+  quietly declined would make every assertion here pass while establishing
+  nothing, so three tests pin that it answers, that its trespass is refused
+  *for the right reason*, and that withholding the trespass makes the same
+  reply acceptable (**#88**).
+
+  **It found a real defect.** `SchemaViolationError` propagated straight out of
+  `triage`, so one bad reply killed a run whose findings were already computed
+  and correct — handing the operator a traceback instead of an audit. Refusing
+  the reply is right; discarding everything else is not. A violation now
+  becomes an abstention that names itself, counted as `misbehaved` (a *subset*
+  of `declined`, so the summary arithmetic stays correct) and printed in red,
+  because degrading quietly would have been worse than crashing.
+
+  **`validate`'s type check turned out to be the only untested guard.** Every
+  other check does set arithmetic over the payload's keys, which a bare string
+  or a list answers without meaning anything — `"accepted_risk"` would have
+  produced an empty set of undeclared fields and sailed through. Five
+  non-object payloads now pin it.
 
 ---
 
@@ -5385,12 +6159,12 @@ conversation.
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
 | 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | **Complete** (PR #3) — `DJA-001`…`DJA-015`, `DJD-001`…`DJD-003`, 100% precision on three real targets |
-| 3 | Performance and injection | 6 | 36 | In progress |
-| 4 | Migration safety and live tier | 6 | 28 | Not started |
-| 5 | Portability and external adapters | 4 | 20 | Not started |
-| 6 | LLM layer | 5 | 17 | Not started |
+| 3 | Performance and injection | 6 | 36 | **Complete** (PR #5) — `DJP-001`…`DJP-010`, `DJI-001`…`DJI-012`, 100% precision on three real targets |
+| 4 | Migration safety and live tier | 6 | 28 | Not started — **runs after Phase 6**, see the amendment there |
+| 5 | Portability and external adapters | 4 | 20 | Not started — **runs after Phase 6** |
+| 6 | LLM layer | 5 | 19 | In progress — **pulled forward, runs after Phase 3** |
 | 7 | Distribution | 3 | 10 | Not started |
-| | **Total** | **52** | **233** | |
+| | **Total** | **52** | **235** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this

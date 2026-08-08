@@ -8,15 +8,29 @@ patches. Versioned by ``SCHEMA_VERSION``.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from djaudit import __version__
 from djaudit.engine import RunResult
-from djaudit.models import SCHEMA_VERSION
+from djaudit.models import SCHEMA_VERSION, Finding
+from djaudit.provenance import DETERMINISTIC, Verdict
 
 
-def build(result: RunResult) -> dict[str, Any]:
+def _finding(finding: Finding, verdict: Verdict | None) -> dict[str, Any]:
+    """A finding is always deterministic; only its verdict may not be."""
+    payload = {**finding.to_dict(), "provenance": DETERMINISTIC.as_properties()}
+    if verdict is not None:
+        payload["triage"] = verdict.as_properties()
+    return payload
+
+
+def build(
+    result: RunResult,
+    verdicts: Mapping[str, Verdict] | None = None,
+) -> dict[str, Any]:
     ctx = result.context
+    judged = verdicts or {}
     counts = result.counts_by_severity()
     return {
         "schema_version": SCHEMA_VERSION,
@@ -41,7 +55,7 @@ def build(result: RunResult) -> dict[str, Any]:
             "by_severity": {sev.value: n for sev, n in counts.items()},
             "duration_seconds": round(result.duration_seconds, 4),
         },
-        "findings": [f.to_dict() for f in result.findings],
+        "findings": [_finding(f, judged.get(f.fingerprint)) for f in result.findings],
         "diagnostics": [
             {
                 "code": d.code,
@@ -56,5 +70,5 @@ def build(result: RunResult) -> dict[str, Any]:
     }
 
 
-def render(result: RunResult) -> str:
-    return json.dumps(build(result), indent=2) + "\n"
+def render(result: RunResult, verdicts: Mapping[str, Verdict] | None = None) -> str:
+    return json.dumps(build(result, verdicts), indent=2) + "\n"

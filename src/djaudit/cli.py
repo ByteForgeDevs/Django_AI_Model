@@ -16,16 +16,36 @@ worse outcome than a red one.
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
+from rich.syntax import Syntax
 from rich.table import Table
 
 from djaudit import __version__, engine
 from djaudit.baseline import Baseline, BaselineError
+from djaudit.llm import config as llm_config
+from djaudit.llm.budget import Budget, Metered
+from djaudit.llm.cache import Cache, Cached
+from djaudit.llm.evaluate import Verdict
+from djaudit.llm.explain import FingerprintError, explain, find
+from djaudit.llm.explain import render as render_explanation
+from djaudit.llm.fix import Refusal, fixes, patch
+from djaudit.llm.group import collapsed, group
+from djaudit.llm.impact import impact
+from djaudit.llm.impact import render as render_impact
+from djaudit.llm.provider import NullProvider, Provider
+from djaudit.llm.suggest import render, suggest
+
+# Imported by name rather than as a module: `djaudit.llm` re-exports a `triage`
+# function, which shadows the submodule of the same name.
+from djaudit.llm.triage import TriageRun, provenance_of, triage, verdicts_for
+from djaudit.llm.verify import Level, explain_rejection, verified
 from djaudit.models import Confidence, Family, Severity
+from djaudit.provenance import describe
 from djaudit.registry import all_rules
 from djaudit.reporters import OutputFormat, json_reporter, sarif, terminal
 
@@ -35,6 +55,16 @@ if TYPE_CHECKING:
 EXIT_OK = 0
 EXIT_FINDINGS = 1
 EXIT_ERROR = 2
+
+# A run with hundreds of corpus verdicts refuses hundreds of times, and the
+# refusals are all the same sentence; showing every one buries the diffs above.
+_REFUSALS_SHOWN = 5
+
+_VERDICT_STYLES = {
+    Verdict.TRUE_POSITIVE: "bold red",
+    Verdict.ABSTAINED: "yellow",
+    Verdict.ACCEPTED_RISK: "dim",
+}
 
 app = typer.Typer(
     name="djaudit",
@@ -282,6 +312,425 @@ def evaluate_command(
     if not report.passed:
         raise typer.Exit(EXIT_FINDINGS)
     console.print("[green]evaluation passed[/green]")
+
+
+@app.command(name="triage")
+def triage_command(
+    path: Annotated[
+        Path,
+        typer.Argument(help="Path to the Django project to audit."),
+    ] = Path(),
+    min_severity: Annotated[
+        Severity,
+        typer.Option("--min-severity", help="Hide findings below this severity."),
+    ] = Severity.LOW,
+    min_confidence: Annotated[
+        Confidence,
+        typer.Option("--min-confidence", help="Hide findings below this confidence."),
+    ] = Confidence.FIRM,
+    enable_llm: Annotated[
+        bool | None,
+        typer.Option(
+            "--llm/--no-llm",
+            help="Consult a configured model on findings the corpus does not settle. "
+            "Off unless both this and [tool.djaudit.llm] enable it.",
+        ),
+    ] = None,
+    grouped: Annotated[
+        bool,
+        typer.Option(
+            "--group",
+            help="Collapse findings of one rule in one file into a single theme.",
+        ),
+    ] = False,
+    show_suggestions: Annotated[
+        bool,
+        typer.Option(
+            "--suggest",
+            help="Also print suppression comments for findings judged an accepted risk. "
+            "Nothing is written; the diffs are for you to apply.",
+        ),
+    ] = False,
+    output_format: Annotated[
+        OutputFormat,
+        typer.Option(
+            "--format",
+            help="terminal for review; json or sarif to carry the verdicts and "
+            "their provenance to another tool.",
+        ),
+    ] = OutputFormat.TERMINAL,
+) -> None:
+    """Rank findings by whether they are worth a reviewer's time.
+
+    Findings under a rule that three real Django projects judged unanimously are
+    settled from that record. Everything else is put to a model if one is
+    configured, and reported as undecided if not -- which is the default, and a
+    useful answer: it is the shortlist of findings that actually need a human.
+    """
+    if not path.is_dir():
+        _fail(f"path is not a directory: {path}")
+
+    result = engine.run(path, min_severity=min_severity, min_confidence=min_confidence)
+
+    try:
+        config = llm_config.resolve(path / "pyproject.toml", enable=enable_llm)
+    except llm_config.ConfigError as exc:
+        _fail(str(exc))
+        return
+
+    provider = _build_provider(config)
+    run = triage(result.findings, provider)
+
+    if output_format is not OutputFormat.TERMINAL:
+        # Every verdict carries where it came from, so a tool downstream can
+        # hold a model's opinion to a different standard than a rule's. The
+        # model is named only when one actually answered.
+        labels = verdicts_for(run, model=provider.name if run.consulted_a_model else "")
+        renderer = json_reporter.render if output_format is OutputFormat.JSON else sarif.render
+        sys.stdout.write(renderer(result, labels))
+        raise typer.Exit(EXIT_OK)
+
+    console = Console()
+    if grouped:
+        _print_themes(console, run, provider_name=provider.name)
+    else:
+        _print_triage(console, run, provider_name=provider.name)
+    if show_suggestions:
+        _print_suggestions(console, run, path)
+
+    if any(d.blocking for d in result.context.diagnostics):
+        Console(stderr=True).print(
+            "[bold red]error:[/bold red] analysis was incomplete; "
+            "this ranking does not cover the whole project"
+        )
+        raise typer.Exit(EXIT_ERROR)
+    raise typer.Exit(EXIT_OK)
+
+
+def _build_provider(config: llm_config.LLMConfig) -> Provider:
+    """Assemble the provider stack, which is a null one unless told otherwise.
+
+    The cache goes outermost so a repeat question never reaches the meter at
+    all -- `Metered` also refuses to charge for a cached answer, but not
+    consulting the budget is cheaper than consulting it and forgiving it, and
+    it leaves the cache able to tag each entry with its finding's fingerprint.
+
+    There is no branch here that reaches a third party. No such provider is
+    implemented, and this returns a declining one saying so, because a stack
+    that silently does nothing is indistinguishable from one that is broken.
+    """
+    allowed, reason = config.usable
+    if not allowed:
+        return NullProvider(reason)
+    unimplemented = NullProvider(f"provider {config.provider!r} is not implemented yet")
+    metered = Metered(
+        inner=unimplemented,
+        budget=Budget(max_tokens=config.max_tokens, max_calls=config.max_calls),
+    )
+    return Cached(inner=metered, cache=Cache(directory=config.cache_dir))
+
+
+def _print_triage(console: Console, run: TriageRun, *, provider_name: str) -> None:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("verdict")
+    table.add_column("source")
+    table.add_column("rule")
+    table.add_column("severity")
+    table.add_column("location")
+
+    for judgement in run.ranked:
+        finding = judgement.finding
+        table.add_row(
+            f"[{_VERDICT_STYLES[judgement.verdict]}]{judgement.verdict.value}[/]",
+            describe(provenance_of(judgement, model=provider_name)),
+            finding.rule_id,
+            finding.severity.value,
+            f"{finding.location.file}:{finding.location.line}",
+        )
+    console.print(table)
+
+    console.print(
+        f"{len(run.judgements)} findings · "
+        f"{run.counting(Verdict.TRUE_POSITIVE)} worth fixing · "
+        f"{run.counting(Verdict.ACCEPTED_RISK)} judged acceptable · "
+        f"{run.counting(Verdict.ABSTAINED)} undecided"
+    )
+    _print_provenance(console, run, provider_name=provider_name)
+
+
+def _print_provenance(console: Console, run: TriageRun, *, provider_name: str) -> None:
+    """Where the verdicts above came from. Shared, so no view can omit it.
+
+    The grouped view had its own footer for one commit's worth of drafting, and
+    a summary that loses "no model was consulted" is the one place this tool
+    could mislead someone badly.
+    """
+    if run.misbehaved:
+        console.print(
+            f"[bold red]warning:[/bold red] {run.misbehaved} repl(ies) from "
+            f"{provider_name} were refused for carrying fields nobody asked for. "
+            "Those findings are undecided, not judged."
+        )
+    console.print(
+        f"{run.skipped} settled from the recorded corpus, "
+        f"{run.asked} put to [bold]{provider_name}[/bold], "
+        f"{run.declined} unanswered"
+    )
+    if not run.consulted_a_model:
+        # Said plainly, because a table of verdicts looks equally authoritative
+        # either way and the undecided rows are the ones a human still owns.
+        console.print(
+            "[yellow]no model was consulted[/yellow]: every undecided finding above is "
+            "one this corpus cannot settle, and needs a person."
+        )
+
+
+def _print_themes(console: Console, run: TriageRun, *, provider_name: str) -> None:
+    """The triage table, one row per theme rather than one per finding."""
+    themes = group(run.ranked)
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("verdict")
+    table.add_column("source")
+    table.add_column("rule")
+    table.add_column("n", justify="right")
+    table.add_column("where")
+
+    for theme in themes:
+        verdict = theme.verdict
+        # A theme whose members disagree says so. Printing the majority would
+        # let the group overrule the one finding somebody judged differently.
+        label = verdict.value if verdict else "mixed"
+        style = _VERDICT_STYLES.get(verdict, "bold magenta") if verdict else "bold magenta"
+        table.add_row(
+            f"[{style}]{label}[/]",
+            theme.source.value if theme.source else "mixed",
+            theme.rule_id,
+            str(theme.count),
+            theme.where(),
+        )
+    console.print(table)
+
+    console.print(
+        f"{len(run.judgements)} findings in {len(themes)} themes "
+        f"({collapsed(themes)} fewer things to read)"
+    )
+    _print_provenance(console, run, provider_name=provider_name)
+
+
+def _print_suggestions(console: Console, run: TriageRun, root: Path) -> None:
+    """Print the suppressions this run would justify, and the ones it would not.
+
+    An offline run reaches here and prints nothing but refusals, which is the
+    designed outcome: the corpus prior ranks findings, and ranking is reversible
+    in a way that a comment committed to somebody's source is not.
+    """
+    proposals, refused = suggest(run, root)
+
+    console.print()
+    if proposals:
+        console.print("[bold]suggested suppressions[/bold] (not applied):")
+        console.print(Syntax(render(proposals), "diff", theme="ansi_dark"))
+    else:
+        console.print("[bold]no suppression is justified by this run[/bold]")
+
+    if refused:
+        # The refusals are the point when nothing is proposed, and worth seeing
+        # even when something is: they say which findings stay a human's problem.
+        console.print(f"[dim]{len(refused)} not offered:[/dim]")
+        for reason in refused[:_REFUSALS_SHOWN]:
+            console.print(f"  [dim]- {reason}[/dim]")
+        if len(refused) > _REFUSALS_SHOWN:
+            console.print(f"  [dim]... and {len(refused) - _REFUSALS_SHOWN} more[/dim]")
+
+
+@app.command(name="explain")
+def explain_command(
+    fingerprint: Annotated[
+        str,
+        typer.Argument(help="The finding's fingerprint, or enough of its start to be unique."),
+    ],
+    path: Annotated[
+        Path,
+        typer.Argument(help="Path to the Django project the finding came from."),
+    ] = Path(),
+    min_confidence: Annotated[
+        Confidence,
+        typer.Option("--min-confidence", help="Must match the run the fingerprint came from."),
+    ] = Confidence.FIRM,
+    show_impact: Annotated[
+        bool,
+        typer.Option(
+            "--impact",
+            help="Add who this affects, what it costs, how widespread it is, "
+            "and when it does not apply -- for a reviewer who does not write Django.",
+        ),
+    ] = False,
+) -> None:
+    """Explain one finding in terms of the code it was found in.
+
+    No model is consulted and none is needed: every finding already carries its
+    own evidence, rationale, remediation and references. This assembles them,
+    adds what else in the file is wrong for the same reason, and stops.
+
+    It also never reads the project's source. The finding's snippet is already
+    masked where a rule found a secret, and re-reading the line to show more
+    context would print that secret to your terminal.
+    """
+    if not path.is_dir():
+        _fail(f"path is not a directory: {path}")
+
+    result = engine.run(path, min_confidence=min_confidence)
+    try:
+        finding = find(result.findings, fingerprint)
+    except FingerprintError as exc:
+        _fail(str(exc))
+        return
+
+    console = Console()
+    console.print(render_explanation(explain(finding, result.findings)), highlight=False)
+    if show_impact:
+        console.print()
+        console.print(render_impact(impact(finding, result.findings)), highlight=False)
+
+
+@app.command(name="fix")
+def fix_command(
+    path: Annotated[
+        Path,
+        typer.Argument(help="Path to the Django project to propose changes for."),
+    ] = Path(),
+    min_confidence: Annotated[
+        Confidence,
+        typer.Option("--min-confidence", help="Findings below this are not considered."),
+    ] = Confidence.FIRM,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--no-dry-run",
+            help="Print the patch instead of writing it. Writing is not implemented yet, "
+            "so --no-dry-run is refused rather than silently ignored.",
+        ),
+    ] = True,
+    show_refusals: Annotated[
+        bool,
+        typer.Option("--refusals", help="List every finding no fix was offered for, and why."),
+    ] = False,
+    check: Annotated[
+        bool,
+        typer.Option(
+            "--verify",
+            help="Apply each patch to a throwaway copy and re-run djaudit against it, "
+            "dropping any that fails. Your own project is never written to.",
+        ),
+    ] = False,
+    suite: Annotated[
+        str | None,
+        typer.Option(
+            "--test-command",
+            help="Also run this command in the copy and drop patches that make it fail, "
+            "e.g. 'pytest -q'. Implies --verify. Never guessed: naming it is how you "
+            "accept that djaudit will execute your project.",
+        ),
+    ] = None,
+) -> None:
+    """Propose changes for the findings whose fix the rule already decided.
+
+    Most findings do not get one. A value that depends on your hostnames, your
+    front-end origins or your key management is a decision, and this writes
+    only what its own rule names -- checked in tests against each rule's own
+    remediation text, so the two cannot drift apart.
+
+    Nothing is written to disk. Pipe the output to `git apply` when you agree
+    with it, and read the "confirm first" section before you do.
+    """
+    if not path.is_dir():
+        _fail(f"path is not a directory: {path}")
+    if not dry_run:
+        _fail(
+            "--no-dry-run is not implemented: this proposes patches, it does not apply them. "
+            "Pipe the output to `git apply` once you have read it."
+        )
+
+    result = engine.run(path, min_confidence=min_confidence)
+    proposed, refused = fixes(result, path)
+    console = Console()
+
+    level: Level | None = None
+    if proposed and (check or suite):
+        report = verified(proposed, path, result.findings, min_confidence, suite)
+        for rejection in report.rejected:
+            for dropped in rejection.fixes:
+                console.print(
+                    f"[red]dropped[/red] {dropped.finding.rule_id} "
+                    f"{dropped.finding.location.file}:{dropped.finding.location.line} "
+                    f"— {explain_rejection(rejection)}"
+                )
+        proposed = report.accepted
+        level = report.confidence
+        if proposed:
+            console.print()
+
+    if not proposed:
+        console.print("[dim]No finding in this project has a fix its rule decided.[/dim]")
+        _print_refusals(console, refused, show_refusals)
+        return
+
+    ready = [f for f in proposed if f.ready]
+    conditional = [f for f in proposed if not f.ready]
+
+    if ready:
+        console.print(f"[bold]{len(ready)} change(s) ready to apply[/bold]")
+        console.print(_verification_note(level, suite), highlight=False)
+        console.print()
+        console.print(Syntax(patch(ready), "diff", theme="ansi_dark", background_color="default"))
+
+    if conditional:
+        console.print(f"\n[bold]{len(conditional)} change(s) to confirm first[/bold]")
+        for fix in conditional:
+            console.print(f"\n[yellow]{fix.finding.rule_id}[/yellow] — only if {fix.confirm}")
+            console.print(Syntax(fix.patch, "diff", theme="ansi_dark", background_color="default"))
+
+    _print_refusals(console, refused, show_refusals)
+
+
+def _verification_note(level: Level | None, suite: str | None) -> str:
+    """Say exactly what was established, so nothing overstates itself.
+
+    `None` means verification never ran, which is not the same as running and
+    establishing the weaker claim. Conflating them printed "Verified statically
+    only" over a patch nothing had checked.
+    """
+    if level is None:
+        return "[dim]Not verified. Pass --verify to check these against a throwaway copy.[/dim]"
+    if level is Level.TESTED:
+        return f"[dim]Verified: applied to a copy, djaudit re-run, and `{suite}` passed.[/dim]"
+    if level is Level.STATIC:
+        return (
+            "[dim]Verified statically only: the patch applies, the result parses, the "
+            "finding is gone and no new one appeared. Whether the application still "
+            "works is not established — pass --test-command to check that.[/dim]"
+        )
+    return "[dim]Not verified. Re-run with --verify to check these against a copy.[/dim]"
+
+
+def _print_refusals(console: Console, refused: Sequence[Refusal], show_all: bool) -> None:
+    """Name what was declined. A silent skip reads as 'nothing to do here'."""
+    if not refused:
+        return
+    if not show_all:
+        console.print(
+            f"\n[dim]{len(refused)} finding(s) have no automatic fix. "
+            "Re-run with --refusals to see why.[/dim]"
+        )
+        return
+    console.print(f"\n[bold]{len(refused)} finding(s) with no automatic fix[/bold]")
+    for refusal in refused:
+        location = refusal.finding.location
+        console.print(
+            f"  [dim]{refusal.finding.rule_id}  {location.file}:{location.line}[/dim] "
+            f"— {refusal.reason}"
+        )
 
 
 @app.command()
