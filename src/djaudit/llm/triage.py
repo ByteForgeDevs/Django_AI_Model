@@ -67,6 +67,8 @@ MINIMUM_OBSERVATIONS = 5
 # deliberately absent: too little to skip a question over.
 CORPUS_PRIOR: dict[str, tuple[Verdict, int]] = {
     "DJA-010": (Verdict.ACCEPTED_RISK, 15),
+    "DJM-002": (Verdict.ACCEPTED_RISK, 7),
+    "DJM-003": (Verdict.ACCEPTED_RISK, 5),
     "DJP-001": (Verdict.TRUE_POSITIVE, 46),
     "DJP-002": (Verdict.TRUE_POSITIVE, 10),
     "DJP-007": (Verdict.TRUE_POSITIVE, 31),

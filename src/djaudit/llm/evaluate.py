@@ -256,12 +256,21 @@ def held_out_by_rule(findings: Sequence[ReviewedFinding]) -> Score:
 
     The honest version of the baseline above, and the difference between them
     is large enough to matter: fitted on its own test set the rule lookup
-    reaches 84.3% on accepted risks, and held out it reaches 51.0%. The first
+    reaches 87.3% on accepted risks, and held out it reaches 52.4%. The first
     number is memorisation being graded on its own homework.
 
     Each target is scored by a table built from the other two, and the three
-    results are pooled rather than averaged, so a target with 141 findings
-    weighs more than one with 33.
+    results are pooled rather than averaged, so a target with 147 findings
+    weighs more than one with 34.
+
+    A rule that only ever fires on one target is invisible to this scheme by
+    construction: it is in the training set exactly for the folds that have
+    none of its findings to score, and absent from the one that scores all of
+    them. Because ``ByRule`` answers ``TRUE_POSITIVE`` for a rule it has not
+    seen, such a rule does not merely go unscored -- every one of its findings
+    is confidently wrong. That is not a flaw in the baseline, it is the cost of
+    a corpus of three, and it is why this number falls when a single-target
+    rule lands.
     """
     pooled = Score.empty("by-rule (held out)")
     for held in sorted({f.target for f in findings}):
@@ -277,15 +286,15 @@ def held_out_by_rule(findings: Sequence[ReviewedFinding]) -> Score:
 def contested_rules(findings: Sequence[ReviewedFinding]) -> frozenset[str]:
     """Rules whose findings did not all get the same verdict.
 
-    The corpus says 22 of 29 rules are unanimous: every finding that rule
+    The corpus says 24 of 31 rules are unanimous: every finding that rule
     produced was judged the same way. For those, the rule id already *is* the
     verdict, and asking a model can only introduce a disagreement with a human
     who was right.
 
     So this is the set worth spending a call on -- and the measurement that
     makes the triage command cheap, because it is the difference between asking
-    about 245 findings and asking about the ones where the answer was ever in
-    doubt.
+    about every reviewed finding and asking about the ones where the answer was
+    ever in doubt.
     """
     verdicts: dict[str, set[Verdict]] = {}
     for finding in findings:

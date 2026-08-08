@@ -17,6 +17,11 @@ if TYPE_CHECKING:
     from djaudit.dataflow.querysets import QuerysetValue
     from djaudit.dataflow.scopes import Scope
     from djaudit.graph.nodes import ModelGraph
+    from djaudit.live.checks import Report
+    from djaudit.live.checks import Unknown as ChecksUnknown
+    from djaudit.live.context import LiveContext
+    from djaudit.migrations.graph import MigrationGraph
+    from djaudit.migrations.state import Applied
 
 MAX_SNIPPET_LENGTH = 240
 
@@ -100,6 +105,39 @@ class ProjectContext:
     live: bool = False
     """Whether the target's virtualenv is available for live-tier rules."""
 
+    live_context: LiveContext | None = None
+    """What the target's own Django reported, when the live tier ran.
+
+    Carried rather than flattened into the fields above because a live rule
+    needs the *interpreter* to run anything, and re-deriving it would let a
+    rule execute an environment other than the one that was disclosed and
+    consented to.
+    """
+
+    deployment_report: Report | ChecksUnknown | None = None
+    """What `manage.py check --deploy` said, when the live tier ran it.
+
+    Imported only under `TYPE_CHECKING`: a static audit must not load
+    `djaudit.live`, and `tests/test_import_cost.py` fails if it starts to.
+    """
+
+    deployment_gaps: frozenset[str] = frozenset()
+    """Django deployment checks that fired with no rule of ours to receive them.
+
+    Filled by the engine after `manage.py check --deploy` runs, and read by
+    `DJS-028`, which reports our own recall gap. Empty on a static run, which
+    is why `DJS-028` is a live rule: an empty set here means "we did not ask",
+    not "there is nothing missing".
+    """
+
+    live_problem: str | None = None
+    """Why the live tier is unavailable, when it was asked for and did not start.
+
+    "Unavailable" is not an action. "no virtualenv was found in the target" and
+    "the target's Django did not start: ImproperlyConfigured" send the reader to
+    two different places, so the reason travels with the flag.
+    """
+
     _trees: dict[Path, ast.Module | None] = field(default_factory=dict, repr=False)
     _source: dict[Path, str | None] = field(default_factory=dict, repr=False)
     _lines: dict[Path, list[str]] = field(default_factory=dict, repr=False)
@@ -107,6 +145,8 @@ class ProjectContext:
     _api_surface: ApiSurface | None = field(default=None, repr=False)
     _loops: tuple[LoopSite, ...] | None = field(default=None, repr=False)
     _modules: dict[str, Path] | None = field(default=None, repr=False)
+    _migration_graph: MigrationGraph | None = field(default=None, repr=False)
+    _migration_history: tuple[Applied, ...] | None = field(default=None, repr=False)
     _scopes: dict[Path, Scope | None] = field(default_factory=dict, repr=False)
     _def_use: dict[int, DefUse] = field(default_factory=dict, repr=False)
     _tracked: dict[int, dict[int, QuerysetValue]] = field(default_factory=dict, repr=False)
@@ -142,6 +182,35 @@ class ProjectContext:
 
             self._api_surface = build_api_surface(self, self.model_graph)
         return self._api_surface
+
+    @property
+    def migration_graph(self) -> MigrationGraph:
+        """Every migration in the project, parsed and linked once per run.
+
+        Lazy like the model graph, and for a sharper reason: parsing 875
+        migrations is wasted work for the many runs that never ask a `DJM`
+        question, and migrations are the one input a project can have thousands
+        of without anybody noticing.
+        """
+        if self._migration_graph is None:
+            from djaudit.migrations.graph import build_migration_graph  # noqa: PLC0415  (cycle)
+
+            self._migration_graph = build_migration_graph(self)
+        return self._migration_graph
+
+    @property
+    def migration_history(self) -> tuple[Applied, ...]:
+        """Each operation in dependency order, with the state it acted against.
+
+        Separate from `migration_graph` because replay costs materially more
+        than parsing, and a rule that only wants to know which migrations exist
+        should not pay for the state machine.
+        """
+        if self._migration_history is None:
+            from djaudit.migrations.state import replay  # noqa: PLC0415  (cycle)
+
+            self._migration_history = tuple(replay(self.migration_graph))
+        return self._migration_history
 
     @property
     def loops(self) -> tuple[LoopSite, ...]:

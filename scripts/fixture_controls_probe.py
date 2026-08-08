@@ -238,9 +238,85 @@ INJECTION_UNFIXES: tuple[Unfix, ...] = (
     ),
 )
 
-FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...]], ...] = (
-    ("orm_project", ORM, ORM_UNFIXES),
-    ("injection_project", INJECTION, INJECTION_UNFIXES),
+MIGRATION = ROOT / "tests/fixtures/migration_project"
+MCONTROL = MIGRATION / "ledger/migrations/0002_entry_attempts.py"
+
+MIGRATION_UNFIXES: tuple[Unfix, ...] = (
+    (
+        "DJM-009",
+        "validate the constraint immediately instead of adding it NOT VALID",
+        MCONTROL,
+        'AddConstraintNotValid(\n            model_name="entry",',
+        'migrations.AddConstraint(\n            model_name="entry",',
+    ),
+    (
+        "DJM-001",
+        "drop the default from the added non-nullable column",
+        MCONTROL,
+        "field=models.IntegerField(default=0),",
+        "field=models.IntegerField(),",
+    ),
+    (
+        "DJM-002",
+        "narrow the altered column instead of widening it",
+        MCONTROL,
+        "field=models.CharField(db_index=True, max_length=128),",
+        "field=models.CharField(db_index=True, max_length=32),",
+    ),
+    (
+        "DJM-003",
+        "build the index in the transaction instead of concurrently",
+        MCONTROL,
+        "AddIndexConcurrently(",
+        "migrations.AddIndex(",
+    ),
+    (
+        "DJM-004",
+        "drop the column outright instead of only its database half",
+        MCONTROL,
+        "migrations.SeparateDatabaseAndState(\n"
+        "            database_operations=[migrations.RemoveField("
+        'model_name="entry", name="posted")],\n'
+        "        ),",
+        'migrations.RemoveField(model_name="entry", name="posted"),',
+    ),
+    (
+        "DJM-005",
+        "rename the column without pinning it back with db_column",
+        MCONTROL,
+        'field=models.DateTimeField(auto_now_add=True, db_column="created"),',
+        "field=models.DateTimeField(auto_now_add=True),",
+    ),
+    (
+        "DJM-006",
+        "drop the reverse from the backfill beside the schema changes",
+        MCONTROL,
+        "            code=backfill_attempts,\n"
+        "            reverse_code=migrations.RunPython.noop,\n",
+        "            code=backfill_attempts,\n",
+    ),
+    (
+        "DJM-008",
+        "run the schema changes and the backfill in one transaction",
+        MCONTROL,
+        "\n    atomic = False\n",
+        "\n",
+    ),
+    (
+        "DJM-007",
+        "fetch the whole table instead of iterating it in chunks",
+        MCONTROL,
+        "attempts__isnull=True).iterator(chunk_size=500)",
+        "attempts__isnull=True)",
+    ),
+)
+
+FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...], str], ...] = (
+    ("orm_project", ORM, ORM_UNFIXES, "controls.py"),
+    ("injection_project", INJECTION, INJECTION_UNFIXES, "controls.py"),
+    # A migration cannot be called controls.py, so this fixture keeps its
+    # controls in a whole app instead of a single file.
+    ("migration_project", MIGRATION, MIGRATION_UNFIXES, "ledger/"),
 )
 
 
@@ -252,13 +328,13 @@ def findings(fixture: Path) -> list[tuple[str, str, int]]:
     return [(f.rule_id, f.location.file, f.location.line) for f in result.findings]
 
 
-def probe(name: str, fixture: Path, unfixes: tuple[Unfix, ...]) -> list[str]:
+def probe(name: str, fixture: Path, unfixes: tuple[Unfix, ...], control: str) -> list[str]:
     """Un-fix every control in one fixture. Returns the failures."""
     baseline = findings(fixture)
     base_keys = set(baseline)
-    leaked = [f for f in baseline if "controls.py" in f[1]]
+    leaked = [f for f in baseline if control in f[1]]
     assert not leaked, leaked
-    print(f"{name}: {len(baseline)} findings, none of them in controls.py")
+    print(f"{name}: {len(baseline)} findings, none of them in {control}")
 
     failures: list[str] = []
     reached: list[tuple[str, str, int]] = []
@@ -290,7 +366,7 @@ def probe(name: str, fixture: Path, unfixes: tuple[Unfix, ...]) -> list[str]:
         if e.get("line") is not None
     }
     for rule_id, file, line in sorted(reached):
-        if file.endswith("controls.py"):
+        if control in file:
             continue
         aimed = pinned.get((rule_id, file))
         if aimed == line:
@@ -314,9 +390,9 @@ def probe(name: str, fixture: Path, unfixes: tuple[Unfix, ...]) -> list[str]:
 def main() -> int:
     failures: list[str] = []
     total = 0
-    for name, fixture, unfixes in FIXTURES:
+    for name, fixture, unfixes, control in FIXTURES:
         total += len(unfixes)
-        failures.extend(probe(name, fixture, unfixes))
+        failures.extend(probe(name, fixture, unfixes, control))
     for failure in failures:
         print(failure)
     print(f"{total - len(failures)} of {total} controls proven load-bearing across all fixtures")

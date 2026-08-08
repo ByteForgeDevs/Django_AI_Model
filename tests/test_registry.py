@@ -69,11 +69,20 @@ class TestLookup:
 
     def test_select_by_family(self):
         assert select(families={Family.DJS})
-        assert select(families={Family.DJM}) == []
+        assert select(families={Family.DJM})
+        # DJX has no rules yet, so it is what an empty selection looks like.
+        assert select(families={Family.DJX}) == []
 
     def test_select_by_tier(self):
-        assert select(tiers={Tier.STATIC})
-        assert select(tiers={Tier.LIVE}) == []
+        """`select(tiers={Tier.LIVE}) == []` held here until `DJM-010` shipped,
+        and it was a fact about the catalogue wearing the clothes of a rule
+        about the filter. The filter's actual claim is that it partitions."""
+        static = select(tiers={Tier.STATIC})
+        live = select(tiers={Tier.LIVE})
+        assert static and live
+        assert all(r.meta.tier is Tier.STATIC for r in static)
+        assert all(r.meta.tier is Tier.LIVE for r in live)
+        assert len(static) + len(live) == len(select())
 
     def test_include_overrides_other_filters(self):
         chosen = select(families={Family.DJM}, include={"DJS-001"})

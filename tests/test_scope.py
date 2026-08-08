@@ -107,3 +107,31 @@ class TestApply:
         base = replace(finding("app/views.py"), properties={"model": "app.Book"})
         out = apply(base)
         assert out.properties == {"model": "app.Book", "scope": "production"}
+
+
+class TestTheMigrationFamilyIsExempt:
+    """`DJM` findings are about the migration, not merely located in one."""
+
+    def test_a_migration_rule_keeps_its_severity(self) -> None:
+        out = apply(
+            replace(finding("app/migrations/0002_x.py"), rule_id="DJM-001", family=Family.DJM)
+        )
+        assert out.severity is Severity.HIGH
+
+    def test_the_scope_is_still_recorded(self) -> None:
+        """Exempt from the demotion, not from saying where it lives."""
+        out = apply(
+            replace(finding("app/migrations/0002_x.py"), rule_id="DJM-001", family=Family.DJM)
+        )
+        assert out.properties["scope"] == "migrations"
+
+    def test_another_family_in_the_same_file_is_still_demoted(self) -> None:
+        """The contrast: identical path, and only the family differs."""
+        out = apply(finding("app/migrations/0002_x.py"))
+        assert out.severity is Severity.MEDIUM
+
+    def test_a_migration_rule_in_a_test_directory_is_still_exempt(self) -> None:
+        out = apply(
+            replace(finding("tests/app/migrations/0002_x.py"), rule_id="DJM-001", family=Family.DJM)
+        )
+        assert out.severity is Severity.HIGH

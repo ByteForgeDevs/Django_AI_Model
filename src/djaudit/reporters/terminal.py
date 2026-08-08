@@ -47,6 +47,13 @@ def _header(result: RunResult, console: Console) -> None:
         console.print(Text(f"  {diagnostic.detail}", style="yellow"))
         console.print()
 
+    if result.degraded:
+        heading, *lines = result.degraded.report()
+        console.print(Text(f"not checked: {heading}", style="bold yellow"))
+        for line in lines:
+            console.print(Text(f"  {line}", style="yellow"))
+        console.print()
+
 
 def _finding(finding: Finding, console: Console) -> None:
     severity_style = _SEVERITY_STYLE[finding.severity]

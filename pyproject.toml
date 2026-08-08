@@ -42,6 +42,13 @@ dev = [
     # so the installed release decides which version those values are true of.
     # 3.17 is what the support matrix in docs/PROJECT_PLAN.md claims.
     "djangorestframework>=3.17",
+    # Two connections at once, which `psql` cannot give us. The lock
+    # classification's real claim is not which mode PostgreSQL takes but what
+    # that mode blocks, and the only honest way to check "blocks writes" is to
+    # hold the lock on one connection and attempt a write on another. Doing
+    # that with subprocesses means sleeping and guessing, which is how a
+    # concurrency test becomes flaky by construction.
+    "psycopg[binary]>=3.2",
 ]
 
 [tool.hatch.build.targets.wheel]

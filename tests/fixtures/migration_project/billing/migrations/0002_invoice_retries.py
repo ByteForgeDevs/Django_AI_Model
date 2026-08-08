@@ -1,0 +1,132 @@
+"""Nine planted defects, all in the leaf of `billing`'s history.
+
+`DJM-009` is the last: the `AddConstraint` at the end adds a `CheckConstraint`
+to a table `0001_initial` already populated, so Postgres reads every existing
+row to prove it holds, under `ACCESS EXCLUSIVE` for the whole scan. Its twin in
+`ledger` adds the same constraint with `AddConstraintNotValid` and validates it
+in a separate migration, which is the only route Django offers -- and offers
+for check constraints alone, since `AddConstraintNotValid` raises `TypeError`
+on anything else.
+
+
+`retries` is an `IntegerField` with no `default` and `null` left at False, so
+`ADD COLUMN ... NOT NULL` has no value for the rows `0001_initial` created.
+Postgres rejects the statement and the migration aborts. This is the leaf of
+`billing`'s history, which is where a migration being written now lands, so it
+is in scope for the static tier.
+
+Hand-written on purpose: `makemigrations` prompts for a one-off default and so
+cannot produce this, which is exactly why the rule has to catch it here.
+
+`DJM-002` is the second: narrowing `reference` from `max_length=64` to 32 makes
+Postgres re-verify every existing value, which rewrites the table under
+`ACCESS EXCLUSIVE`. Its twin in `ledger` widens the same column instead, which
+Postgres has skipped rewriting since 9.2 -- the pair differs only in the
+direction of the change.
+`DJM-003` is the third: `AddIndex` on `invoice`, a table `0001_initial`
+created and filled, so Postgres builds the index under a `SHARE` lock and
+blocks every write until it finishes. Its twin in `ledger` uses
+`AddIndexConcurrently` on a non-atomic migration, which is the same index built
+without blocking anything.
+
+`DJM-004` is the fourth: dropping `settled` in one step. Django names every
+concrete column in its `SELECT`, so for the length of a rolling deploy every
+query the previous release makes against `invoice` fails -- not only those
+reading `settled`. Its twin in `ledger` drops the equivalent column through the
+`SeparateDatabaseAndState` half that says the state change already shipped, and
+the two are otherwise the same operation on the same kind of column.
+
+`DJM-005` is the fifth: renaming `created` to `opened`, which moves the column
+the previous release still names in every `SELECT` it makes. Its twin in
+`ledger` renames the same column and then pins it with `db_column`, so the
+attribute moves and the column does not.
+
+`DJM-006` is the sixth: the `RunPython` below has no reverse, so unapplying
+this migration raises `IrreversibleError` in `Migration.unapply`'s first phase
+-- before any operation runs. Every schema operation above it is reversible on
+its own and none of them gets the chance, so a failed deploy has no scripted
+way back. Its twin in `ledger` is the same backfill with
+`reverse_code=migrations.RunPython.noop`, which is honest here rather than a
+formality: unapplying drops the column the backfill wrote, so undoing the data
+pass really is a no-op.
+
+`DJM-008` is the seventh, and it needed nothing added: this migration already
+makes five schema changes and then runs a backfill, all in one transaction,
+because `atomic` is left at its default. Postgres holds a lock until that
+transaction ends, so the `ACCESS EXCLUSIVE` taken by the first `AddField` is
+still held while the backfill runs, and for however long it runs. Its twin in
+`ledger` carries `atomic = False`, so each operation commits and releases on
+its own.
+
+`DJM-007` is the eighth: `recount_retries` loops over every matching row, so
+the queryset is evaluated into a list before the first iteration and the
+migration's peak memory is the size of the table. Note what it is *not*: it is
+not an N+1 write, because it accumulates and issues one `bulk_update`. That is
+`DJP-007`'s remediation applied in full, and it makes the memory worse -- the
+rows are held twice. A fixture that also saved in the loop would have been
+reported by both rules and would not have shown that this one has its own
+claim. Its twin in `ledger` adds `.iterator(chunk_size=500)` and flushes each
+chunk, which is the combined fix.
+"""
+
+from django.db import migrations, models
+
+
+def backfill_retries(apps, schema_editor):
+    """Fill the column this migration adds, for the rows `0001_initial` created."""
+    Invoice = apps.get_model("billing", "Invoice")
+    Invoice.objects.filter(retries__isnull=True).update(retries=0)
+
+
+def recount_retries(apps, schema_editor):
+    """Reset the counter for every row, one object at a time."""
+    Invoice = apps.get_model("billing", "Invoice")
+    updated = []
+    for invoice in Invoice.objects.filter(retries__isnull=True):
+        invoice.retries = 0
+        updated.append(invoice)
+    Invoice.objects.bulk_update(updated, ["retries"])
+
+
+class Migration(migrations.Migration):
+    dependencies = [("billing", "0001_initial")]
+
+    operations = [
+        migrations.AddField(
+            model_name="invoice",
+            name="retries",
+            field=models.IntegerField(),
+        ),
+        migrations.AlterField(
+            model_name="invoice",
+            name="reference",
+            field=models.CharField(db_index=True, max_length=32),
+        ),
+        migrations.AddIndex(
+            model_name="invoice",
+            index=models.Index(fields=["reference"], name="billing_invoice_ref_idx"),
+        ),
+        migrations.RemoveField(
+            model_name="invoice",
+            name="settled",
+        ),
+        migrations.RenameField(
+            model_name="invoice",
+            old_name="created",
+            new_name="opened",
+        ),
+        migrations.RunPython(
+            code=backfill_retries,
+        ),
+        migrations.RunPython(
+            code=recount_retries,
+            reverse_code=migrations.RunPython.noop,
+        ),
+        migrations.AddConstraint(
+            model_name="invoice",
+            constraint=models.CheckConstraint(
+                condition=models.Q(retries__gte=0),
+                name="billing_invoice_retries_nonneg",
+            ),
+        ),
+    ]

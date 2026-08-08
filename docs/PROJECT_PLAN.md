@@ -5183,48 +5183,1380 @@ cost is real, so it stays opt-in, sandboxed, and time-limited.
 ### Step 4.1 — Live tier runner
 
 - **4.1.1** — Environment detection: locate the target's interpreter (`.venv`, `poetry`, `uv`, `pipenv`, system).
+  **Done** — `src/djaudit/live/interpreter.py`, 49 tests, mutation **79/79**.
+  Nothing is executed and nothing is imported; detection reads directory
+  entries and one text file per candidate, so it is safe against a repository
+  nobody has vetted.
+
+  **The environment is identified by `pyvenv.cfg`, not by the directory name**,
+  because that file is what PEP 405 defines a virtual environment as. Its three
+  creators were told apart by *making one with each* rather than by reading
+  their documentation: stdlib `venv` writes `command`, `virtualenv` writes
+  `virtualenv = 20.35.4`, `uv` writes `uv = 0.12.1`, and all three write `home`.
+  stdlib `venv` also spells the version `version` where the other two spell it
+  `version_info`.
+
+  **The load-bearing behaviour is a refusal.** djaudit runs from a virtualenv
+  of its own, so `$VIRTUAL_ENV` is normally set and normally points at *ours*.
+  Following it would run the target's `manage.py` against our Django, our
+  settings and our packages, and every resulting finding would look completely
+  ordinary — a wrong answer that does not look like a failure. `$VIRTUAL_ENV`
+  is therefore believed only when it points inside the target, and any
+  candidate resolving to `sys.prefix` is refused outright. Verified against all
+  three corpora at once: with djaudit's own `$VIRTUAL_ENV` active, detection
+  declines on healthchecks, netbox and pretix and says why.
+
+  **Environments outside the project are recorded as declines, not guesses.**
+  Poetry and pipenv key their cache directories by a hash of the project path;
+  globbing the name half and taking a single match would silently attach to a
+  different checkout of the same project, which is the mistake the module
+  exists to prevent. `.tox` is declined because it holds one environment per
+  test factor and choosing between them would choose a Python version at
+  random. Each decline names the command that would answer it properly, which
+  needs the runner from 4.1.2.
+
+  Three mutation survivors were unreachable code rather than untested code:
+  `Path.resolve` defaults to `strict=False`, which was *measured* to return the
+  path unchanged for both a missing directory and a symlink loop rather than
+  raising, so two `except OSError` handlers could never run and were removed.
+  Two more were `frozen=True, slots=True` on value holders, which became
+  `NamedTuple`s so immutability is a property of the type rather than two
+  keyword arguments a reader has to trust were passed.
 - **4.1.2** — Subprocess runner with hard timeout, output capture, and no inherited secrets.
+  **Done** — `src/djaudit/live/runner.py`, 55 tests, mutation **71/71**.
+  Every test runs a real process: this module exists for what happens when a
+  subprocess misbehaves, and a mocked `Popen` would only prove we can mock
+  `Popen`. It is exercised against `self_check()`, djaudit's own interpreter
+  shaped as an `Interpreter`, because 4.1.1 refuses ours as a *target* by
+  design and yet the runner has to be pointed at something that really exists.
+
+  **The hard timeout is enforced on the process group, not the process.**
+  `subprocess.run`'s `timeout` kills only what it started. `manage.py` spawns
+  children, and a child that outlives its parent keeps our pipes open, so the
+  read after the kill blocks on a pipe nobody will ever close — a timeout that
+  hangs. Measured rather than argued: a target whose grandchild sleeps for 120
+  seconds returns in 3.0s under a 3s budget, and the grandchild is confirmed
+  dead afterwards.
+
+  **A guard was added after the mutation harness killed itself, its parent and
+  the shell that started it.** The mutant blanked `"posix"` in
+  `start_new_session=os.name == "posix"`, which puts the child in *our* process
+  group; `_terminate` then sent `SIGKILL` to that group. The run died with no
+  output, leaving a mutant in the working tree, and a second run mutated the
+  mutant. The fix is `_in_its_own_group`, which asks the kernel whether the
+  child's group is ours rather than re-deriving `os.name` a second time in a
+  second function. The two expressions agreed only by coincidence, and the cost
+  of them ever disagreeing is a developer's terminal.
+
+  **A test that asserted an absence was passing against a broken runner.** The
+  orphan check scanned `ps -eo args` for a marker planted in the grandchild's
+  command line, and `ps` truncates that column to the terminal width, so the
+  marker sat past the cut and was never found — the assertion held whether or
+  not anything had been killed. It now has the grandchild record its own pid
+  and asks the kernel with signal 0, and there is a control test proving the
+  liveness check can see a live process. Verified by running the corrected test
+  against a deliberately broken runner and watching it fail.
+
+  **The environment is built from nothing rather than copied and filtered.** A
+  CI job's environment holds deployment tokens and cloud keys, and handing them
+  to a subprocess that runs arbitrary code out of the repository under audit
+  would make djaudit a credential exfiltration path — a supply-chain
+  vulnerability introduced by a security tool. Only `PASSTHROUGH` crosses, a
+  caller may not set `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP` or
+  `DJANGO_SETTINGS_MODULE`, and `-I` means the interpreter would disregard them
+  even if one arrived by a route this module did not anticipate.
+
+  Two rounds of survivors were tests that built their expectation from the
+  constant they were checking and so could not notice the constant being wrong;
+  `PASSTHROUGH` and `REFUSED` are now asserted literally. One was `{timeout:g}`
+  tested with `timeout=1`, which formats identically with and without the `g` —
+  it takes `1.0` to tell them apart. The last two were the `os.name != "posix"`
+  guard, unreachable on this platform and reached deliberately by a test that
+  fakes `nt`, because on Windows `os.getpgid` does not exist at all.
+
+  **Corrected while building 4.1.3: the interpreter flags were wrong, and so
+  were two of the properties above.** The runner shipped with `-I`, described
+  as isolation we wanted anyway. `-I` also implies `-P`, which stops Python
+  prepending the script's directory to `sys.path`, so `python -I manage.py
+  check` dies with `ModuleNotFoundError` on the project's own settings package.
+  Every Django project imports its settings that way, which made the runner
+  unable to run the one thing the live tier exists to run. It is now `-E -s`,
+  which keeps exactly what was wanted — `PYTHON*` variables ignored, user site
+  dropped — and gives up only the part that was breaking it.
+
+  Making the project importable then broke the bytecode test, which had been
+  passing because the import could not resolve at all rather than because
+  anything was suppressed. That exposed the second defect: `-E` ignores
+  `PYTHON*` variables including *ours*, so `PYTHONDONTWRITEBYTECODE` and
+  `PYTHONUNBUFFERED` were both being discarded. The audit had been writing
+  `__pycache__` into the target's tree, and every process killed by the timeout
+  had been losing its buffered output — the evidence a live rule needs most
+  when a command hangs partway through. `-B` and `-u` now say both in the only
+  form the interpreter will listen to; the environment keeps them for
+  `run_command` callers, which pass no flags. Each flag was verified by
+  removing it and watching the behaviour it protects fail. Mutation **74/74**.
 - **4.1.3** — `LiveContext`: Django version, resolved settings, database engine, migration state.
+
+  **Done.** `src/djaudit/live/context.py` asks the target's own Django what it
+  is, over a `manage.py` bootstrap, and returns `LiveContext | Unavailable`.
+  59 tests, mutation 76/76.
+
+  The mechanism changed once, on evidence. The obvious route is
+  `manage.py shell -v 0 -c`, and it worked on a scratch project — then failed
+  on the first test project with a Postgres `ENGINE`, because `shell` loads the
+  app registry *and* opens the database backend, so a project whose driver is
+  absent cannot report its own Django version. That is the CI state of all
+  three benchmark corpora, and not one of the ten questions needs a database.
+  So the script `runpy`s the project's own `manage.py` with
+  `execute_from_command_line` monkeypatched to raise: everything before that
+  call happens — `.env` reads, `os.environ.setdefault` — and nothing after it
+  does. Verified against both `manage.py` shapes and against Postgres settings
+  with no `psycopg` installed. A counterfactual confirms the interception is
+  load-bearing: removing it fails nine tests.
+
+  **`manage.py diffsettings` would have answered almost every question in one
+  call, and is never used.** Its output carries `SECRET_KEY`, database
+  passwords, hosts and users; answers become evidence, evidence is written into
+  SARIF, and SARIF is uploaded to code scanning and retained. `QUESTIONS` is
+  therefore an allowlist of ten named facts, mirroring `PASSTHROUGH` in the
+  runner, and `DATABASES` is reduced to `ENGINE` *on the target's side* so no
+  password ever crosses the pipe. A rule that must judge a secret asks for a
+  predicate, not the value.
+
+  Three defects the tests found, each worth recording:
+
+  - Django settings are lazy, so a broken settings module produced ten
+    per-question problems instead of one traceback. `settings.SETTINGS_MODULE`
+    is now touched once before the loop.
+  - A `print()` in `settings.py` lands on stdout in front of any payload even at
+    `-v 0`, so the sentinel frame is required rather than defensive. The
+    corollary is that the target can *forge* the frame, since its code runs
+    first; a forged reply of the wrong shape is now declined instead of
+    crashing on the first attribute access.
+  - `test_a_reply_of_the_wrong_shape_is_declined` called `inspect_target` on a
+    path that did not exist, so it took the missing-file branch and never
+    reached the guard it was named for — it passed with the guard deleted.
+    Replaced by tests that reach the branch through a real target, with a
+    control proving the forged frame is what got parsed.
+
+  Frame integrity is now asserted in both directions, because dropping the
+  `start < 0 or end < 0` guard is survivable in the general case and fatal in a
+  specific one: with `OPEN` present, `CLOSE` missing and a trailing newline, the
+  unguarded slice trims to valid JSON and a **truncated** reply reads as a whole
+  one. The runner truncates at `OUTPUT_LIMIT`, so that is an arrival, not a
+  hypothesis.
+
 - **4.1.4** — Graceful degradation — every live rule declares a static fallback, and absence of the live tier is reported, never silently ignored.
+
+  **Done.** `src/djaudit/degradation.py`, 35 tests, mutation **20/20**.
+
+  The failure mode is quiet: a run without the live tier emits fewer findings,
+  and fewer findings are indistinguishable from a cleaner codebase. So every
+  live rule that does not run is counted and named in `RunResult.degraded`,
+  printed by the terminal reporter under *not checked*, with the reason
+  separated into the three cases that need three different actions — consent
+  not given, environment unavailable, live ran. A test renders the reporter and
+  reads the output, because a degradation recorded in a field nobody prints is
+  the same silence.
+
+  `RuleMeta` gains `fallback` (a written sentence naming what is *lost*, not a
+  reassurance) and `fallback_rules` (static ids, verified to exist). The gate
+  landing before the first live rule is the point: the catalogue is all-static
+  today, so the compliance test passes over an empty set, and on its own is not
+  evidence. It is paired with a control that runs the same loop over a
+  synthesised live rule with no declaration and asserts it is rejected.
+  `covered_by` is filtered by what actually ran — telling a reader they are
+  covered by a fallback they also excluded is precisely the false reassurance
+  this module exists to prevent.
+
+  **A consent bypass found while building it.** `select()` documented that
+  `include` wins over every other filter, and it did — including the tier. So
+  `--rule DJM-010` would have executed the target's code on a run that never
+  asked for the live tier. Measured before it was believed, on a registered
+  live rule: with `tiers={STATIC}` the tier filter alone excluded it, and
+  adding `include` brought it back. A tier is a capability, not a preference,
+  so it is now applied *before* `include`; the override that was wanted — over
+  families, exclusions and thresholds — is intact and tested.
+
+  `degradation.py` sits outside `djaudit.live` deliberately. That package's
+  invariant is that every module in it executes target code and is written as
+  though the target were hostile; this one only reads rule metadata. Putting it
+  there made `import djaudit.engine` pull in the whole subprocess stack to
+  print a sentence — measured at **148ms, down to 66ms** once moved, with
+  `subprocess` no longer imported by an audit run at all.
+
 - **4.1.5** — `--live` / `--no-live` CLI flags, defaulting to off, with a clear consent message explaining that target code will be executed.
+
+  **Done.** `src/djaudit/live/consent.py`, 30 tests, mutation **32/32**. Step
+  4.1 is complete.
+
+  The live tier imports the audited project's settings module and everything
+  that module imports, on the auditing machine, with the caller's file system
+  and network. That is reasonable to do to your own project and unreasonable to
+  have happen by surprise, so `--live` is off, and passing it prints the
+  interpreter and the `manage.py` before anything of the target's runs. The
+  ordering is tested rather than asserted in a comment: the target writes a
+  marker file on import, and the announce hook records whether it already
+  exists — a disclosure that arrives after the code has run is a changelog.
+
+  **Consent is the flag, not a prompt.** This runs in CI more often than at a
+  terminal, and a tool that blocks on a question nobody can answer is a tool
+  that gets run with `yes |` in front of it. The notice goes to **stderr**, so
+  `--format json` still parses; that is a test, not an intention.
+
+  Verified against a real project with its own virtualenv: the header goes from
+  `Django version unknown` to `Django 6.1` — the *target's* Django, not
+  djaudit's 6.0.7 — which is the whole tier in one observable difference.
+
+  **A second defect of the same shape as 4.1.4's.** `--live` initially derived
+  the tier set from the flag, so a project with no virtualenv would still have
+  *selected* every live rule and run it with nothing live behind it. The tier
+  set now follows availability rather than the request: `engine.run` already
+  derived it from `ctx.live`, so the fix was to stop passing `tiers=` at all.
+  `ProjectContext.live_problem` carries *why* — "no virtualenv was found" and
+  "the target's Django did not start: ImproperlyConfigured" send the reader to
+  two different places, and 4.1.4's report now says which. A request that failed
+  is reported as requested-and-failed rather than never-made, because telling
+  someone to pass the flag they just passed is the wrong instruction.
+
+  A live tier that will not start is a warning and not an abandoned audit — the
+  static tier still has 76 rules — and the test that says so is paired with a
+  control proving exit 2 is still reachable for a project djaudit genuinely
+  cannot read.
+
 
 ### Step 4.2 — Migration graph
 
-- **4.2.1** — Parse migration files: `dependencies`, `operations`, `atomic`, `initial`.
-- **4.2.2** — Build the dependency graph; detect multiple leaf nodes and conflicts.
-- **4.2.3** — Classify operations: schema, data, index, constraint, `RunPython`, `RunSQL`, `SeparateDatabaseAndState`.
+**Ordering note.** Step 4.2 and Step 4.3 are taken before Step 4.1. The live
+tier exists in this phase to answer one question — what SQL does this migration
+emit — and 4.1.4 requires that *every live rule declares a static fallback*. A
+runner built first would have no caller, no fallback to declare, and its tests
+would be written against a hypothetical. The migration graph and the static
+rules come first; the live tier is then built for consumers that exist.
+
+- **4.2.1** — Parse migration files: `dependencies`, `operations`, `atomic`, `initial`. **Done** —
+  `src/djaudit/migrations/{nodes,parse}.py`, 44 tests, mutation **29/29**.
+  Parses **875 of 875** migrations across the three corpora with zero unreadable
+  attributes and zero unclassified Django operations; the single remaining
+  `UNKNOWN` is pretix's own `CleanHierarkeyDuplicates`, which is the correct
+  answer. `extract_fields` was split so migrations read `field=` through the
+  model graph's own field reader rather than a second, drifting copy — under
+  `field=` the name convention is dropped as unnecessary and wrong, recovering
+  55 of NetBox's 681 `AddField` operations (`TreeForeignKey`, `TaggableManager`).
+  Two real defects found by their own tests: a dataclass attribute named `field`
+  shadowed `dataclasses.field` so the module did not import at all, and
+  `_migration_class` preferred the resolved base over the name, handing back an
+  empty `ProjectMigration` helper instead of the class Django actually loads.
+- **4.2.2** — Build the dependency graph; detect multiple leaf nodes and conflicts. **Done** —
+  `src/djaudit/migrations/graph.py`, 23 tests, mutation **20/20**. Agrees with
+  Django on all three corpora: **29 apps, exactly one leaf each, zero conflicts,
+  zero ordering violations** in the plan. Two defects the corpus found rather
+  than the author, both about squashes:
+  - A dependency on a migration a squash *replaces* has to resolve to the
+    squash, as Django's loader does. Without it the squash had nothing depending
+    on it and read as a second leaf — pretix reported **nine** leaves in
+    `pretixbase` and a conflict Django does not have.
+  - Superseded migrations must be excluded as *dependents*, not only as
+    candidates. pretix's `sendmail.0012` depends on the very squash that
+    replaces it, which made the squash look required and the app report **no
+    leaf at all** — a state a cycle-free graph cannot be in.
+
+  The two corpora disagree on whether replaced files stay on disk (pretix keeps
+  all 157, NetBox deletes all 476), so both paths are exercised by real data.
+  `plan()` omits superseded migrations: planning both halves would have replayed
+  pretix's first 157 migrations twice, re-adding every column in them.
+- **4.2.3** — Classify operations: schema, data, index, constraint, `RunPython`, `RunSQL`, `SeparateDatabaseAndState`. **Done** —
+  classification shipped with the parser in 4.2.1, so the substance here is
+  **state replay**: `src/djaudit/migrations/state.py`, 46 tests, mutation
+  **34/34**. `AlterField` states what a column becomes and nothing about what it
+  was, so "did this change the type" and "did this make a nullable column NOT
+  NULL" — most of `DJM-002` — are unanswerable without it.
+
+  Across the three corpora the replay resolves the prior column for **100% of
+  `RemoveField`s (185), 100% of `RenameField`s (49) and 99.2% of `AlterField`s
+  (771 of 777)**, and reaches **every model the three projects declare**. It
+  ends holding 8 models it declines to speak for, each a genuine case: models
+  moved between apps by a `SeparateDatabaseAndState` whose state half we
+  deliberately drop, and pretix's one third-party operation.
+
+  Four defects, all found by measuring rather than by reading:
+  - **`RunSQL`'s first argument is not a model.** A single positional fallback
+    read it as one, inventing **78 NetBox models and 5 pretix ones** — each a
+    whole SQL statement masquerading as a table, and each then marked
+    untrustworthy by a replay that had nothing to distrust. Fixed by recording
+    Django's actual signatures, including *which* parameter names the model:
+    `model_name` for field operations, `name` for model ones, `old_name` for
+    `RenameModel`, and none at all for `RunSQL`, `RunPython` and the extension
+    and collation operations, whose `name` is not a table.
+  - **One positional offset cannot serve every operation.** `RenameModel(old,
+    new)` names the old model first; `RenameField(model, old, new)` names the
+    model first, so a shared offset made every positional `RenameField` rename
+    its own table. `field` is position 2 of `AddField` and nothing at all of
+    `RunSQL`. `makemigrations` writes every argument by keyword, so the corpus
+    never exercises position and the bug is invisible across all 875 of its
+    migrations — while hand-written migrations, the ones these rules exist to
+    catch, are exactly the ones that use it.
+  - **A rename names the column it acts on in `old_name`.** Reading `field_name`
+    left all **49** corpus renames with no prior column — the operation whose
+    safety depends most on what is being renamed. A rate of exactly zero is a
+    defect, not a measurement.
+  - **A partially readable field list was recorded as complete.** A
+    `CreateModel` whose `fields=` could not be read end to end kept whichever
+    columns parsed, which reads exactly like a table that never had the others,
+    and would have every later `AlterField` look like it invented its column.
+
+  `Applied` carries three facts about the preceding state rather than the state
+  itself. Snapshotting the whole `MigrationState` per operation is the obvious
+  shape and cost **1.07s of NetBox's replay**, against 0.06s now, to serve
+  callers that read at most three fields out of it. One of the three is
+  `created_by`, which is the difference between an expensive operation and a
+  free one: a non-nullable `AddField` against a table an *earlier* migration
+  created rewrites production's rows, and against a table *this* migration
+  creates it rewrites nothing. **85 of the corpus's 1,286 `AddField`s** are the
+  free kind.
+
+  **Follow-up: 34/34 was flattery, and the real score was 72/85.** That figure
+  came from a mutation list written by hand alongside the module, which is a
+  measurement of what its author thought to break. Re-running `state.py` under
+  the generic harness promoted in Step 4.3 surfaced **13 survivors nobody had
+  chosen to write down**, and reading them found one dead field and six untested
+  behaviours, several of which the next rules in the family depend on:
+
+  - `ModelState.deleted` was **never read** — set by its default, copied by
+    `copy()`, and that is all. `DeleteModel` removes the model from the state
+    outright, so the flag was a design that had been replaced and left behind.
+    Deleted rather than tested: dead code is not a coverage gap.
+  - **`field_of` had never been called on a model the state has no entry for.**
+    Both existing callers went through the `unknown` path, so the branch that
+    answers for a model that was simply never seen was carrying no test at all.
+  - **The `DeleteModel`/`RenameModel` exemption was untested in both halves.**
+    `DeleteModel`'s is straightforward. `RenameModel`'s took a specific shape to
+    reach: an ordinary rename ends in the same state whether or not the
+    exemption fires, so only a rename that *stops early* — one whose new name
+    djaudit cannot read — can tell the two apart.
+  - **`_rename_model`'s guard was untested**, and without it a rename whose new
+    name is unreadable pops its source out of the state and then fails to put
+    anything back — a migration djaudit could not fully read taking a model it
+    *had* read down with it. Only `not new` is reachable there: `RenameModel`'s
+    model parameter *is* `old_name`, so an unreadable one returns earlier. The
+    `not old` half is type narrowing and is now commented as such.
+  - **An operation that names no model was not proven to be `model_tracked`.**
+    That distinction is the whole basis of the `RunPython` rules queued in Step
+    4.3: they read no model, and reporting them as untracked would have them
+    withhold every finding they have.
+  - **`slots` and `frozen` were assumed.** The replay mutates its state in place
+    across 875 migrations, where a misspelled attribute that merely stuck is a
+    silent no-op in the middle of that; and every rule in the family is handed
+    the same `Applied` objects in turn, where one that wrote to one would change
+    what the next one reads.
+  - **`assume_field=True` was untested under `CreateModel`.** It was measured and
+    documented for `AddField` — the `*Field` naming convention drops mptt's
+    `TreeForeignKey` and taggit's `TaggableManager`, 55 of NetBox's 681
+    `AddField`s — but the identical call inside `_read_declared_fields` had no
+    test, and there a refusal to read one entry does not lose one column, it
+    marks the whole model unknown and silences every rule against it.
+
+  Now **84/84**. The lesson generalises past this module: a hand-written mutation
+  list cannot find the mutants its author did not think of, which is exactly the
+  set worth finding.
 
 ### Step 4.3 — Static migration rules
 
-- **4.3.1** — `DJM-001` `AddField` non-nullable with a default, rewriting the table.
+- **4.3.1** — `DJM-001` `AddField` non-nullable with nothing to fill it. **Done.**
+  Two things had to be settled before any rule in this family could be written,
+  and both were settled by measurement.
+
+  **The premise in this line was wrong.** It specified "non-nullable with a
+  default, rewriting the table". Postgres 11 made `ADD COLUMN ... DEFAULT
+  <constant>` a catalogue-only change and Django's own floor is Postgres 14, so
+  that rewrite does not happen on any supported version; the rule would have
+  reported **307 operations** across the three corpora for a cost that is not
+  paid. The failure that does still happen is the opposite one — NOT NULL with
+  *no* default has nothing to write into existing rows, so Postgres rejects the
+  statement and the migration aborts part-applied. Django defends this twice and
+  both had to be subtracted: `makemigrations` prompts for a one-off default, so
+  survivors are hand-written — which is exactly what this family targets — and
+  `Field.get_default()` returns `''` rather than `None` for fields whose
+  `empty_strings_allowed` is set, which is **103 of NetBox's 199** non-nullable
+  `AddField`s with no declared default. Table-valued fields (`ManyToManyField`,
+  `TaggableManager` — 64 more) have no column to constrain at all.
+
+  **The family's reporting scope.** Every `DJM` rule judges an event rather than
+  a state, and almost every event it can see has already happened. That is worse
+  than noise: a migration in a shipped project's history *demonstrably ran*, so
+  a lock or abort reported against it is **provably false**. Reporting
+  family-wide would have produced ~1,600 findings against the 245 the entire
+  rest of the tool emits, at a true-positive rate of zero. So the live tier
+  reads `django_migrations` and is exact, and the static tier reports **the leaf
+  of each app's history** — the tip, where a migration being written now lands.
+  Declared as a heuristic in every rule's `limitations`: it over-reports a leaf
+  that shipped long ago and misses the first of two migrations added together.
+  Measured: the rule's predicate fires **44 times on NetBox's full history and 0
+  under leaf scope**, and each of those 44 is a false positive by the argument
+  above.
+
+  A second suppression fell out of the same measurement and generalises the
+  `creates_its_own_table` fact from 4.2.3: a table created by a migration that is
+  *itself* still pending is empty when the operation reaches it, because both run
+  in one deploy. That is what makes squashed initial migrations quiet — NetBox's
+  `circuits.0002_squashed_0029` adds 36 non-nullable FKs to tables
+  `0001_squashed` creates. It also subsumes `creates_its_own_table` outright,
+  which mutation testing exposed as dead code: a migration creating its own table
+  is in scope by construction whenever it is inspected.
+
+  **A Phase 3 decision had to be revisited.** `scope.py` demotes any finding in a
+  `migrations/` directory one rank, on the reasoning that a data migration runs
+  once against a known row count and is frozen afterwards. That is right for a
+  `DJP` query that happens to live in a migration and inverted for this family,
+  where the migration is not the setting of the defect but its subject —
+  demoting them would mark down every member of a family by definition. `DJM` is
+  now exempt, and still records its scope so the exemption is auditable.
+
+  Recall cannot be measured on a shipped project for the reason above, so
+  `tests/fixtures/migration_project` was built for it: `billing` carries the
+  defect, `ledger` its correctly-written twin differing only in the `default`,
+  and the manifest forbids findings in `ledger` by file rather than by line.
+  `fixture_controls_probe.py` grew a per-fixture control marker — a migration
+  cannot be named `controls.py` — and proves the twin reachable by removing its
+  default.
+
+  *Verified:* 17 unit tests, mutation 10/10 after three survivors each drove a
+  fix — the `AddField` name guard was untested and `AlterField` also carries a
+  field, the unknown-creator path had no case, and `creates_its_own_table` was
+  dead. 100% precision and recall on the new fixture, 25/25 controls
+  load-bearing, and 0 findings on all three benchmark projects.
 - **4.3.2** — `DJM-002` `AlterField` changing type or nullability on a large table.
+  **Done** (`src/djaudit/rules/djm_alterfield_rewrite.py`).
+
+  Two distinct hazards share one operation, so one rule reports both and says
+  which: an `ALTER COLUMN TYPE` that **rewrites** the table, and a
+  `null=True` → `null=False` narrowing whose `SET NOT NULL` **scans** it. Both
+  hold `ACCESS EXCLUSIVE`, which blocks readers, not merely writers.
+
+  The interesting work was deciding what does *not* rewrite, because a rule that
+  reports every `AlterField` is worthless. Postgres has widened a `varchar`
+  limit in place since 9.2, and dropping the limit is free as well, so only a
+  **narrowing** counts. `ForeignKey` ↔ `OneToOneField` does not rewrite either:
+  both store the target's primary key, and the difference is a UNIQUE
+  constraint, so Postgres builds an index instead. That last one was found by
+  triage rather than by reasoning — pretix's `multidomain.0003` was reported as
+  a rewrite, and the honest response was to **fix the rule rather than record a
+  false positive**, since a `false_positive` verdict would have laundered a
+  defect into a statistic.
+
+  One guard is deliberately asymmetric and the comment says so. An unreadable
+  keyword falls back to `False`, which means `before.knows("null")` is dead —
+  the fallback already blocks the claim — while `after.knows("null")` is
+  load-bearing, because there the same fallback would *fake* a tightening.
+
+  *Verified:* 26 unit tests, mutation 13/13 after two survivors — the
+  operation-name guard needed a shape carrying both a field and a prior one
+  (`AddField` re-adding an existing column), and the dead `before.knows` was
+  removed rather than tested. 7 leaf-scoped findings across the corpora, each
+  read against its source before triage: healthchecks `0009` genuinely narrows
+  `subscription.user`, and pretix's six `*_bigint.py` are the Django 3.2
+  `DEFAULT_AUTO_FIELD` migration, which really does rewrite the table and every
+  foreign key pointing at it. All accepted, none wrong. 100% precision on all
+  three benchmarks.
 - **4.3.3** — `DJM-003` `AddIndex` without `CONCURRENTLY` (`AddIndexConcurrently`).
+  **Done** (`src/djaudit/rules/djm_addindex_blocking.py`).
+
+  Postgres builds an index under `SHARE`: reads continue, every write blocks
+  until it finishes. Deliberately **one rank below `DJM-002`**, and the gap is
+  the message — `ACCESS EXCLUSIVE` makes a table unavailable, `SHARE` leaves it
+  readable, and a site building an index still serves pages while failing
+  checkouts. Flattening them would tell a reader two different situations need
+  the same urgency.
+
+  The remedy is two edits, not one. `AddIndexConcurrently` sets `atomic =
+  False` and calls `_ensure_not_in_transaction` — read in Django's source
+  rather than assumed — so a remediation naming only the operation produces a
+  migration that refuses to run. The finding says which of the two is missing,
+  and carries the migration's `atomic` flag as evidence.
+
+  Two operations are excluded and both are documented rather than silent.
+  `AddIndexConcurrently` is the fix. `AlterIndexTogether` replaces the whole
+  `index_together` collection, so whether it builds an index, drops one, or
+  does both depends on prior state this rule does not replay — reporting it
+  unconditionally would flag removals as though they took a build lock.
+
+  All 5 NetBox findings belong to one coordinated `*_default_ordering_indexes`
+  change spanning **10 apps and 52 `AddIndex` operations**. Leaf scope reports
+  the 5 whose apps have had no migration since and is silent on the other 47,
+  though those 47 ran on exactly the same deploy. Both arms of the family's
+  scope heuristic — the false positives it removes and the true positives it
+  gives up — are visible in a single change, and the triage notes say so.
+
+  **It also lowered a headline figure, which is the result worth keeping.**
+  Held-out accepted-risk recall went 33/58 to 33/63: five more accepted risks,
+  none of them predicted. Leave-one-target-out cannot see a rule confined to
+  one target — it is trained on for the two folds with none of its findings to
+  score and absent from the fold that scores all five — and because `ByRule`
+  answers `TRUE_POSITIVE` for an unseen rule rather than abstaining, those five
+  are scored as confidently wrong rather than merely unscored. The mechanism is
+  now a test that names the responsible rule, not a comment; measuring it
+  showed the accepted-risk figure alone could not have caught the difference
+  between the two fallbacks, since abstaining scores an identical 52.4% and
+  moves only the true-positive column. Fitted-vs-held-out is now 87.3% / 52.4%.
+
+  *Verified:* 17 unit tests, mutation 14/14. The four survivors were all
+  message integrity: blanking the `.` in `shop.0002_index` left every substring
+  assertion passing while producing a citation nobody can paste back. Fixed by
+  pinning the whole sentence and the whole evidence string, and by
+  cross-checking the `path:line` citation against the finding's own location
+  instead of a fixture-dependent literal. 5 findings on NetBox, all genuine
+  indexes on long-standing tables; 0 on healthchecks and pretix. Third
+  defect/control pair added to `migration_project`, 27/27 controls
+  load-bearing.
 - **4.3.4** — `DJM-004` `RemoveField` deployed alongside code still referencing it, breaking rolling deploys.
-- **4.3.5** — `DJM-005` `RenameField` or `RenameModel`, which cannot be rolled out without downtime.
-- **4.3.6** — `DJM-006` `RunPython` with no reverse, blocking rollback.
-- **4.3.7** — `DJM-007` `RunPython` iterating an unbounded queryset.
+  **Done** (`src/djaudit/rules/djm_removefield_rolling_deploy.py`).
+
+  The damage is wider than the column, and the reason is in Django's compiler
+  rather than in the migration. `SQLCompiler.get_default_columns` iterates
+  `opts.concrete_fields` and names every one of them, so `Order.objects.get(pk=1)`
+  emits SQL listing every column on the table. Drop one and the release still
+  running during a rolling deploy does not merely lose that value — **every
+  query it makes against that model fails**, including queries that never
+  mentioned the field. One removed column takes the whole model out.
+
+  **The rule cannot be a match on the operation name, and finding out why was
+  the substep.** Django's prescribed fix is to split the change across two
+  releases with `SeparateDatabaseAndState`: ship `state_operations` first so the
+  ORM stops selecting the column, drop it with `database_operations` later. But
+  `replay()` flattens that wrapper to its database half — correctly, since
+  applying both would double every rename it exists to express — so the second,
+  *careful* release arrives at the rule as a bare `RemoveField`, byte-identical
+  to the reckless one. A name match would have reported the fix its own
+  remediation recommends. Proved by construction before writing the rule, with
+  a three-operation project whose wrapped and unwrapped removals came out of the
+  replay indistinguishable.
+
+  So `Applied` gained `via_separate`, recording that an operation came from the
+  wrapper the replay dissolves. Its `_capture` and dataclass defaults were both
+  removed once mutation testing showed them dead: `replay` is the only caller
+  and always passes the flag, so a default was an invitation to forget it.
+
+  Two cases are quiet and both are measured rather than assumed. Many-to-many
+  fields are not in `concrete_fields`, so dropping one takes out a join table
+  without breaking ordinary queries — reported a rank lower, with a message
+  saying what actually breaks (6 of the corpora's 185 removals). A field removed
+  from a model the same migration deletes is not reported at all, because
+  `makemigrations` emits those ahead of `DeleteModel` to break FK cycles and one
+  deletion would otherwise produce a burst of findings that all describe it and
+  none of which name it (another 6 of 185).
+
+  *Verified:* 22 unit tests, mutation 31/31 — the one survivor was the
+  `unknown` in the evidence's field-kind, which blanked to `kind=` and read as a
+  bug in the tool rather than a limit of what the replay could see. 4 new state
+  tests. Fourth defect/control pair added, 28/28 controls load-bearing; the
+  control is the `database_operations` half, so un-fixing it means unwrapping it.
+  **0 findings on all three corpora**, as the pre-write probe predicted — all
+  185 `RemoveField`s in the three histories are behind a leaf, and none of the
+  three projects uses `SeparateDatabaseAndState` at all, so the guard that
+  matters most rests on fixture evidence alone. Corpus totals unchanged at 257.
+- **4.3.5** — `DJM-005` `RenameField` or `RenameModel`, which cannot be rolled out without downtime. **Done** —
+  `src/djaudit/rules/djm_rename_rolling_deploy.py`, 35 tests, mutation
+  **85/85**. **0 findings on all three corpora**, as the pre-write probe
+  predicted: all 51 renames sit behind a leaf.
+
+  A rename is `DJM-004`'s problem without `DJM-004`'s escape. A removal can be
+  split across two releases — stop selecting the column, then drop it. A rename
+  cannot, because the old name and the new one are the same column and it can
+  only have one name at a time, so whichever release is not the one that
+  renamed it is wrong. The fix is therefore not to rename the column at all but
+  to pin it with `db_column`, which makes the change Python-side and emits no
+  DDL. That is read out of Django rather than assumed:
+  `RenameField.database_forwards` calls `schema_editor.alter_field`, and
+  `_alter_field` guards its rename statement with `if old_field.column !=
+  new_field.column`.
+
+  **The corpora decided the rule's shape twice, in opposite directions.**
+
+  - **The `SeparateDatabaseAndState` guard has real evidence here**, unlike
+    `DJM-004`'s, where the same guard rests on fixture evidence alone. NetBox's
+    `tenancy.0020_remove_contactgroupmembership` renames a table and a column
+    inside the wrapper to convert an explicit through-model into an implicit
+    M2M — expert hand-written work, and precisely what a name match would have
+    flagged.
+  - **Reading the replay alone would have got the common case wrong.** pretix's
+    `0254_alter_logentry_organizer_link_and_more` pins `db_column` *before* the
+    rename, so the pin is already in the state the replay carries in, and a
+    guard reading only `Applied.existing_field` passes it. But Django's
+    autodetector runs `generate_renamed_fields()` before
+    `generate_altered_fields()`, so a **generated** migration pins the column
+    *after* the rename — meaning the one shape the corpus contains is the one
+    shape Django does not produce. The rule scans the migration for the pin
+    under either name, and both orders are tested.
+
+  Two further findings came out of mutation testing rather than review:
+
+  - **`RenameIndex` carries `old_name` and `new_name` too.** The operation-name
+    check therefore has to be positive; a rule asking "does this have two
+    names" would report every renamed index as a moved column. Nothing in the
+    hand-written tests covered it, and the survivor at the guard is what
+    surfaced it.
+  - **The `not old or not new` guard is killed only through `RenameModel`.**
+    On the field path it is subsumed by a downstream `None` check, so removing
+    it changes nothing a test can see — the type checker is what rejects it,
+    not the suite. The model path derives its destination table from the new
+    name, so that is where the guard has observable work to do, and that is the
+    shape the test uses.
+
+  A renamed many-to-many is the lesser case again, reported a rank lower:
+  `_alter_many_to_many` calls `alter_db_table` when the through table's name
+  changes, so ordinary queries survive and only traversal breaks. The one
+  documented gap is a model whose table was already fixed by a `db_table` in
+  its own `Meta`, which the replay does not track.
+- **4.3.6** — `DJM-006` `RunPython` with no reverse, blocking rollback. **Done** —
+  and the plain form of that specification is a bad rule, which the corpus
+  said before a line of it was written. Across the three projects there are
+  **162 `RunPython` operations and only 11 lack a reverse**; the single one of
+  those at any leaf is pretix's
+  `sendmail.0011_remove_cross_event_scheduled_mails`, whose forward pass is two
+  `.delete()` calls against rows that should never have existed. Nothing undoes
+  a delete. The naive rule would have scored **0 for 1** there, and its advice
+  would have been actively harmful: `RunPython.noop` does not mean "this cannot
+  be undone", it means "undoing this is a no-op", so adding one *permits*
+  `migrate` to walk backwards past the deletion. An honestly irreversible
+  operation says so by having no reverse, which is exactly Django's default.
+
+  So irreversibility is not the defect. The defect is irreversibility placed
+  where it revokes somebody else's reverse, and `Migration.unapply` is where
+  that becomes provable. Its **first** phase walks every operation and raises
+  `IrreversibleError` if any one is not `reversible` — before the second phase
+  executes a single statement. `RunPython.reversible` is `reverse_code is not
+  None` and `RunSQL.reversible` is `reverse_sql is not None`. So one
+  reverse-less data operation aborts the unapply of the *entire* migration, and
+  a perfectly reversible `AddField` in the same list never gets its
+  `database_backwards` called. The author of that `AddField` wrote something
+  Django can undo and a `RunPython` three lines below took it away.
+
+  The rule therefore requires a co-located operation whose reverse would
+  actually move the database — `SCHEMA`, `INDEX` or `CONSTRAINT`. `STATE` is
+  excluded because `AlterModelOptions` emits no DDL in either direction, and
+  `UNKNOWN` is excluded because a third-party operation might emit none either:
+  the same refusal to call an unrecognised operation harmless that `classify`
+  makes, applied in the direction that stays quiet. That guard is the whole
+  rule — it is what keeps pretix's leaf `.delete()` silent, and it is why the
+  measurement below is 0 rather than 1.
+
+  The remediation is **not** "add a reverse". It is *split the data operation
+  into its own migration*, which is correct whether or not the pass could have
+  been reversed: the schema migration then unapplies on its own and the
+  irreversibility is confined to a migration with no schema to unwind. `noop`
+  is offered second, for the case where the data pass only fills a column the
+  schema half adds — four of the eleven are exactly that and their filenames
+  say so — because it is only sometimes honest and this rule does not read the
+  forward body closely enough to know when.
+
+  One nesting fact was verified rather than assumed. `SeparateDatabaseAndState`
+  does not override `reversible`, and `Operation.reversible` is a plain class
+  attribute set to `True`, so a reverse-less `RunPython` *inside* the wrapper
+  passes phase one and raises from phase two instead — by which point phase two
+  has already unapplied everything listed after the wrapper, since it iterates
+  the reverse of file order. Under the default `atomic = True` the transaction
+  takes that back; under `atomic = False` it does not, and the database is left
+  half-way home. Nested operations are reported because of that, not in spite
+  of it.
+
+  Scope was extended past the specification to `RunSQL`, which has the same
+  property under a different name. It is not a flood: NetBox writes 76
+  reverse-less `RunSQL`s and only 9 of its migrations pair one with a schema
+  change, none at a leaf.
+
+  *Verified:* 35 unit tests, mutation **24/24**. Two of those tests exist
+  because the harness does not mutate subscripts or calls, so `blocked[0]` and
+  the evidence's ordering were unmeasured — both were then proved load-bearing
+  by hand. The ordering fix is worth recording: the first draft used
+  `sorted(...)` over a set, which is deterministic but **untestable**, because
+  either order of two names is the sorted order for some pair of names, and the
+  unsorted mutant survived. Replacing it with `dict.fromkeys` over file order
+  gives output that is both deterministic *and* falsifiable, and a reversal now
+  fails two tests. Sixth defect/control pair added, **30/30 controls
+  load-bearing**; the control supplies `noop` rather than moving the data pass
+  out, because building it from the other remediation would have measured a
+  different fix. **0 findings on all three corpora**, exactly as the probe
+  predicted. Corpus totals unchanged at 257.
+- **4.3.7** — `DJM-007` `RunPython` iterating an unbounded queryset. **Done** —
+  the first question was not how to detect this but whether it was already
+  detected. `DJP-007` reports a loop that writes each row, it explicitly
+  includes data migrations in its rationale, and 21 of its findings across the
+  three corpora sit inside migration files. Two rules reporting the same lines
+  would be a defect in this document, not a feature.
+
+  They are not the same claim, and the clearest evidence is that **their
+  remediations contradict each other**. `DJP-007`'s harm is N round trips and
+  its fix is to collect the rows and issue one `bulk_update` — which requires
+  every row in memory at once. This rule's harm *is* every row in memory at
+  once, and its fix is `.iterator(chunk_size=...)`, which holds none of them.
+  Advice that resolves one without naming the other makes the other worse, so
+  each rule now cross-references the other and this rule's remediation spells
+  out the combined form: iterate in chunks, bulk-write within each chunk.
+
+  The non-overlap was measured rather than argued. Of the three loops in leaf
+  `RunPython` bodies corpus-wide, NetBox's `dcim.0241` iterates a module-level
+  tuple of model classes and is not a queryset at all, and the other two are
+  pretix's `banktransfer.0012` and `returnurl.0002`. **`DJP-007` reports
+  neither**, and for two different reasons that are worth recording because
+  they are the reasons this rule exists:
+
+  - `banktransfer.0012` loops over `Organizer.objects.filter(Exists(...))` and
+    calls `org.save()`. `DJP-007` declines it because `Organizer` has a
+    hand-written `save()` — its largest documented blocker, covering 53 of
+    pretix's 68 writing loops. What it withholds is the *write* advice. The
+    fetch is still unbounded and nothing else was saying so.
+  - `returnurl.0002` loops over a `django-hierarkey` table that exists in no
+    `models.py`. `DJP-007` requires a named model; the row count does not
+    depend on knowing what the rows are called.
+
+  Those two are exactly what the rule reports, at 100% precision, and they are
+  the first `DJM` findings on the corpora since `DJM-003`. Healthchecks and
+  NetBox stay at zero.
+
+  The loop analysis is `djaudit.dataflow`'s, not this rule's. `ctx.loops`
+  already walks migration files and already resolves `qs = Model.objects...`
+  through def-use chains, which is one of the two pretix shapes; re-deriving
+  it here would have been a second, worse copy of a tested component. The
+  other shape needed a syntactic fallback — a chain passing through `objects`,
+  `_default_manager` or `_base_manager` — because hierarkey's model is absent
+  from the graph and `Target.value` comes back `None`. **Both paths are
+  load-bearing and each carries exactly one corpus finding**, so the fallback
+  is not speculative surface; the evidence records which path resolved each
+  finding so a reader can tell them apart.
+
+  Two quiet directions are measured rather than assumed. `.iterator()` and
+  `.aiterator()` are the remediation, and pretix uses them 20 times in its own
+  migrations, so that guard is exercised by real history and not only by
+  fixtures. A sliced queryset caps the rows and caps the damage.
+
+  **A surviving mutant found a false positive that review had not.** The `and`
+  joining "the chain reaches a manager" to "the chain has no terminal step"
+  could not be killed, because at that point there was no terminal step to
+  reject: `for k in Order.objects.aggregate(...)` and
+  `for x in Order.objects.count()` were both reported, and both return a
+  single value. The fix reuses `querysets.TERMINAL` rather than keeping a
+  second copy of the list, and the two chain walks — one for `.iterator()`,
+  one for the manager — collapsed into a single `_chain_names` helper. That
+  helper deliberately stops at a non-attribute call, which is what makes
+  `list(qs.iterator())` report: `list` puts back everything `.iterator()`
+  streamed.
+
+  Three other survivors were redundant code rather than untested code. The
+  operation-kind check in `inspect` and again in `_forward_names` could not be
+  killed because only `RunPython` carries a callable at all, so the name
+  lookup already implied it; a `Literal[False]` sentinel in a return type was
+  a mutable annotation no runtime test could reach. All three were removed
+  rather than papered over with a test. Final mutation score **47/47**, after
+  hand-checking the harness's blind spots — the `[-1]` on the dotted callable
+  name is covered by the `Backfill.run` test, and the evidence ordering is now
+  asserted by content rather than by index alone.
+
+  One test failure was worth more than the rule. Comparing two projects built
+  by `make_project` compared the second against itself, because the fixture
+  writes every project it is handed into the same directory — the contrasting
+  shapes now live in one migration, and the test says why.
+
+  The fixture pair is shaped by the `DJP-007` boundary: `billing`'s defect
+  accumulates into a list and issues one `bulk_update`, so it is `DJP-007`-
+  clean and this rule is the only one that speaks. Had it also saved in the
+  loop, both rules would have reported the same line and the fixture would
+  have proven nothing about either. Its `ledger` twin adds
+  `.iterator(chunk_size=500)` and flushes per chunk. 7 of 7 controls in that
+  fixture are proven load-bearing, 31 of 31 across all fixtures.
 - **4.3.8** — `DJM-008` schema and data operations in one atomic migration, holding a lock during a backfill.
+  **Done.** HIGH/FIRM. Reports a leaf migration that is atomic and runs a data
+  operation *after* a schema operation on a table that already holds rows.
+
+  **Order is the whole rule.** Postgres holds a lock "until the end of the
+  transaction" (quoted verbatim in the rule's docstring from
+  `explicit-locking.html`), so a data pass placed after an `ACCESS EXCLUSIVE`
+  operation extends that lock for its entire duration. The same two operations
+  in the other order are close to harmless — the lock is taken and released at
+  the end regardless, and nothing waits on it in between. This is also what
+  separates `DJM-008` from `DJM-006`: `DJM-006` is about rollback, is
+  order-independent, and looks at reverse code. Measured zero shared findings
+  at leaf.
+
+  **The corpus was probed before the rule was designed.** 75 migrations mix
+  schema and data (hc 0 / nb 41 / px 34) and 67 are schema-before-data and
+  atomic, but only **one** is at leaf: pretix `pretixmultidomain.0003`, which
+  takes `ACCESS EXCLUSIVE` on `knowndomain` twice and then runs a full-table
+  `UPDATE` inside the same transaction. Triaged `true_positive`.
+
+  **Two measurements changed the implementation.** First, a `RunPython` nested
+  in `SeparateDatabaseAndState` was not being reported: `state.replay` emits the
+  *effective* stream, so `applied.operation` is the inner operation and is never
+  identical to any member of `migration.operations`. Any rule reasoning about
+  operation order must take its stream from `ctx.migration_history` rather than
+  from what was written. Doing so deleted every hand-rolled flattening helper.
+  Second, the rule initially named the table this very migration creates. A lock
+  on a brand-new table blocks nobody, because no other session can see it until
+  commit. `populated()` cannot answer that question — it reports the state
+  *preceding* the operation, so before a `CreateModel` the table has no creator
+  on record and reads as one that has been there all along. Named the case
+  explicitly rather than reusing `model_tracked`, which is false in the same
+  place for an unrelated reason.
+
+  Fixture: the shape was already present — `billing/0002` is atomic with five
+  schema operations before its backfills — so only the manifest, probe and
+  docstring needed wiring; adding the docstring shifted every anchor by 8 lines
+  and they were re-derived from the engine rather than by hand. Mutation
+  **37/37**, `migration_project` 8/8 at 100% precision and recall, controls
+  probe 8/8, corpus hc 0 / nb 0 / px 1.
 - **4.3.9** — `DJM-009` `AddConstraint` validated immediately rather than `NOT VALID` then validated.
+  **Done, but not as specified.** The substep's own title describes a
+  remediation that is unavailable for most constraints, and the corpus said so
+  before the rule was written.
+
+  **`AddConstraintNotValid` raises `TypeError` on anything that is not a
+  `CheckConstraint`** — read from Django's source, not assumed. That is a
+  Postgres constraint rather than a Django one: `NOT VALID` exists for `CHECK`
+  and `FOREIGN KEY` and for nothing else. The corpus has exactly one
+  `AddConstraint` at leaf, pretix `pretixmultidomain.0003`, and it is a
+  `UniqueConstraint` — so the rule as specified would have fired on its only
+  real finding and handed the reader a fix that raises on the first attempt.
+
+  **So the rule reads the constraint class and branches.** Three routes, each
+  traced to the statement Django actually emits:
+  `CheckConstraint` → `sql_create_check`, `ACCESS EXCLUSIVE`, HIGH, and the
+  `AddConstraintNotValid` + `ValidateConstraint` pair; plain `UniqueConstraint`
+  → `sql_create_unique`, `ACCESS EXCLUSIVE`, HIGH; `UniqueConstraint` with any
+  of `condition`, `include`, `opclasses` or `expressions` → `_create_unique_sql`
+  switches to `sql_create_unique_index`, so a bare `CREATE UNIQUE INDEX` runs
+  under `SHARE`, which permits reads — ranked MEDIUM for the same reason
+  `DJM-003` sits below `DJM-002`. Per-finding `severity` and `remediation`
+  overrides, which `Rule.finding` already supported.
+
+  **The concurrent route had to be checked too.** The obvious advice —
+  `AddIndexConcurrently` — does not work: it takes an `Index`, and
+  `Index.__init__` accepts `expressions, fields, name, db_tablespace, opclasses,
+  condition, include` with **no** `unique` parameter, and there is no
+  `UniqueIndex` class. Django cannot build a unique index concurrently at all,
+  so the remediation names `RunSQL("CREATE UNIQUE INDEX CONCURRENTLY ...")`
+  inside `SeparateDatabaseAndState`, and says plainly that on a small table
+  declining is reasonable.
+
+  A constraint whose class cannot be read is **not reported**, because every
+  branch turns on the class and a plausible fix that raises costs more than
+  silence. Overlaps `DJM-008` by design on pretix's one migration: different
+  operations, different lines, different fixes, and `DJM-008`'s reordering
+  remedy does nothing here.
+
+  Fixture: a 9th pair — `billing` adds a `CheckConstraint` outright, `ledger`
+  adds the same one with `AddConstraintNotValid`. Two mutation survivors were
+  `frozen=True, slots=True` on a private value holder; rather than test
+  decoration the type became a `NamedTuple`, which is immutable by
+  construction. Mutation **47/47**, `migration_project` 9/9 at 100% precision
+  and recall, controls probe 9/9, corpus hc 0 / nb 0 / px 1.
 
 ### Step 4.4 — Live lock classification
 
 - **4.4.1** — `sqlmigrate` adapter capturing real emitted SQL per migration.
+
+  **Done.** `src/djaudit/live/sqlmigrate.py`, 45 tests, mutation 40/40.
+
+  Three things had to be measured before the adapter could be written, and each
+  changed its shape.
+
+  *It needs a live server, not just a driver.* `sqlmigrate` builds a
+  `MigrationLoader` around a real connection and reads `django_migrations`
+  before rendering anything, so a Postgres-configured target with nothing
+  listening fails outright. That is reported as a `Refused` carrying the
+  target's own last line, because a laptop with no database running genuinely
+  cannot be told what its migration will lock.
+
+  *The same migration is not the same SQL twice.* One `AddField` plus
+  `AddIndex` plus `AlterField` renders as **4 statements on Postgres and 10 on
+  SQLite**, measured on the same project. So `Emitted.backend` records the
+  engine that produced the statements and `Emitted.for_postgres` gates every
+  Postgres claim. The test that justifies this does not assert the principle,
+  it measures the damage: read through the Postgres classifier, the SQLite
+  rendering **hides the only dangerous operation** — `ALTER COLUMN TYPE`, a
+  2870ms rewrite — inside a table rebuild that classifies as harmless, invents
+  a table called `new__blog_post` that never exists in production, and reports
+  `DROP TABLE "blog_post"` as routine catalogue work.
+
+  *Django's operation banner is three lines, not one.* The first parser used a
+  boolean and could not tell the closing rule from the next opening one, so the
+  first comment after a banner was read as a new heading. Django emits one
+  routinely — `-- (no-op)` after `AlterModelOptions`, and the author's own
+  leading comment after `RunSQL`. Measured against real output, it attributed
+  `SELECT 1;` to `a leading comment` instead of to `Raw SQL operation`. Replaced
+  with a three-state machine. This was found by a surviving mutant, not by a
+  failing test.
+
 - **4.4.2** — SQL lock classifier: map each DDL statement to its Postgres lock mode.
-- **4.4.3** — `DJM-010` migration acquiring `ACCESS EXCLUSIVE` on a table, with the emitted SQL as evidence. Upgrades the static rules above from `tentative` to `certain`.
-- **4.4.4** — Table size estimation from `pg_class.reltuples` when a database connection is available, so severity scales with actual row count.
+
+  **Done.** `src/djaudit/live/locks.py`, 60 tests, mutation 73/73. Built against
+  a real PostgreSQL 18.1 cluster; 18 lock modes read from `pg_locks` and
+  durations timed on a 2,000,000-row / 142 MB table.
+
+  **The measurements refute this step's own premise, and 4.4.3 is respecified
+  below because of it.** Lock mode alone does not predict an outage:
+
+  | statement | lock | 2M rows |
+  |---|---|---|
+  | `ADD COLUMN c integer` | AccessExclusive | 55ms |
+  | `ADD COLUMN c text NOT NULL DEFAULT 'x'` | AccessExclusive | **60ms** |
+  | `ALTER COLUMN TYPE varchar(50)` | AccessExclusive | **2870ms** |
+  | `CREATE INDEX` | **Share** | **1031ms** |
+  | `VALIDATE CONSTRAINT` | ShareUpdateExclusive | — |
+  | `ADD CONSTRAINT CHECK ... NOT VALID` | AccessExclusive | 59ms |
+
+  Flagging `ACCESS EXCLUSIVE` would report `ADD COLUMN NOT NULL DEFAULT` — which
+  is harmless since Postgres 11 stores a constant default once — and would miss
+  `CREATE INDEX`, which is the outage people actually have, under a *weaker*
+  lock. Two statements taking the identical lock differ by **48×**.
+
+  So the classifier has two axes: **Lock** (what is blocked) × **Work**
+  (catalogue / scan / rewrite), and `dangerous = blocking and work is not
+  catalogue`.
+
+  *Intuition was wrong about volatility too.* An early rule listed `now()` among
+  the defaults that force a rewrite. `pg_proc.provolatile` says `now()` is
+  **STABLE** — it returns the transaction's start time — and it measured 56ms
+  with no `relfilenode` change, against 3216ms and a rewrite for
+  `clock_timestamp()`. The rule now derives from Postgres's own volatility
+  class, and a test reads `pg_proc` so the table cannot go stale silently.
+
+  `classify()` never guesses: an unrecognised statement is `NONE` / `catalogue`
+  with a stated reason, because this module escalates findings to `certain`.
+
+- **4.4.3** — `DJM-010` migration whose emitted SQL is **blocking and scaling**: it holds a lock that stops reads or writes *and* does work proportional to table size. Specified from the 4.4.2 measurements rather than from lock mode, which 4.4.2 showed to be wrong in both directions. Emitted SQL as evidence. Upgrades the static rules above from `tentative` to `certain`.
+
+  **Done.** `src/djaudit/rules/djm_pending_blocking_lock.py` and
+  `src/djaudit/live/migrations.py`, 33 + 22 tests.
+
+  The first rule in djaudit that reports at `certain`, and it earns it three
+  ways none of the static `DJM` rules can. It quotes the statement Django
+  emitted rather than the one the operation was expected to produce. It reads
+  `django_migrations` through `showmigrations --plan`, so "pending" is a fact
+  rather than the leaf-of-history heuristic. And it refuses to speak unless the
+  alias that emitted the SQL is really Postgres.
+
+  Three things were changed by building it.
+
+  *`node is None` is the common case, not the edge case.* On a fresh database
+  every `contenttypes` and `auth` migration is pending, and none of them is in
+  the project's source. The first draft synthesised a location from the app
+  label. Now the rule reports only migrations belonging to the project's own
+  apps, and says so in its limitations: a package's pending migration is real,
+  but it has no line in this repository to cite and no edit the reader could
+  make there.
+
+  *A limitation claimed a diagnostic that did not exist.* The budget text said a
+  truncated run "says so as a diagnostic"; diagnostics are produced by discovery
+  and a rule cannot emit one. Reworded to state exactly what happens.
+
+  *Rule modules are imported on every run.* Importing `djaudit.live` at module
+  scope put 24ms and the whole `subprocess` stack into audits that never asked
+  for the live tier — the same defect measured in 4.1.4, returning by a
+  different door. The live imports are function-level, and a test asserts
+  `subprocess` is absent after `load_all()`.
+
+  The finding points at the operation, not the file: Django prints one banner
+  per operation in order, so the heading's index is the operation's index. That
+  correspondence is verified against real output rather than assumed, and where
+  the counts disagree the finding falls back to the file.
+
+  **The first live rule found four defects in the machinery built to receive
+  it.** Every one of them was invisible while the registry held no live rule,
+  which is the general lesson: a gate with nothing to check is not a gate, and
+  `tests/live/test_degradation.py` had been passing on an empty set since 4.1.
+
+  *The engine ran live rules without a live tier.* `select` already refuses --
+  "a tier is a capability, not a preference" -- but only for the tier set it is
+  given, and an explicit `--tier live` reached it unfiltered. The rules then
+  counted as having run, because `assess` reads the selected set as the set that
+  reached the target. A run with no virtualenv reported the environment as
+  unavailable *and* reported nothing skipped. That is the single failure
+  `djaudit.degradation` was written to prevent, sitting inside it.
+
+  *Three tests asserted their own premise.* `select(tiers={Tier.LIVE}) == []`,
+  "a run with no live rules is not degraded", and "a clean static run is not
+  nagged" were facts about an empty catalogue wearing the clothes of rules about
+  behaviour. Each now states the claim underneath it.
+
+  *Four more passed against the wrong rule.* They read `skipped[0]`, which was
+  the test fixture's stand-in rule until `DJM-010` sorted ahead of it -- and
+  `DJM-010` declares `DJM-001`/`DJM-002` as its fallbacks, the very ids those
+  tests assert. They select by id now. A test that indexes by position is a test
+  that will one day be about something else.
+
+  *A helper read the unpatched function.* The fixture patches
+  `registry.all_rules`; a `from`-import binds the original, so the helper and
+  the code under test could never agree on what was registered.
+
+  **A new gate: `tests/test_import_cost.py`.** The 24ms measurement above is
+  only true until someone hoists an import, and it had already happened once in
+  4.1.4 by a different door. A fresh interpreter loads every rule and asserts
+  `subprocess` and `djaudit.live` are absent from `sys.modules`, with a control
+  that imports the live layer and shows the same probe reporting them present.
+  Shown failing on the defect: hoisting the import turns it red.
+
+  **Mutation testing: 29/29 on `migrations.py`, 45/46 on the rule, 83/83 on
+  `locks.py`.** It found two evidence defects in `locks._table`. A `CREATE
+  INDEX` with no name -- valid Postgres, the server names it -- failed the whole
+  pattern, so a real blocking index build reported `table=unknown`. And a
+  schema-qualified `"app"."post"` reported `app`, naming a schema as though it
+  were a relation. It also found the parser accepting any line as a migration
+  when the marker was blanked, which the existing tests missed because their
+  stray text was rejected by a *later* guard on the app and name; the test that
+  catches it uses `>>> blog.0009_hotfix`, which passes that guard cleanly.
+
+  Two pieces of dead code came out. `EMPTY` was checked while parsing, where
+  anything without a marker is skipped already; it now does real work in
+  `read_plan`, telling a project that genuinely has no migrations apart from
+  output nobody could read -- previously both answered `Unknown`, reporting a
+  complete answer as a failure to look. And `if not dangerous: return` was
+  redundant with the `verdict is None` guard below it, which carried a
+  `no cover` pragma admitting it was unreachable. One guard, reachable, tested.
+
+  The single surviving mutant is equivalent and documented in the source:
+  deleting the `plan.available` guard changes nothing, because `Unknown.
+  unapplied` is empty by design. Two independent reasons to stay quiet about a
+  database nobody could reach.
+
+  Timing was checked against `origin/main` rather than against a remembered
+  number: healthchecks 3.43s here, 3.49s on main, so the phase adds nothing
+  measurable. The gate's local margin is thin, but it is thin on main too.
+- **4.4.4** — Table size estimation when a database connection is available, so
+  severity scales with how much data the lock is actually held across. **Done.**
+
+  **This step's premise was wrong, in the same way 4.4.2's was.** It specified
+  `pg_class.reltuples`, and reltuples is `-1` on a table that has never been
+  analysed -- not zero, because zero would be a claim Postgres has no basis for.
+  That is the state of nearly every table in a freshly restored database, which
+  is exactly the database someone runs migrations against. Reading it as "empty"
+  would downgrade the highest-risk case available. `pg_relation_size` is exact
+  from the first row inserted, so **bytes are the signal and rows are a
+  courtesy**, reported when known and named as unanalysed when not.
+
+  The thresholds are measurements, not round numbers. Rewriting a `varchar(200)`
+  column to `varchar(50)` on PostgreSQL 18.1 took 12ms at 1,000 rows (96 kB),
+  22ms at 10,000 (912 kB), 135ms at 100,000 (8.9 MB) and 1,422ms at 1,000,000
+  (88.8 MB). Above ten thousand rows the cost is linear in bytes with a stable
+  constant -- 15.2 ms/MB and 16.0 ms/MB at the two largest sizes. `SUSTAINED`
+  (64 MB) and `NOTICEABLE` (8 MB) are that constant read backwards: about a
+  second, and about 130ms.
+
+  **Severity only ever moves down, and only on a measurement.** An unreadable
+  database, a table the query did not return, a size nobody could take: each
+  leaves the declared severity alone. Raising severity should take evidence and
+  lowering it should take more, because the failure that matters here is a real
+  outage filtered out by a `--min-severity` flag.
+
+  Two things mutation testing could not see, both asserted directly. A command
+  that succeeds while printing nothing readable now returns `Unknown` rather
+  than an empty mapping -- an empty mapping reports itself as available and then
+  answers `None` for every table, presenting a failure to measure as a
+  measurement. And a fully-migrated project is never asked for sizes at all; the
+  guard changes no finding, only what the run costs, so a test counts the calls.
+  The size module finished at 44/44 mutants killed and the rule at 59/60, its
+  one survivor documented in the source as equivalent.
+
+  A test also fixes the format spec against a value that can show it: 100 MB
+  renders identically with and without `:.1f`, so the assertion uses a size that
+  does not divide evenly.
 
 ### Step 4.5 — Deployment check adapter
 
-- **4.5.1** — `manage.py check --deploy` adapter, normalising Django's own warnings into our schema.
-- **4.5.2** — Deduplication against our static `DJS` findings — when Django and djaudit agree, report once with both as evidence.
-- **4.5.3** — `DJS-028` gap report: settings Django flags that our static tier missed. A self-auditing rule that measures our own recall.
+- **4.5.1** — `manage.py check --deploy` adapter, normalising Django's own
+  warnings into our schema. **Done.**
+
+  Django's deployment check knows one thing our static tier structurally
+  cannot: it reads settings after every import, override and environment
+  variable has resolved, so a `SECURE_SSL_REDIRECT` assembled at runtime is
+  just a value to it. Running it is cheap and declining to would be pride.
+
+  **Its output is designed for a terminal, and every convenient assumption
+  about it is false.** Measured against Django 6.0: the report goes to
+  **stderr** when there are issues and to **stdout** when there are none, so a
+  reader watching one stream gets either the findings or the all-clear but
+  never both. The exit code is **0 for a project full of security warnings**
+  and non-zero only at `--fail-level` or above. And a project that cannot be
+  imported dies with a traceback -- no sections, no summary, nothing that
+  parses -- which a careless reader scores as a clean bill of health for a
+  project it never loaded.
+
+  So the **summary line is what is trusted**, not the exit code and not the
+  stream. It is written by the same code path that writes the body, and its
+  absence means no report was produced. Both streams are joined and parsed;
+  the exit code is deliberately never consulted, because a model error exits 1
+  while printing the most useful report of all, and that run is tested against
+  real Django rather than argued about.
+
+  The format was taken from `django/core/checks/messages.py` and
+  `django/core/management/base.py` rather than inferred: five fixed sections,
+  a `(id) ` that is **omitted entirely** when a check has none, and a hint that
+  is a tab-indented continuation of the previous line rather than a message of
+  its own. `--no-color` was measured to beat both `--force-color` and
+  `DJANGO_COLORS`.
+
+  **`SILENCED_SYSTEM_CHECKS` is the limitation, and it is the argument for our
+  static tier.** A silenced check leaves the body entirely; only the footer's
+  count moves. Django will not say which id was silenced, so a project can
+  quiet its deployment check without quieting the risk -- and our `DJS` rules,
+  which read the settings source instead of asking Django, still see it.
+
+  Mutation testing finished at 45/45, and its first run caught a parametrized
+  test that iterated `SECTIONS.items()` to prove `SECTIONS` was right: it built
+  its input from the constant it was checking, so a section named `GRUMBLES`
+  would have satisfied it.
+- **4.5.2** — Deduplication against our static `DJS` findings — when Django and
+  djaudit agree, report once with both as evidence. **Done.**
+
+  It is a merge rather than a deduplication, because **each half knows
+  something the other cannot**. Our rule read the source, so it has a
+  `file:line` and can name the assignment to change; Django reports `?` for an
+  object, because by the time its checks run, settings are values and the file
+  they came from is gone. Django resolved those values through every import,
+  override and environment variable, so it knows what the setting *is*; our
+  rule knows only what the source says, and emits `tentative` when the source
+  does not settle it. So our finding keeps its location and gains Django's
+  sentence as evidence, and a confirmed finding is raised to `certain`.
+
+  **Confirmation raises confidence; silence never lowers it.** Django's checks
+  are narrower than ours -- nothing on CORS, fast password hashers, or a
+  `SECURE_PROXY_SSL_HEADER` that trusts a client header -- and a silenced check
+  leaves no trace but a count. Reading "Django did not mention it" as "Django
+  disagrees" would let a project quiet our findings by quieting Django's.
+
+  The mapping was read out of `django/core/checks/security/` rather than
+  matched by title, and it is many-to-one because Django distinguishes *how* a
+  setting came to be wrong: an insecure session cookie is `W010`, `W011` or
+  `W012` depending on whether sessions are enabled through `INSTALLED_APPS`,
+  through `MIDDLEWARE`, or are simply configured that way. All three are one
+  defect and one line to fix, so they produce one finding that cites all three.
+
+  It runs in the engine, not in a rule, because no rule may edit another rule's
+  output. Every import is function-level and behind `ctx.live`, so a static
+  audit still never loads `subprocess` -- `tests/test_import_cost.py` fails if
+  that stops being true.
+
+  The Django checks with **no** rule of ours are recorded on the context as
+  `deployment_gaps`. Nothing reports them yet; that is 4.5.3.
+
+  Mutation testing removed an unreachable fallback in `_confirm` -- every id it
+  looks up was read off the report a moment earlier -- and narrowing the
+  parameter to `Report` now enforces at type-check time what a runtime guard
+  had been asserting. 47/48, the one survivor documented as equivalent because
+  `Unknown` answers nothing to every question by design.
+- **4.5.3** — `DJS-028` gap report: settings Django flags that our static tier
+  missed. A self-auditing rule that measures our own recall. **Done.**
+
+  Every other rule reports a defect in the project. This one reports a defect
+  in *us*, in the only place it can be measured honestly: against a second
+  opinion, on the reader's own settings, produced by the framework itself.
+
+  **A gap is a check that landed on nothing of ours, not a check we have no
+  rule for** -- the wider definition, and the more interesting half is the one
+  the narrow definition would hide. `DJS-006` reads `SECURE_SSL_REDIRECT` out
+  of the settings module and emits nothing when the value is assembled from the
+  environment; Django, which sees what the environment produced, says it is
+  off. That is not a missing rule, it is our rule missing, and from the
+  reader's side both are one sentence: Django found something here and we did
+  not.
+
+  This forced a real change to the engine. The rule's subject *is* the outcome
+  of every other rule, so running it in the main pass would read an empty gap
+  set every time. It runs in a **second pass after corroboration**, for the
+  same reason the engine assigns fingerprints rather than the rules doing it:
+  the answer requires seeing the whole set. `AFTER_CORROBORATION` is an
+  explicit set of one rather than a general mechanism, because a general
+  mechanism for one rule is a general mechanism for nothing.
+
+  Its `fallback` is unusually blunt and deliberately so: without the live tier
+  the gap is not smaller, it is **unmeasured**. A static run reports zero
+  gaps, and zero there means nobody was asked.
+
+  Two properties the rule refuses. A check whose message it cannot quote is not
+  reported at all, because a finding with no evidence is the one thing this
+  tool must not emit. And the location is the settings module, never a line
+  number -- Django reports none, and inventing one would be exactly the
+  fabrication this family exists to prevent.
+
+  16/16 mutants killed. `DJS` is now 28 rules and the catalogue 78.
 
 ### Step 4.6 — Benchmark and document
 
 - **4.6.1** — Migration fixture project with unsafe and safe migration pairs.
+  **Done.**
+
+  The substep's premise turned out to be wrong, and finding that out was the
+  substep. It was written expecting to expose cases the static tier judges
+  badly, so the live tier would have something to correct. There are none among
+  Django's built-in fields. Narrowing a `CharField` is reported, widening is
+  not, `CharField` to `TextField` is not, `IntegerField` to `BigIntegerField`
+  is — and PostgreSQL agrees with every one of those verdicts.
+
+  So the fixture became a cross-check instead of a counterexample. `VARIANTS`
+  in `tests/live/pairs.py` is a table of claims about PostgreSQL, and each is
+  now checked twice by different means: once against our rule, once against a
+  server. **Whether a statement rewrote the table is read from
+  `pg_class.relfilenode`, not from a stopwatch** — a duration threshold would
+  have made it a benchmark of the test runner, and would have passed on an
+  empty table for both halves of every pair. Flipping one entry in the table
+  fails both tests, for two independent reasons.
+
+  Measured on 2,000,000 rows, a 161 MB table: `ADD COLUMN ... NOT NULL DEFAULT`
+  3.2 ms, widening 3.1 ms, `TYPE text` 3.9 ms — none rewriting; `TYPE bigint`
+  3,287 ms and narrowing 4,447 ms, both rewriting. **All five take an
+  AccessExclusive lock**, which is the entire argument for classifying on two
+  axes: a rule reporting on lock mode alone would report all five identically,
+  and a reader told that widening a `CharField` will take their site down
+  learns to ignore the tool.
+
+  One thing the static tier cannot know, and the fixture pins it: a migration
+  that has already run. After `migrate`, the live rule goes silent and the
+  static rule goes on reporting the leaf. That is the tiers disagreeing by
+  design rather than by error.
+
+  A separate measurement worth keeping: **Django resolves a callable default
+  before it writes SQL.** `default=uuid.uuid4` is emitted as a literal, so an
+  `AddField` never emits a volatile default however the model is written — the
+  volatility patterns in `live/locks.py` are aimed at hand-written `RunSQL`,
+  and would be dead code if they were aimed here.
+
+  The static half of the module carries no `postgres` marker, so the claims
+  about our own rules are checked on every machine; only the claims about
+  PostgreSQL need a server. 26 tests.
 - **4.6.2** — Live tier integration test using a real Postgres service container in CI.
-- **4.6.3** — Verify lock classification against actual Postgres `pg_locks` output.
-- **4.6.4** — `docs/rules/DJM.md` and `docs/live-tier.md`, including the security model for executing target code.
+  **Done.**
+
+  The substep began by resolving the open question about `PASSTHROUGH`, and the
+  answer was that it should not change. An audit tool that copied `PGHOST` and
+  `PGPASSWORD` out of its own environment into a subprocess would be handing
+  the target credentials it was never given; the target reads its connection
+  from its own settings, as a real project does. So the fixture writes the DSN
+  into `settings.py` and `PASSTHROUGH` stays as it was.
+
+  **Then CI was checked, and it had been red for five commits.** Every one of
+  those substeps was verified locally against a real database and pushed
+  without looking at the runner, which has none. Three separate defects, all of
+  the same kind — a test that depends on the machine it was written on:
+
+  1. `TestTheDatabaseAliasReachesTheCommand` used the `live_project` fixture
+     with no `postgres` marker, so it errored rather than skipped.
+  2. The consent fixture inherited Django through `system_site_packages`. This
+     machine's system Python has Django 4.2.26 and a runner's has none, so the
+     target could not start Django at all. It installs its own now, which also
+     pins the version instead of inheriting whatever is lying around.
+  3. `interpreter()` defaulted to `/usr/bin/python3`, which needs Django for
+     the handful of tests that actually execute it. It now defaults to the
+     interpreter running the suite, which has Django by dependency.
+
+  Fixing (3) surfaced a fourth: the alias tests then read a *Postgres* project
+  through *our* interpreter, which has no psycopg. They use the target's own
+  virtualenv now — which is what the live tier is for, and reading a target
+  through our environment is the confusion it exists to prevent.
+
+  **The service container found a real bug that a local cluster cannot.**
+  GitHub's `postgres` service requires a password, and `urlparse` does not
+  percent-decode while libpq does. A password containing `@` or a space
+  reached Django as the literal `p%40ss%20word` while `psql` connected with it
+  happily. On a trust-auth cluster nothing notices. To find it, this machine's
+  `pg_hba.conf` was switched to `scram-sha-256` and the suite run against an
+  encoded DSN. The CI password now deliberately contains both characters, so
+  the decoding path is exercised on every push rather than asserted once.
+
+  `scripts/live_gate.py` is what stops the job being decoration. Every live
+  test skips itself without `DJAUDIT_TEST_POSTGRES`, so a typo in the env
+  block would produce a green job that ran nothing — and pytest reports that
+  as `0 failed` in the same words as a full run. The gate reads the JUnit XML
+  and fails on skips, on an empty collection, and on a collection too small to
+  be the suite, because **zero skipped is also true of a suite that never
+  ran**. Demonstrated failing on each: 68 skips with no DSN, and its own tests
+  cover the collapsed and missing-report cases.
+
+  Also fixed here: `migration_project` was missing from the recall gate, so the
+  only fixture with a known answer for `DJM` was scored on no machine but mine.
+- **4.6.3** — Verify lock classification against actual Postgres `pg_locks` output. **Done.**
+
+  The existing check ran each statement inside a transaction and read
+  `pg_locks` from its own backend, which covered eighteen classifications.
+  Three things it could not see, all found by measuring rather than reading:
+
+  **The `CONCURRENTLY` test could not fail.** It started a watcher that slept
+  50ms, then looked for a blocking lock and asserted there was none. The index
+  build finishes in 86ms on a fifty-row table, so the watcher was reading
+  `pg_locks` after the statement had ended. Pointed at a plain `CREATE INDEX`,
+  which takes `SHARE`, it still reported `LOCK=none` and passed. It is now
+  measured by *blocking* the statement instead: a third connection holds
+  `ACCESS EXCLUSIVE`, the build's request sits in `pg_locks` with
+  `granted = false` naming the mode it wants, and the probe waits for a row to
+  appear rather than for an interval to elapse. Its control asserts the same
+  probe reports `SHARE` for the non-concurrent form — the contrast the old
+  test had no way to draw.
+
+  **`CONCURRENTLY` was classified `Lock.NONE`, and takes
+  `SHARE UPDATE EXCLUSIVE`.** Both readings agree on what a user cares about,
+  since neither blocks reads or writes, so `blocking` and `dangerous` are
+  unchanged. But `Lock` is documented as the mode a statement takes, and
+  `explain()` was emitting "takes none on t" for a statement that locks the
+  table. `docs/rules/DJM.md` had said `SHARE UPDATE EXCLUSIVE` all along; the
+  table was the thing out of step. `Lock.NONE` now documents what it does mean
+  — no lock ordinary traffic can wait on — and the two rules that keep it are
+  exempted from mode verification by name, with the exemption itself checked
+  against `RULES` so a reworded rule cannot silently widen it.
+
+  **The mode names were verified; what they block was not.** `blocks_reads`
+  and `blocks_writes` are what `dangerous` is computed from, and nothing had
+  ever held a lock and tried. `TestWhatTheModesActuallyBlock` holds each mode
+  on one connection and attempts a `SELECT` and an `INSERT` on another under
+  `lock_timeout`, so waiting arrives as an error and not as a duration. This
+  needs two simultaneous connections, which `psql` subprocesses can only fake
+  with sleeps, so `psycopg[binary]` joins the dev group. All ten predictions
+  hold, including that `SHARE UPDATE EXCLUSIVE` blocks neither.
+
+  A coverage gate closes the loop: every entry in `RULES` must be reached by a
+  statement that was actually run, matched by the `why` string it produces.
+  Adding a rule without measuring it now fails by name.
+
+  Also fixed: `observe()` resolved the table by name *after* running the
+  statement, so `DROP TABLE t` found no row and reported no lock — the
+  strongest lock in the system reading as none. It captures the oid first.
+
+  Five defects were injected to show each new gate failing: `SHARE` not
+  blocking writes, an unmeasured rule, an exemption naming no rule,
+  `CONCURRENTLY` back to `Lock.NONE`, and a probe that swallows its timeout.
+- **4.6.4** — `docs/rules/DJM.md` and `docs/architecture/live-tier.md`, including the security model for executing target code. **Done.**
+
+  `docs/rules/DJM.md` is generated from the registry by `gen_rule_docs.py` and
+  was already current; `--check` fails the build if it drifts. The new writing
+  is the architecture note, which lands in `docs/architecture/` beside
+  `llm-layer.md` and `dataflow.md` rather than at the top level the plan
+  originally guessed.
+
+  Its subject is the thing that makes this tier different in kind rather than
+  in degree: **the audited project's code executes on the auditing machine.**
+  `settings.py` runs, every module it imports runs, and anything a repository
+  chooses to do at import time happens with the file system and network access
+  of whoever typed the command. The note states why that is worth doing at all
+  — only Django can say what SQL a migration emits, and only Django can give a
+  second opinion on its own deployment checks, which is 2 of 78 rules — and
+  then states exactly what the subprocess is allowed: 10 environment variables
+  in, 4 refused outright, a 30-second timeout enforced by killing the process
+  group, 1 MiB captured per stream, stdin closed. It records the `PASSTHROUGH`
+  decision settled in 4.6.2, including why no `PG*` variable may ever join it.
+
+  A security note that has gone stale is worse than no note, because a reader
+  who would otherwise go and look instead believes it. So every checkable
+  claim in it is checked by `scripts/check_live_doc.py`, which runs in CI: the
+  cited paths, both variable sets member by member, the timeout, the output
+  ceiling, the number of lock classification rules, and which rules declare
+  `Tier.LIVE`.
+
+  Writing that gate produced the substep's own lesson. Its first draft read
+  constants with `ast.literal_eval`, which cannot evaluate `frozenset({...})`
+  or `1 << 20` — the two shapes `runner.py` actually uses — and returned
+  `None` for both. It reported three problems and would have reported success
+  on a tree where `PASSTHROUGH` had been emptied, because a reader that
+  returns nothing checks nothing. `tests/test_live_doc.py` now pins each
+  reader against the real shape and gives the gate eight defects it must
+  catch, including a `PG*` variable added to the passthrough and a refusal
+  quietly lifted, plus two harmless edits it must tolerate — a gate that fails
+  on reflowed prose gets switched off, and then it is not a gate.
 
 ---
 
@@ -5781,7 +7113,7 @@ remove from them, and `6.5.3` asserts that by trying.
   Answers four questions a non-specialist actually asks — *who this affects*,
   *what it costs*, *how widespread it is*, *how urgent it is* — plus a fifth
   the vendors never print: **when this does not apply to you.** That last one
-  is free, because a measurement showed **all 67 rules carry `limitations`**,
+  is free, because a measurement showed **all 76 rules carry `limitations`**,
   the field recording what the rule cannot see. Those caveats are rendered
   **verbatim from `RuleMeta.limitations`**, never paraphrased; a mutant that
   truncated them to twenty characters was caught.
@@ -6160,7 +7492,7 @@ conversation.
 | 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | **Complete** (PR #3) — `DJA-001`…`DJA-015`, `DJD-001`…`DJD-003`, 100% precision on three real targets |
 | 3 | Performance and injection | 6 | 36 | **Complete** (PR #5) — `DJP-001`…`DJP-010`, `DJI-001`…`DJI-012`, 100% precision on three real targets |
-| 4 | Migration safety and live tier | 6 | 28 | Not started — **runs after Phase 6**, see the amendment there |
+| 4 | Migration safety and live tier | 6 | 28 | In progress — steps 4.2 and 4.3 under way, **runs after Phase 6**, see the amendment there |
 | 5 | Portability and external adapters | 4 | 20 | Not started — **runs after Phase 6** |
 | 6 | LLM layer | 5 | 19 | In progress — **pulled forward, runs after Phase 3** |
 | 7 | Distribution | 3 | 10 | Not started |
@@ -6168,10 +7500,13 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **67 rules are
+document specifies, and most of it is still only specified: **78 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first ten of Phase 3's and the first twelve of its injection
-family.
+2, plus the first ten of Phase 3's, the first twelve of its injection family,
+all ten of Phase 4's migration rules, and its deployment-check gap rule.
+`DJM-010` is the first **live** rule: the first that reads the SQL a migration
+emits rather than predicting it from the operation. `DJS-028` is the first rule
+whose subject is this tool rather than the project it is auditing.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

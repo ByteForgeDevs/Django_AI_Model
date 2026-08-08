@@ -10,11 +10,20 @@ from djaudit import fingerprint as fp
 from djaudit import scope
 from djaudit.baseline import Baseline
 from djaudit.context import ProjectContext
+from djaudit.degradation import Degradation, assess
 from djaudit.discovery import build_context
 from djaudit.gcpolicy import deferred_full_collection
 from djaudit.models import Confidence, Family, Finding, Severity, Tier
 from djaudit.registry import Rule, select
 from djaudit.suppression import is_suppressed
+
+AFTER_CORROBORATION = frozenset({"DJS-028"})
+"""Rules whose input is the other rules' output, so they run in a second pass.
+
+Kept as an explicit set rather than a flag on `RuleMeta` because there is one
+of them and a general mechanism would be a general mechanism for nothing. If a
+second one appears, that is the moment to build one.
+"""
 
 
 @dataclass
@@ -33,7 +42,17 @@ class RunResult:
     suppressed_baseline: int = 0
     filtered_threshold: int = 0
     rules_run: int = 0
+    corroborated: int = 0
+    """How many Django deployment checks landed on a finding of ours.
+
+    Counted rather than inferred: a live run where Django confirmed nothing and
+    a static run where it was never asked both show zero findings raised to
+    `certain`, and they are not the same situation.
+    """
+
     rule_errors: dict[str, str] = field(default_factory=dict)
+    degraded: Degradation | None = None
+    """Live-tier rules this run did not reach. Reported, never silently dropped."""
     duration_seconds: float = 0.0
 
     @property
@@ -45,6 +64,24 @@ class RunResult:
         for finding in self.findings:
             counts[finding.severity] += 1
         return counts
+
+
+def _why_not_live(ctx: ProjectContext, tiers: set[Tier]) -> str:
+    """The reader's answer to "why is this shorter than I expected".
+
+    Distinguishes the three ways a live rule fails to run, because they need
+    three different actions: give consent, install a virtualenv, or nothing.
+    """
+    if ctx.live:
+        return "the live tier ran"
+    # Checked before the tier set, because a request that failed downgrades the
+    # tiers to static and would otherwise report itself as never having been
+    # made -- telling the reader to pass a flag they already passed.
+    if ctx.live_problem is not None:
+        return f"the live tier was requested but {ctx.live_problem}"
+    if Tier.LIVE not in tiers:
+        return "the live tier was not requested"
+    return "the live tier was requested but the target's environment is unavailable"
 
 
 def _passes_threshold(finding: Finding, min_severity: Severity, min_confidence: Confidence) -> bool:
@@ -107,11 +144,40 @@ def _audit(
     ctx = context if context is not None else build_context(root)
     if tiers is None:
         tiers = {Tier.STATIC} if not ctx.live else {Tier.STATIC, Tier.LIVE}
+    requested = tiers
+    if not ctx.live:
+        # A tier is a capability, not a preference -- the same reason `select`
+        # applies it ahead of `include`. A live rule without a live context
+        # cannot check anything, and letting it be selected would make it count
+        # as having run: `assess` reads the selected set as the rules that
+        # reached the target. The reader would be told nothing was skipped on a
+        # run where nothing live was checked, which is the single failure
+        # `djaudit.degradation` exists to prevent. `requested` is kept so the
+        # reason still reports what was asked for.
+        tiers = tiers - {Tier.LIVE}
 
-    result = RunResult(context=ctx)
+    selected = select(families=families, tiers=tiers, include=include, exclude=exclude)
+    result = RunResult(
+        context=ctx,
+        degraded=assess(_why_not_live(ctx, requested), ran={r.meta.id for r in selected}),
+    )
     collected: list[Finding] = []
 
-    for rule_cls in select(families=families, tiers=tiers, include=include, exclude=exclude):
+    # `DJS-028` reports the deployment checks that landed on nothing of ours,
+    # so its subject is the outcome of every other rule. It runs in a second
+    # pass for the same reason the engine assigns fingerprints rather than the
+    # rules doing it: the answer requires seeing the whole set.
+    deferred = [r for r in selected if r.meta.id in AFTER_CORROBORATION]
+    for rule_cls in [r for r in selected if r not in deferred]:
+        result.rules_run += 1
+        try:
+            collected.extend(_run_rule(rule_cls, ctx))
+        except Exception as exc:  # deliberate: rule isolation is the point
+            result.rule_errors[rule_cls.meta.id] = f"{type(exc).__name__}: {exc}"
+
+    collected, result.corroborated = _corroborate(ctx, collected)
+
+    for rule_cls in deferred:
         result.rules_run += 1
         try:
             collected.extend(_run_rule(rule_cls, ctx))
@@ -143,6 +209,45 @@ def _audit(
     result.findings = sorted(above, key=lambda f: f.sort_key)
     result.duration_seconds = time.perf_counter() - started
     return result
+
+
+def _corroborate(ctx: ProjectContext, findings: list[Finding]) -> tuple[list[Finding], int]:
+    """Merge Django's deployment check into our own findings, if it can run.
+
+    Lives here rather than in a rule because no rule may edit another rule's
+    output, and the whole point is that our `DJS` findings and Django's checks
+    are two readings of one defect. Everything is imported inside the function:
+    a static audit must not pay for `subprocess`, and `tests/test_import_cost`
+    fails if it does.
+    """
+    if not ctx.live or ctx.live_context is None or ctx.manage_py is None:
+        return findings, 0
+
+    from djaudit.live.checks import run_deployment_check  # noqa: PLC0415
+    from djaudit.live.corroborate import corroborate  # noqa: PLC0415
+    from djaudit.live.sqlmigrate import Target  # noqa: PLC0415
+
+    target = Target.of(ctx.live_context, ctx.manage_py)
+    if target is None:
+        # No `default` alias to describe. The deployment check itself does not
+        # touch a database, but `Target` is the only interpreter this tool is
+        # allowed to run -- it is built from what the user disclosed -- and
+        # inventing a backend to satisfy the constructor would be fabricating
+        # the one field we would then be reporting on.
+        return findings, 0
+
+    try:
+        report = run_deployment_check(target)
+    except OSError:
+        # Same isolation as a rule: the deployment check is a subprocess into
+        # someone else's project, and a run that cannot make it must degrade to
+        # the static answer rather than lose every finding collected so far.
+        return findings, 0
+
+    result = corroborate(findings, report)
+    ctx.deployment_report = report
+    ctx.deployment_gaps = result.unclaimed
+    return list(result.findings), result.merged
 
 
 def _run_rule(rule_cls: type[Rule], ctx: ProjectContext) -> list[Finding]:

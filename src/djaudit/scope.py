@@ -24,6 +24,10 @@ Two options were rejected:
   first screen is the only screen most people read, and spending it on test code
   is how a tool gets a reputation for noise.
 
+One family is exempt, and the exception proves the rule above: `DJM`
+findings are *about* the migration rather than merely located in one, so
+demoting them would mark down every member of a family by definition.
+
 So they are reported and demoted one rank. The finding still carries its scope
 in ``properties["scope"]``, which is what makes the demotion auditable rather
 than a number that quietly differs from the rule's declared severity, and lets a
@@ -39,7 +43,7 @@ from dataclasses import replace
 from enum import StrEnum
 from pathlib import PurePosixPath
 
-from djaudit.models import Finding, Severity
+from djaudit.models import Family, Finding, Severity
 
 _DEMOTED: dict[Severity, Severity] = {
     Severity.CRITICAL: Severity.HIGH,
@@ -87,11 +91,19 @@ def classify(file: str) -> Scope:
 def apply(finding: Finding) -> Finding:
     """Record the finding's scope and demote it if it is not production code.
 
+    A finding *about* a migration is exempt. The demotion above says the code a
+    finding sits in matters less than production code does, which is true of a
+    query that happens to live in a data migration -- it runs once, over a known
+    row count. It is false of the `DJM` family, where the migration is not the
+    setting of the defect but its subject: the finding exists precisely because
+    that migration has not run yet. Demoting those would apply the rule to every
+    member of a family by definition, which is a constant, not a judgement.
+
     Severity is not part of the fingerprint, so this never invalidates a
     committed baseline or a triage entry.
     """
     scope = classify(finding.location.file)
     properties = {**finding.properties, "scope": scope.value}
-    if not scope.demoted:
+    if not scope.demoted or finding.family is Family.DJM:
         return replace(finding, properties=properties)
     return replace(finding, properties=properties, severity=_DEMOTED[finding.severity])

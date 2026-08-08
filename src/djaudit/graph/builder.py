@@ -65,7 +65,18 @@ def app_label_for(path: Path, ctx: ProjectContext) -> str:
     a name collision between two installed apps have to -- so ``apps.py`` is
     read before falling back.
     """
-    app_dir = app_dir_for(path)
+    return app_label_of_dir(app_dir_for(path), ctx)
+
+
+def app_label_of_dir(app_dir: Path, ctx: ProjectContext) -> str:
+    """Django's app label for an application directory.
+
+    Split from :func:`app_label_for` because a migration lives two levels down
+    (``<app>/migrations/0001_initial.py``) and ``app_dir_for`` only knows how to
+    climb out of a ``models/`` package. The label has to be the same one the
+    model graph uses or a migration's ``dependencies`` would point at an app
+    nothing else in the run has heard of.
+    """
     declared = _appconfig_label(app_dir / "apps.py", ctx)
     return declared or app_dir.name
 

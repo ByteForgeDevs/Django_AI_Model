@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJS` — settings and deployment hardening
 
-27 rules covering the settings that decide whether a Django deployment is
+28 rules covering the settings that decide whether a Django deployment is
 safe to expose: what it admits about itself, what it puts on the wire, what it
 keeps out of the repository, and what it leaves switched on that should not be.
 
@@ -68,6 +68,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJS-025`](#djs-025--development-tooling-is-in-the-production-dependency-set) | development tooling is in the production dependency set | low | firm |
 | [`DJS-026`](#djs-026--the-admin-is-mounted-at-the-default-path) | the admin is mounted at the default path | info | firm |
 | [`DJS-027`](#djs-027--the-error-report-path-sends-more-than-it-redacts) | the error-report path sends more than it redacts | medium | firm |
+| [`DJS-028`](#djs-028--djangos-deployment-check-found-a-setting-we-did-not) | Django's deployment check found a setting we did not | medium | certain |
 
 ---
 
@@ -630,3 +631,26 @@ Then revoke the exposed credential at the provider and issue a new one. Revoking
 
 - <https://docs.djangoproject.com/en/stable/ref/logging/#django.utils.log.AdminEmailHandler>
 - <https://docs.djangoproject.com/en/stable/howto/error-reporting/#filtering-error-reports>
+
+---
+
+### DJS-028 — Django's deployment check found a setting we did not
+
+**Severity** medium · **Confidence** certain · **Tier** live
+
+**What it means.** `manage.py check --deploy` reads settings after every import, override and environment variable has resolved, so it can see values our static tier can only guess at. When it reports a security check that landed on no finding of ours, one of two things is true: we have no rule for that setting, or we have one and it could not settle the value from the source. Both are gaps in what this tool told you, and the setting is misconfigured either way.
+
+**How to fix it.** Fix the setting Django named -- its own message says how. The finding is quoted verbatim so it can be checked against a command you can run yourself: `python manage.py check --deploy`.
+
+**What this rule cannot see.**
+
+- Only Django's `security.*` checks are considered. A model or admin check is a real problem but it is not a settings gap, and claiming it here would turn this rule into a bug tracker for Django's entire check framework.
+- A check listed in `SILENCED_SYSTEM_CHECKS` is invisible. Django removes it from the report entirely and discloses only how many were silenced, never which, so a project can hide a gap from this rule without hiding the risk from itself.
+- The severity is Django's level rather than a judgement of ours. A deployment warning fires on defaults as readily as on mistakes, so a project that has not configured HSTS yet reads the same as one that turned it off.
+- This rule requires the live tier. On a static run it reports nothing, and that silence means the second opinion was never asked for rather than that our coverage was found complete.
+- The location is the settings module Django was pointed at, not the line the setting is on. Django reports no line, and inventing one would be the fabrication this family exists to avoid.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/howto/deployment/checklist/>
+- <https://docs.djangoproject.com/en/stable/ref/checks/#security>
