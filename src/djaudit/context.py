@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from djaudit.dataflow.querysets import QuerysetValue
     from djaudit.dataflow.scopes import Scope
     from djaudit.graph.nodes import ModelGraph
+    from djaudit.live.context import LiveContext
     from djaudit.migrations.graph import MigrationGraph
     from djaudit.migrations.state import Applied
 
@@ -101,6 +102,15 @@ class ProjectContext:
 
     live: bool = False
     """Whether the target's virtualenv is available for live-tier rules."""
+
+    live_context: LiveContext | None = None
+    """What the target's own Django reported, when the live tier ran.
+
+    Carried rather than flattened into the fields above because a live rule
+    needs the *interpreter* to run anything, and re-deriving it would let a
+    rule execute an environment other than the one that was disclosed and
+    consented to.
+    """
 
     live_problem: str | None = None
     """Why the live tier is unavailable, when it was asked for and did not start.

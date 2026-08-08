@@ -86,8 +86,14 @@ class TestSelection:
         assert not any(f.rule_id == "DJS-001" for f in result.findings)
 
     def test_live_tier_rules_are_skipped_without_a_live_context(self, vulnerable_project):
+        """Asking for the live tier does not conjure one. Before `DJM-010` this
+        passed because no live rule existed to select; now it passes because the
+        engine drops the tier it cannot serve, and the rules are reported as
+        skipped rather than counted as run."""
         result = engine.run(vulnerable_project, tiers={Tier.LIVE})
         assert result.rules_run == 0
+        assert result.degraded is not None
+        assert "DJM-010" in [item.rule_id for item in result.degraded.skipped]
 
 
 class TestSuppression:

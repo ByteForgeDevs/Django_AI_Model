@@ -6123,6 +6123,103 @@ rules come first; the live tier is then built for consumers that exist.
   with a stated reason, because this module escalates findings to `certain`.
 
 - **4.4.3** — `DJM-010` migration whose emitted SQL is **blocking and scaling**: it holds a lock that stops reads or writes *and* does work proportional to table size. Specified from the 4.4.2 measurements rather than from lock mode, which 4.4.2 showed to be wrong in both directions. Emitted SQL as evidence. Upgrades the static rules above from `tentative` to `certain`.
+
+  **Done.** `src/djaudit/rules/djm_pending_blocking_lock.py` and
+  `src/djaudit/live/migrations.py`, 33 + 22 tests.
+
+  The first rule in djaudit that reports at `certain`, and it earns it three
+  ways none of the static `DJM` rules can. It quotes the statement Django
+  emitted rather than the one the operation was expected to produce. It reads
+  `django_migrations` through `showmigrations --plan`, so "pending" is a fact
+  rather than the leaf-of-history heuristic. And it refuses to speak unless the
+  alias that emitted the SQL is really Postgres.
+
+  Three things were changed by building it.
+
+  *`node is None` is the common case, not the edge case.* On a fresh database
+  every `contenttypes` and `auth` migration is pending, and none of them is in
+  the project's source. The first draft synthesised a location from the app
+  label. Now the rule reports only migrations belonging to the project's own
+  apps, and says so in its limitations: a package's pending migration is real,
+  but it has no line in this repository to cite and no edit the reader could
+  make there.
+
+  *A limitation claimed a diagnostic that did not exist.* The budget text said a
+  truncated run "says so as a diagnostic"; diagnostics are produced by discovery
+  and a rule cannot emit one. Reworded to state exactly what happens.
+
+  *Rule modules are imported on every run.* Importing `djaudit.live` at module
+  scope put 24ms and the whole `subprocess` stack into audits that never asked
+  for the live tier — the same defect measured in 4.1.4, returning by a
+  different door. The live imports are function-level, and a test asserts
+  `subprocess` is absent after `load_all()`.
+
+  The finding points at the operation, not the file: Django prints one banner
+  per operation in order, so the heading's index is the operation's index. That
+  correspondence is verified against real output rather than assumed, and where
+  the counts disagree the finding falls back to the file.
+
+  **The first live rule found four defects in the machinery built to receive
+  it.** Every one of them was invisible while the registry held no live rule,
+  which is the general lesson: a gate with nothing to check is not a gate, and
+  `tests/live/test_degradation.py` had been passing on an empty set since 4.1.
+
+  *The engine ran live rules without a live tier.* `select` already refuses --
+  "a tier is a capability, not a preference" -- but only for the tier set it is
+  given, and an explicit `--tier live` reached it unfiltered. The rules then
+  counted as having run, because `assess` reads the selected set as the set that
+  reached the target. A run with no virtualenv reported the environment as
+  unavailable *and* reported nothing skipped. That is the single failure
+  `djaudit.degradation` was written to prevent, sitting inside it.
+
+  *Three tests asserted their own premise.* `select(tiers={Tier.LIVE}) == []`,
+  "a run with no live rules is not degraded", and "a clean static run is not
+  nagged" were facts about an empty catalogue wearing the clothes of rules about
+  behaviour. Each now states the claim underneath it.
+
+  *Four more passed against the wrong rule.* They read `skipped[0]`, which was
+  the test fixture's stand-in rule until `DJM-010` sorted ahead of it -- and
+  `DJM-010` declares `DJM-001`/`DJM-002` as its fallbacks, the very ids those
+  tests assert. They select by id now. A test that indexes by position is a test
+  that will one day be about something else.
+
+  *A helper read the unpatched function.* The fixture patches
+  `registry.all_rules`; a `from`-import binds the original, so the helper and
+  the code under test could never agree on what was registered.
+
+  **A new gate: `tests/test_import_cost.py`.** The 24ms measurement above is
+  only true until someone hoists an import, and it had already happened once in
+  4.1.4 by a different door. A fresh interpreter loads every rule and asserts
+  `subprocess` and `djaudit.live` are absent from `sys.modules`, with a control
+  that imports the live layer and shows the same probe reporting them present.
+  Shown failing on the defect: hoisting the import turns it red.
+
+  **Mutation testing: 29/29 on `migrations.py`, 45/46 on the rule, 83/83 on
+  `locks.py`.** It found two evidence defects in `locks._table`. A `CREATE
+  INDEX` with no name -- valid Postgres, the server names it -- failed the whole
+  pattern, so a real blocking index build reported `table=unknown`. And a
+  schema-qualified `"app"."post"` reported `app`, naming a schema as though it
+  were a relation. It also found the parser accepting any line as a migration
+  when the marker was blanked, which the existing tests missed because their
+  stray text was rejected by a *later* guard on the app and name; the test that
+  catches it uses `>>> blog.0009_hotfix`, which passes that guard cleanly.
+
+  Two pieces of dead code came out. `EMPTY` was checked while parsing, where
+  anything without a marker is skipped already; it now does real work in
+  `read_plan`, telling a project that genuinely has no migrations apart from
+  output nobody could read -- previously both answered `Unknown`, reporting a
+  complete answer as a failure to look. And `if not dangerous: return` was
+  redundant with the `verdict is None` guard below it, which carried a
+  `no cover` pragma admitting it was unreachable. One guard, reachable, tested.
+
+  The single surviving mutant is equivalent and documented in the source:
+  deleting the `plan.available` guard changes nothing, because `Unknown.
+  unapplied` is empty by design. Two independent reasons to stay quiet about a
+  database nobody could reach.
+
+  Timing was checked against `origin/main` rather than against a remembered
+  number: healthchecks 3.43s here, 3.49s on main, so the phase adds nothing
+  measurable. The gate's local margin is thin, but it is thin on main too.
 - **4.4.4** — Table size estimation from `pg_class.reltuples` when a database connection is available, so severity scales with actual row count.
 
 ### Step 4.5 — Deployment check adapter
@@ -7080,10 +7177,12 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **76 rules are
+document specifies, and most of it is still only specified: **77 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-and the first nine of Phase 4's migration rules.
+and all ten of Phase 4's migration rules. `DJM-010` is the first **live**
+rule: the first that reads the SQL a migration emits rather than predicting it
+from the operation.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

@@ -400,19 +400,15 @@ class TestAgainstARealProject:
     these fail and the fixtures above become the lie they were protecting.
     """
 
-    @pytest.fixture
-    def project(self, tmp_path: Path) -> Path:
-        return build_project(tmp_path, DSN)
-
-    def target(self, project: Path) -> Target:
+    def target(self, live_project: Path) -> Target:
         return Target(
-            interpreter=interpreter(project / ".venv" / "bin" / "python"),
-            manage_py=project / "manage.py",
+            interpreter=interpreter(live_project / ".venv" / "bin" / "python"),
+            manage_py=live_project / "manage.py",
             backend="django.db.backends.postgresql",
         )
 
-    def test_it_renders_the_real_statements(self, project: Path) -> None:
-        result = emit(self.target(project), "blog", "0002")
+    def test_it_renders_the_real_statements(self, live_project: Path) -> None:
+        result = emit(self.target(live_project), "blog", "0002")
         assert result.available, result.explain()
         assert isinstance(result, Emitted)
         assert [s.sql for s in result.statements] == [
@@ -422,51 +418,51 @@ class TestAgainstARealProject:
             'ALTER TABLE "blog_post" ALTER COLUMN "title" TYPE varchar(50);',
         ]
 
-    def test_the_fixture_is_what_django_really_prints(self, project: Path) -> None:
+    def test_the_fixture_is_what_django_really_prints(self, live_project: Path) -> None:
         """The guard on every fixture-based test above."""
-        result = emit(self.target(project), "blog", "0002")
+        result = emit(self.target(live_project), "blog", "0002")
         assert isinstance(result, Emitted)
         assert result.statements == parse(POSTGRES)[0]
 
-    def test_an_unknown_migration_is_refused_with_django_s_reason(self, project: Path) -> None:
-        result = emit(self.target(project), "blog", "0099")
+    def test_an_unknown_migration_is_refused_with_django_s_reason(self, live_project: Path) -> None:
+        result = emit(self.target(live_project), "blog", "0099")
         assert not result.available
         assert "0099" in result.explain()
 
-    def test_an_unknown_app_is_refused(self, project: Path) -> None:
-        result = emit(self.target(project), "nosuchapp", "0001")
+    def test_an_unknown_app_is_refused(self, live_project: Path) -> None:
+        result = emit(self.target(live_project), "nosuchapp", "0001")
         assert not result.available
 
-    def test_run_python_is_reported_as_unsupported_not_as_empty(self, project: Path) -> None:
-        result = emit(self.target(project), "blog", "0003")
+    def test_run_python_is_reported_as_unsupported_not_as_empty(self, live_project: Path) -> None:
+        result = emit(self.target(live_project), "blog", "0003")
         assert isinstance(result, Emitted)
         assert result.unsupported == ("Raw Python operation",)
 
-    def test_a_non_default_alias_reaches_django_as_a_flag(self, project: Path) -> None:
+    def test_a_non_default_alias_reaches_django_as_a_flag(self, live_project: Path) -> None:
         """`--database replica` is sent on the real command line, so this
         fails if the flag is misspelled rather than merely if it is absent --
         Django rejects an unrecognised argument outright."""
-        target = self.target(project)._replace(database="replica")
+        target = self.target(live_project)._replace(database="replica")
         result = emit(target, "blog", "0002")
         assert result.available, result.explain()
         assert isinstance(result, Emitted)
         assert len(result.statements) == 4
 
-    def test_and_an_alias_django_does_not_have_is_refused(self, project: Path) -> None:
+    def test_and_an_alias_django_does_not_have_is_refused(self, live_project: Path) -> None:
         """The control: the flag is genuinely being read, not ignored."""
-        target = self.target(project)._replace(database="nosuchalias")
+        target = self.target(live_project)._replace(database="nosuchalias")
         assert not emit(target, "blog", "0002").available
 
-    def test_a_target_built_from_a_live_context_works(self, project: Path) -> None:
+    def test_a_target_built_from_a_live_context_works(self, live_project: Path) -> None:
         """`Target.of` is the intended entry point, so it is exercised end to
         end rather than only unit-tested against a synthesised context."""
         from djaudit.live.context import inspect_target
 
         context = inspect_target(
-            interpreter(project / ".venv" / "bin" / "python"), project / "manage.py"
+            interpreter(live_project / ".venv" / "bin" / "python"), live_project / "manage.py"
         )
         assert isinstance(context, LiveContext), context
-        target = Target.of(context, project / "manage.py")
+        target = Target.of(context, live_project / "manage.py")
         assert target is not None
         assert target.backend == "django.db.backends.postgresql"
         result = emit(target, "blog", "0002")

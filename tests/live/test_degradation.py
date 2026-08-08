@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from djaudit import engine
+from djaudit import engine, registry
 from djaudit.context import ProjectContext
 from djaudit.degradation import Degradation, Skipped, assess
 from djaudit.models import Confidence, Family, Finding, Severity, Tier
@@ -43,8 +43,13 @@ def _meta(rule_id: str, *, tier: Tier = Tier.LIVE, **kwargs: object) -> RuleMeta
 
 @pytest.fixture
 def live_rule(monkeypatch: pytest.MonkeyPatch) -> type[Rule]:
-    """A registered live rule. There are none in the catalogue yet, and a gate
-    that has nothing to check is not a gate."""
+    """A registered live rule, with a fallback written to be recognisable.
+
+    It predates `DJM-010` -- a gate with nothing to check is not a gate -- and
+    it outlives it, because a test that asserts against whichever real rules
+    happen to be registered is a test that changes meaning when the catalogue
+    grows. Tests here name `DJM-900` explicitly rather than taking `skipped[0]`.
+    """
 
     class _Live(Rule):
         meta = _meta("DJM-900", fallback_rules=("DJM-001", "DJM-002"))
@@ -110,21 +115,40 @@ class TestEveryLiveRuleDeclaresAFallback:
 
 
 class TestNamingWhatDidNotRun:
+    @staticmethod
+    def live_ids() -> set[str]:
+        """Read through the module, not the name imported at the top of this
+        file. `live_rule` patches `registry.all_rules`, and a from-import binds
+        the original -- so this helper saw the real catalogue while `assess` saw
+        the catalogue plus the fixture, and the two could never agree."""
+        return {r.meta.id for r in registry.all_rules() if r.meta.tier is Tier.LIVE}
+
     def test_a_live_rule_that_did_not_run_is_reported(self, live_rule: type[Rule]) -> None:
         result = assess("off", ran=set())
-        assert [item.rule_id for item in result.skipped] == ["DJM-900"]
+        assert {item.rule_id for item in result.skipped} == self.live_ids()
 
     def test_a_live_rule_that_ran_is_not(self, live_rule: type[Rule]) -> None:
-        assert assess("on", ran={"DJM-900"}).skipped == ()
+        skipped = assess("on", ran=self.live_ids()).skipped
+        assert skipped == ()
+
+    def test_only_the_one_that_ran_is_dropped(self, live_rule: type[Rule]) -> None:
+        """The control for the test above: `ran` is what removes an entry, so
+        the set has to be shown still reporting the rules it does not name."""
+        skipped = assess("on", ran={"DJM-900"}).skipped
+        assert "DJM-900" not in {item.rule_id for item in skipped}
+        assert skipped
 
     def test_static_rules_are_never_reported_as_skipped(self, live_rule: type[Rule]) -> None:
         """Excluding `DJS-001` is a choice the reader made; skipping a live rule
         is a capability they may not know they lack."""
         result = assess("off", ran=set())
-        assert all(item.rule_id == "DJM-900" for item in result.skipped)
+        assert result.skipped
+        assert not {item.rule_id for item in result.skipped} - self.live_ids()
 
     def test_it_carries_the_fallback_sentence(self, live_rule: type[Rule]) -> None:
-        assert assess("off", ran=set()).skipped[0].fallback == LIVE_SENTENCE
+        skipped = assess("off", ran=set()).skipped
+        fake = next(item for item in skipped if item.rule_id == "DJM-900")
+        assert fake.fallback == LIVE_SENTENCE
 
     def test_the_reason_is_carried_through(self, live_rule: type[Rule]) -> None:
         assert assess("no virtualenv", ran=set()).reason == "no virtualenv"
@@ -134,16 +158,27 @@ class TestAFallbackThatDidNotRunCoversNothing:
     """The failure this module exists to prevent, in miniature: telling a reader
     they are covered by a rule that also did not run."""
 
+    @staticmethod
+    def fake(result: Degradation) -> Skipped:
+        """Select the fixture's rule by id, never by position.
+
+        These three read `skipped[0]` when they were written, because the
+        fixture's rule was the only live rule in the registry. `DJM-010` sorts
+        ahead of `DJM-900` and declares `DJM-001`/`DJM-002` as its own
+        fallbacks, so two of the three kept passing against the wrong rule.
+        """
+        return next(item for item in result.skipped if item.rule_id == "DJM-900")
+
     def test_it_names_the_fallbacks_that_ran(self, live_rule: type[Rule]) -> None:
         result = assess("off", ran={"DJM-001", "DJM-002"})
-        assert result.skipped[0].covered_by == ("DJM-001", "DJM-002")
+        assert self.fake(result).covered_by == ("DJM-001", "DJM-002")
 
     def test_an_excluded_fallback_is_not_claimed(self, live_rule: type[Rule]) -> None:
         result = assess("off", ran={"DJM-001"})
-        assert result.skipped[0].covered_by == ("DJM-001",)
+        assert self.fake(result).covered_by == ("DJM-001",)
 
     def test_no_fallback_ran_at_all(self, live_rule: type[Rule]) -> None:
-        assert assess("off", ran=set()).skipped[0].covered_by == ()
+        assert self.fake(assess("off", ran=set())).covered_by == ()
 
 
 class TestReadingTheReport:
@@ -218,10 +253,20 @@ class TestTheEngineReportsIt:
     ) -> None:
         result = engine.run(tmp_path)
         assert result.degraded is not None
-        assert [item.rule_id for item in result.degraded.skipped] == ["DJM-900"]
+        assert "DJM-900" in [item.rule_id for item in result.degraded.skipped]
 
-    def test_a_run_with_no_live_rules_is_not_degraded(self, tmp_path: Path) -> None:
-        result = engine.run(tmp_path)
+    def test_a_run_that_reached_the_live_tier_is_not_degraded(self, tmp_path: Path) -> None:
+        """Was `test_a_run_with_no_live_rules_is_not_degraded`, and it asserted
+        its own premise: with the registry empty of live rules a static run was
+        trivially undegraded. `DJM-010` makes that unreachable -- a static run
+        now always skips something, which is the point. The claim underneath was
+        that `degraded` is falsy when nothing was missed, so test that."""
+        from dataclasses import replace
+
+        from djaudit.discovery import build_context
+
+        ctx = replace(build_context(tmp_path), live=True)
+        result = engine.run(tmp_path, tiers={Tier.STATIC, Tier.LIVE}, context=ctx)
         assert not result.degraded
 
     def test_consent_without_an_environment_is_distinguished(self, tmp_path: Path) -> None:
@@ -234,6 +279,11 @@ class TestTheEngineReportsIt:
         assert result.degraded.reason == (
             "the live tier was requested but the target's environment is unavailable"
         )
+        # The reason and the count have to agree. This assertion is the one that
+        # caught the engine selecting live rules with no live context: the
+        # reason said the environment was unavailable while `skipped` was empty,
+        # so the reader was told every live rule had run.
+        assert "DJM-010" in [item.rule_id for item in result.degraded.skipped]
 
     def test_an_available_live_tier_is_named_as_such(self, tmp_path: Path) -> None:
         from dataclasses import replace
@@ -271,7 +321,25 @@ class TestTheReaderActuallySeesIt:
     def test_the_fallback_sentence_is_printed(self, tmp_path: Path, live_rule: type[Rule]) -> None:
         assert "can only be suspected without it." in self.rendered(tmp_path)
 
-    def test_a_clean_static_run_is_not_nagged(self, tmp_path: Path) -> None:
-        """The control: with no live rules registered there is nothing missing,
-        and a warning printed on every run is a warning nobody reads."""
-        assert "not checked" not in self.rendered(tmp_path)
+    def test_a_run_that_missed_nothing_is_not_nagged(self, tmp_path: Path) -> None:
+        """The control. A warning printed on every run is a warning nobody
+        reads, so the notice has to be absent when nothing was skipped. It used
+        to be enough to run with an empty live registry; `DJM-010` makes a
+        reached live tier the only way to miss nothing."""
+        from dataclasses import replace
+        from io import StringIO
+
+        from rich.console import Console
+
+        from djaudit.discovery import build_context
+        from djaudit.reporters import terminal
+
+        ctx = replace(build_context(tmp_path), live=True)
+        result = engine.run(tmp_path, tiers={Tier.STATIC, Tier.LIVE}, context=ctx)
+        buffer = StringIO()
+        terminal.report(result, Console(file=buffer, width=100, no_color=True))
+        assert "not checked" not in buffer.getvalue()
+
+    def test_but_a_run_that_skipped_one_is(self, tmp_path: Path) -> None:
+        """The presence half of the pair above."""
+        assert "not checked" in self.rendered(tmp_path)

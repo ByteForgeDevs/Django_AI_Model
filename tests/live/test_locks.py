@@ -408,3 +408,34 @@ class TestTheAxesAgree:
     def test_dangerous_implies_blocking(self) -> None:
         for verdict in _verdicts():
             assert not verdict.dangerous or verdict.blocking
+
+
+class TestNamingTheRelation:
+    """Two shapes the extractor read wrongly, both found while checking why a
+    finding could report `table=unknown`."""
+
+    def test_an_index_with_no_name(self) -> None:
+        """`CREATE INDEX ON t (c)` is valid Postgres -- the server names it.
+        The pattern required a name, so the whole match failed and a real,
+        blocking index build was reported against an unknown table."""
+        assert classify('CREATE INDEX ON "blog_post" ("title");').table == "blog_post"
+
+    def test_a_named_index_still_works(self) -> None:
+        """The control for making the name optional: it must not now be eaten."""
+        assert classify('CREATE INDEX "t_idx" ON "blog_post" ("title");').table == "blog_post"
+
+    def test_a_schema_qualified_table_reports_the_table(self) -> None:
+        """`"app"."post"` acts on `post`. Reporting `app` names a schema as
+        though it were a relation."""
+        assert classify('ALTER TABLE "a"."b" ALTER COLUMN "t" TYPE varchar(9);').table == "b"
+
+    def test_an_unquoted_schema_qualified_table_too(self) -> None:
+        assert classify("ALTER TABLE public.post ADD CONSTRAINT c CHECK (x);").table == "post"
+
+    def test_an_ordinary_quoted_name_is_unchanged(self) -> None:
+        """The regression guard: the common case has no dot and must survive
+        the splitting added for the case that does."""
+        assert classify('ALTER TABLE "blog_post" ADD COLUMN "b" text;').table == "blog_post"
+
+    def test_an_unquoted_name_still_loses_its_punctuation(self) -> None:
+        assert classify("DROP TABLE blog_post;").table == "blog_post"

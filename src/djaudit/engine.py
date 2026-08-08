@@ -128,11 +128,22 @@ def _audit(
     ctx = context if context is not None else build_context(root)
     if tiers is None:
         tiers = {Tier.STATIC} if not ctx.live else {Tier.STATIC, Tier.LIVE}
+    requested = tiers
+    if not ctx.live:
+        # A tier is a capability, not a preference -- the same reason `select`
+        # applies it ahead of `include`. A live rule without a live context
+        # cannot check anything, and letting it be selected would make it count
+        # as having run: `assess` reads the selected set as the rules that
+        # reached the target. The reader would be told nothing was skipped on a
+        # run where nothing live was checked, which is the single failure
+        # `djaudit.degradation` exists to prevent. `requested` is kept so the
+        # reason still reports what was asked for.
+        tiers = tiers - {Tier.LIVE}
 
     selected = select(families=families, tiers=tiers, include=include, exclude=exclude)
     result = RunResult(
         context=ctx,
-        degraded=assess(_why_not_live(ctx, tiers), ran={r.meta.id for r in selected}),
+        degraded=assess(_why_not_live(ctx, requested), ran={r.meta.id for r in selected}),
     )
     collected: list[Finding] = []
 

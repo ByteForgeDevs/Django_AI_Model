@@ -238,6 +238,7 @@ def _with_live(ctx: ProjectContext, granted: bool) -> ProjectContext:
     return replace(
         ctx,
         live=True,
+        live_context=outcome.context,
         django_version=outcome.context.django_version or ctx.django_version,
         settings_entrypoint=outcome.context.settings_module or ctx.settings_entrypoint,
     )

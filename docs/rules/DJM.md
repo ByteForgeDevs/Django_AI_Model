@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJM` — migration safety
 
-9 rules on what a migration does to a running database at the moment it
+10 rules on what a migration does to a running database at the moment it
 is applied: a lock it holds, a table it rewrites, a statement that aborts part
 way through. These are the defects that pass every test and fail only on
 production data, because the table is empty in CI and the lock nobody waits on
@@ -62,6 +62,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJM-007`](#djm-007--data-migration-iterates-a-queryset-with-no-bound-on-the-rows-fetched) | Data migration iterates a queryset with no bound on the rows fetched | medium | firm |
 | [`DJM-008`](#djm-008--data-operation-runs-in-the-same-transaction-as-an-earlier-schema-change) | Data operation runs in the same transaction as an earlier schema change | high | firm |
 | [`DJM-009`](#djm-009--addconstraint-scans-the-whole-table-under-a-lock-to-validate-it) | AddConstraint scans the whole table under a lock to validate it | high | firm |
+| [`DJM-010`](#djm-010--pending-migration-takes-a-blocking-lock-for-the-length-of-the-table) | Pending migration takes a blocking lock for the length of the table | high | certain |
 
 ---
 
@@ -258,5 +259,29 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 **References**
 
+- <https://www.postgresql.org/docs/current/sql-altertable.html>
+- <https://docs.djangoproject.com/en/stable/ref/contrib/postgres/operations/>
+
+---
+
+### DJM-010 — Pending migration takes a blocking lock for the length of the table
+
+**Severity** high · **Confidence** certain · **Tier** live
+
+**What it means.** The statement holds a lock that stops reads or writes and does work proportional to the row count, so the table is unavailable for as long as the table is large. It is instant in CI against an empty database and minutes long in production against the same schema, which is why it survives review. This is read from the SQL the project's own Django emits, not inferred from the operation, so the statement quoted below is the statement that will run.
+
+**How to fix it.** Split the operation so the blocking part does no scanning. Build indexes with `AddIndexConcurrently`, which takes `SHARE UPDATE EXCLUSIVE` and blocks neither reads nor writes. Add constraints as `NOT VALID` and validate them in a second migration, which takes the same weak lock -- measured at 59ms against 286ms for the validating form. Where a column type genuinely has to change, add the new column, backfill it in batches outside a transaction, and swap it, rather than letting `ALTER COLUMN TYPE` rewrite the table under a lock that blocks reads.
+
+**What this rule cannot see.**
+
+- The lock and work classification is measured against PostgreSQL and applies to no other backend, so the rule declines to report unless the alias that emitted the SQL is Postgres or PostGIS.
+- A statement the classifier has not measured is treated as taking no lock rather than as taking the strongest one, because this rule reports at `certain` and a guess is not a thing to be certain about. The static rules still see the operation.
+- Duration scales with the row count, which this rule does not read, so a blocking scan over an empty table is reported with the same severity as one over ten million rows.
+- At most 40 pending migrations are rendered per run, in the order they would run, because each one is a subprocess against the live database. Any beyond that are not examined.
+- Only migrations belonging to the project's own apps are reported. A pending migration from an installed package is real, but it cannot be cited as a line in the project's source and cannot be edited there, so it is left to the package's own release notes.
+
+**References**
+
+- <https://www.postgresql.org/docs/current/explicit-locking.html>
 - <https://www.postgresql.org/docs/current/sql-altertable.html>
 - <https://docs.djangoproject.com/en/stable/ref/contrib/postgres/operations/>

@@ -106,6 +106,21 @@ class Verdict(NamedTuple):
         return f"takes {self.lock.value}{where} {held}"
 
 
+_RELATION = r'"[^"]+"(?:\."[^"]+")*|\S+'
+"""One relation reference: quoted, optionally schema-qualified, or a bare word."""
+
+
+def _unqualify(raw: str) -> str:
+    """The relation's own name, with any schema and quoting removed.
+
+    `ALTER TABLE "app"."post"` acts on `post` in schema `app`, and reporting the
+    schema as the table names something that is not a table at all.
+    """
+    if raw.startswith('"'):
+        return raw.rsplit('"."', maxsplit=1)[-1].strip('"')
+    return raw.rstrip("(;,").rsplit(".", 1)[-1]
+
+
 def _table(statement: str) -> str | None:
     """The relation the statement acts on, unquoted.
 
@@ -117,17 +132,19 @@ def _table(statement: str) -> str | None:
     `(` inside quotes, and Django quotes every identifier it emits.
     """
     for pattern in (
-        r"\bALTER\s+TABLE\s+(?:ONLY\s+)?(\"[^\"]+\"|\S+)",
+        rf"\bALTER\s+TABLE\s+(?:ONLY\s+)?({_RELATION})",
         r"\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?"
-        r"(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+ON\s+(\"[^\"]+\"|\S+)",
-        r"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\"[^\"]+\"|\S+)",
-        r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\"[^\"]+\"|\S+)",
-        r"\bTRUNCATE\s+(?:TABLE\s+)?(\"[^\"]+\"|\S+)",
+        # The index name is optional: `CREATE INDEX ON t (c)` is valid Postgres
+        # and lets the server choose one. Requiring a name made the whole
+        # pattern fail, and the finding reported its table as unknown.
+        rf"(?:IF\s+NOT\s+EXISTS\s+)?(?:(?!ON\b)\S+\s+)?ON\s+({_RELATION})",
+        rf"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?({_RELATION})",
+        rf"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?({_RELATION})",
+        rf"\bTRUNCATE\s+(?:TABLE\s+)?({_RELATION})",
     ):
         found = re.search(pattern, statement, re.IGNORECASE)
         if found:
-            name = found.group(1)
-            return name[1:-1] if name.startswith('"') else name.rstrip("(;,")
+            return _unqualify(found.group(1))
     return None
 
 
