@@ -249,6 +249,13 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
         "field=models.IntegerField(default=0),",
         "field=models.IntegerField(),",
     ),
+    (
+        "DJM-002",
+        "narrow the altered column instead of widening it",
+        MCONTROL,
+        "field=models.CharField(db_index=True, max_length=128),",
+        "field=models.CharField(db_index=True, max_length=32),",
+    ),
 )
 
 FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...], str], ...] = (

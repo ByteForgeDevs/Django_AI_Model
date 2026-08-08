@@ -56,9 +56,9 @@ def test_the_note_is_currently_accurate() -> None:
             id="a constant that drifted",
         ),
         pytest.param(
-            "settles findings from 5 rules",
+            "settles findings from 6 rules",
             "settles findings from 12 rules",
-            "code has 5",
+            "code has 6",
             id="the corpus prior grew",
         ),
         pytest.param(

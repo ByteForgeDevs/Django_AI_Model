@@ -5344,6 +5344,38 @@ rules come first; the live tier is then built for consumers that exist.
   dead. 100% precision and recall on the new fixture, 25/25 controls
   load-bearing, and 0 findings on all three benchmark projects.
 - **4.3.2** — `DJM-002` `AlterField` changing type or nullability on a large table.
+  **Done** (`src/djaudit/rules/djm_alterfield_rewrite.py`).
+
+  Two distinct hazards share one operation, so one rule reports both and says
+  which: an `ALTER COLUMN TYPE` that **rewrites** the table, and a
+  `null=True` → `null=False` narrowing whose `SET NOT NULL` **scans** it. Both
+  hold `ACCESS EXCLUSIVE`, which blocks readers, not merely writers.
+
+  The interesting work was deciding what does *not* rewrite, because a rule that
+  reports every `AlterField` is worthless. Postgres has widened a `varchar`
+  limit in place since 9.2, and dropping the limit is free as well, so only a
+  **narrowing** counts. `ForeignKey` ↔ `OneToOneField` does not rewrite either:
+  both store the target's primary key, and the difference is a UNIQUE
+  constraint, so Postgres builds an index instead. That last one was found by
+  triage rather than by reasoning — pretix's `multidomain.0003` was reported as
+  a rewrite, and the honest response was to **fix the rule rather than record a
+  false positive**, since a `false_positive` verdict would have laundered a
+  defect into a statistic.
+
+  One guard is deliberately asymmetric and the comment says so. An unreadable
+  keyword falls back to `False`, which means `before.knows("null")` is dead —
+  the fallback already blocks the claim — while `after.knows("null")` is
+  load-bearing, because there the same fallback would *fake* a tightening.
+
+  *Verified:* 26 unit tests, mutation 13/13 after two survivors — the
+  operation-name guard needed a shape carrying both a field and a prior one
+  (`AddField` re-adding an existing column), and the dead `before.knows` was
+  removed rather than tested. 7 leaf-scoped findings across the corpora, each
+  read against its source before triage: healthchecks `0009` genuinely narrows
+  `subscription.user`, and pretix's six `*_bigint.py` are the Django 3.2
+  `DEFAULT_AUTO_FIELD` migration, which really does rewrite the table and every
+  foreign key pointing at it. All accepted, none wrong. 100% precision on all
+  three benchmarks.
 - **4.3.3** — `DJM-003` `AddIndex` without `CONCURRENTLY` (`AddIndexConcurrently`).
 - **4.3.4** — `DJM-004` `RemoveField` deployed alongside code still referencing it, breaking rolling deploys.
 - **4.3.5** — `DJM-005` `RenameField` or `RenameModel`, which cannot be rolled out without downtime.
@@ -5927,7 +5959,7 @@ remove from them, and `6.5.3` asserts that by trying.
   Answers four questions a non-specialist actually asks — *who this affects*,
   *what it costs*, *how widespread it is*, *how urgent it is* — plus a fifth
   the vendors never print: **when this does not apply to you.** That last one
-  is free, because a measurement showed **all 68 rules carry `limitations`**,
+  is free, because a measurement showed **all 69 rules carry `limitations`**,
   the field recording what the rule cannot see. Those caveats are rendered
   **verbatim from `RuleMeta.limitations`**, never paraphrased; a mutant that
   truncated them to twenty characters was caught.
@@ -6314,10 +6346,10 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **68 rules are
+document specifies, and most of it is still only specified: **69 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-and the first of Phase 4's migration rules.
+and the first two of Phase 4's migration rules.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

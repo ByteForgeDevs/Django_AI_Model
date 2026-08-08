@@ -1,8 +1,8 @@
 """What the harness must refuse to tell you.
 
 The distribution is the whole reason this module exists in the shape it does:
-194 of the 245 verdicts are true positives, so a classifier that reads nothing
-and says "true positive" scores 79.2%. Most of these tests are therefore about
+194 of the 252 verdicts are true positives, so a classifier that reads nothing
+and says "true positive" scores 77.0%. Most of these tests are therefore about
 what cannot be claimed -- that there is no combined number, that recall will not
 answer without being told which class, that abstaining is not free, and that a
 model which trades one error for the other does not read as an improvement.
@@ -75,7 +75,19 @@ class Inverted:
 
 class TestTheGroundTruth:
     def test_it_loads_every_reviewed_finding(self, truth: list[ReviewedFinding]) -> None:
-        assert len(truth) == 245
+        """Cross-checked against the raw files, not against a recorded total.
+
+        The loader's failure mode is dropping or duplicating entries, and
+        counting the JSON directly reaches the same number by a different path,
+        so the check stays load-bearing while the corpus grows. A literal here
+        only ever meant "the corpus was this size the day someone looked".
+        """
+        on_disk = sum(
+            len(json.loads(path.read_text())["findings"]) for path in BENCHMARKS.glob("*.json")
+        )
+
+        assert on_disk
+        assert len(truth) == on_disk
 
     def test_the_distribution_is_the_one_the_design_assumes(
         self, truth: list[ReviewedFinding]
@@ -83,9 +95,10 @@ class TestTheGroundTruth:
         """If this changes, the majority baseline moves and the argument for
         splitting the directions has to be re-made rather than inherited."""
         true_positives = sum(1 for f in truth if f.is_true_positive)
+        accepted = sum(1 for f in truth if not f.is_true_positive)
 
         assert true_positives == 194
-        assert len(truth) - true_positives == 51
+        assert accepted == 58
 
     def test_every_finding_carries_its_target(self, truth: list[ReviewedFinding]) -> None:
         assert {f.target for f in truth} == {"healthchecks", "netbox", "pretix"}
@@ -118,9 +131,17 @@ class TestTheMajorityBaseline:
     def test_the_majority_baseline_makes_every_possible_upgrade_error(
         self, truth: list[ReviewedFinding]
     ) -> None:
+        """Every accepted risk is upgraded, which is the claim in the name.
+
+        Expressed against the accepted-risk population rather than a literal,
+        because "every possible" is a relationship to that population and a
+        pinned count silently stops asserting it as the corpus grows.
+        """
+        accepted = sum(1 for f in truth if not f.is_true_positive)
         result = score(AlwaysSays(Verdict.TRUE_POSITIVE), truth, name="majority")
 
-        assert result.upgrades == 51
+        assert accepted
+        assert result.upgrades == accepted
         assert result.downgrades == 0
 
     def test_saying_accepted_risk_to_everything_is_the_mirror(
@@ -229,7 +250,7 @@ class TestAbstainingIsNotFree:
     def test_abstentions_are_visible(self, truth: list[ReviewedFinding]) -> None:
         result = score(AlwaysSays(Verdict.ABSTAINED), truth, name="silent")
 
-        assert result.abstentions() == 245
+        assert result.abstentions() == len(truth)
         assert result.coverage() == 0.0
 
     def test_selective_abstention_cannot_inflate_recall(self) -> None:
@@ -288,10 +309,11 @@ class TestHeldOutIsTheHonestNumber:
     does this well" would have been a measurement of memorisation.
     """
 
-    def test_held_out_scores_all_245(self, truth: list[ReviewedFinding]) -> None:
+    def test_held_out_scores_every_finding(self, truth: list[ReviewedFinding]) -> None:
         result = held_out_by_rule(truth)
 
-        assert sum(result.total(actual) for actual in result.matrix) == 245
+        assert truth
+        assert sum(result.total(actual) for actual in result.matrix) == len(truth)
 
     def test_held_out_is_worse_than_fitted_on_accepted_risks(
         self, truth: list[ReviewedFinding]
@@ -302,10 +324,17 @@ class TestHeldOutIsTheHonestNumber:
         assert honest.recall(Verdict.ACCEPTED_RISK) < fitted.recall(Verdict.ACCEPTED_RISK)
 
     def test_the_honest_number_is_about_half(self, truth: list[ReviewedFinding]) -> None:
-        """Pinned, because this is the figure the phase's argument rests on."""
+        """Pinned, because this is the figure the phase's argument rests on.
+
+        It moved from 26/51 when `DJM-002` landed: that rule contributed seven
+        findings, all reviewed `accepted_risk`, and a rule whose verdicts are
+        unanimous is one held-out prediction gets right. So the ratio improved
+        for a reason that is understood rather than drifting, which is the only
+        kind of movement a pinned figure should be allowed.
+        """
         honest = held_out_by_rule(truth)
 
-        assert honest.recall(Verdict.ACCEPTED_RISK) == pytest.approx(26 / 51, abs=0.005)
+        assert honest.recall(Verdict.ACCEPTED_RISK) == pytest.approx(33 / 58, abs=0.005)
         assert honest.recall(Verdict.TRUE_POSITIVE) == pytest.approx(190 / 194, abs=0.005)
 
     def test_folds_are_pooled_not_averaged(self, truth: list[ReviewedFinding]) -> None:
@@ -330,7 +359,7 @@ class TestTheContestedSet:
         rules = {f.rule_id for f in truth}
 
         assert len(contested) == 7
-        assert len(rules) == 29
+        assert len(rules) == 30
 
     def test_the_contested_rules_are_the_ones_with_both_verdicts(
         self, truth: list[ReviewedFinding]
@@ -352,7 +381,8 @@ class TestTheContestedSet:
     def test_headroom_counts_findings_not_rules(self, truth: list[ReviewedFinding]) -> None:
         affected, total = headroom(truth)
 
-        assert (affected, total) == (110, 245)
+        assert affected == 110
+        assert total == len(truth)
 
     def test_a_single_verdict_corpus_has_no_contested_rules(self) -> None:
         findings = [
@@ -472,10 +502,23 @@ class TestBaselineTable:
             "by-rule (held out)",
         }
 
-    def test_every_baseline_scores_all_245(self, truth: list[ReviewedFinding]) -> None:
+    def test_every_baseline_scores_every_reviewed_finding(
+        self, truth: list[ReviewedFinding]
+    ) -> None:
+        """Conservation: a baseline must place each finding in exactly one cell.
+
+        Checked against the size of its own input rather than a recorded corpus
+        total. The property is that nothing is dropped or double-counted, and
+        pinning a literal expressed that only for as long as the corpus stood
+        still -- it broke whenever an unrelated family gained a rule, which
+        taught nothing about scoring. The `truth` guard keeps the check from
+        passing vacuously on an empty load.
+        """
+        assert truth
+
         for result in baselines(truth):
             counted = sum(result.total(actual) for actual in result.matrix)
-            assert counted == 245, result.name
+            assert counted == len(truth), result.name
 
     def test_no_baseline_is_perfect(self, truth: list[ReviewedFinding]) -> None:
         """If one were, the corpus would not be measuring anything."""

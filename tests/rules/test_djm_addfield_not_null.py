@@ -6,6 +6,7 @@ import textwrap
 from collections.abc import Callable
 
 from djaudit.context import ProjectContext
+from djaudit.rules._migrations import MigrationRule
 from djaudit.rules.djm_addfield_not_null import NonNullableAddFieldWithoutDefault
 
 Build = Callable[[dict[str, str]], ProjectContext]
@@ -49,8 +50,18 @@ def project(build: Build, files: dict[str, str]) -> ProjectContext:
     return build({**base, **files})
 
 
+def findings_for(rule: MigrationRule, ctx: ProjectContext) -> list[str]:
+    """Messages from one rule, run the way the engine runs it.
+
+    Shared with the other `DJM` test modules so they all exercise `check`,
+    which is what resolves the family's scope. A test calling `inspect`
+    directly would leave `scope` empty and quietly measure a different rule.
+    """
+    return [f.message for f in rule.check(ctx)]
+
+
 def findings(ctx: ProjectContext) -> list[str]:
-    return [f.message for f in NonNullableAddFieldWithoutDefault().check(ctx)]
+    return findings_for(NonNullableAddFieldWithoutDefault(), ctx)
 
 
 CREATE = """\

@@ -11,7 +11,7 @@ described.
 ## Why the layer exists at all
 
 The deterministic engine answers "what is wrong here". It does not answer
-"which of these 245 findings should I read first", "what will this cost my
+"which of these findings should I read first", "what will this cost my
 team", or "what does the fixed version look like". Those are judgement calls,
 and a static rule that tried to make them would be guessing with the authority
 of a compiler.
@@ -128,7 +128,7 @@ alternative is users discovering them by being misled.
 
 ### The corpus prior is small
 
-`CORPUS_PRIOR` settles findings from 5 rules over 109 human-reviewed findings,
+`CORPUS_PRIOR` settles findings from 6 rules over 116 human-reviewed findings,
 and only where the review was unanimous across at least
 `MINIMUM_OBSERVATIONS = 5` findings. That is a genuine record, and it is three
 projects' worth. A rule not in the table is not settled, and the honest answer

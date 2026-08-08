@@ -59,13 +59,15 @@ def make_finding(
 
 
 @pytest.fixture(scope="module")
-def real_findings() -> list[Finding]:
+def real_findings_by_corpus() -> dict[str, list[Finding]]:
     if not BENCHMARK_ROOT.is_dir():
         pytest.skip("benchmark corpora not fetched")
-    findings: list[Finding] = []
-    for name in ("hc", "nb", "px"):
-        findings.extend(engine.run(BENCHMARK_ROOT / name).findings)
-    return findings
+    return {name: list(engine.run(BENCHMARK_ROOT / name).findings) for name in ("hc", "nb", "px")}
+
+
+@pytest.fixture(scope="module")
+def real_findings(real_findings_by_corpus: dict[str, list[Finding]]) -> list[Finding]:
+    return [f for findings in real_findings_by_corpus.values() for f in findings]
 
 
 class TestNoCredentialLeaves:
@@ -171,15 +173,27 @@ class TestNothingElseIsLost:
         assert "SECRET_KEY is assigned a string literal." in rendered
         assert rendered.rstrip().endswith("Is this a real defect in this codebase?")
 
-    def test_no_redaction_fires_on_any_real_finding(self, real_findings: list[Finding]) -> None:
+    def test_no_redaction_fires_on_any_real_finding(
+        self,
+        real_findings: list[Finding],
+        real_findings_by_corpus: dict[str, list[Finding]],
+    ) -> None:
         """Measured, not assumed.
 
         This runs against the *rendered prompt*, not against snippets and
         evidence. That distinction is the whole lesson: probing the narrower
         surface returned a comforting zero, and the full text -- which also
         carries the file path and the message -- fired on 99 of 245.
+
+        The self-proof is that all three corpora contributed, not that the
+        total equals some recorded number. A "no redaction fired" result is
+        worthless if the fixture silently loaded nothing, and that is the only
+        failure this guard needs to catch. Pinning the total instead would tie
+        an unrelated file to every rule the tool ever gains, and the exact
+        counts are already pinned far harder by `benchmarks/*.json`, which
+        record one triaged verdict per finding and are gated on every run.
         """
-        assert len(real_findings) == 245
+        assert [name for name, found in real_findings_by_corpus.items() if not found] == []
 
         fired = [f for f in real_findings if "<redacted:" in render_finding(f)]
 
@@ -295,9 +309,15 @@ class TestNotEveryFindingIsWorthACall:
     def test_it_saves_most_of_the_corpus(self, real_findings: list[Finding]) -> None:
         """The measurement that justifies the mechanism, run on real findings.
 
-        Seven contested rules cover 110 of 245 findings, so filtering removes
-        just over half the calls -- and 81 of those 110 are DJP-004 at 81:2,
-        which a later step can narrow further.
+        Seven contested rules cover 110 findings, so filtering removes more
+        than half the calls -- and 81 of those 110 are DJP-004 at 81:2, which a
+        later step can narrow further.
+
+        The saving is asserted as the property the name claims rather than as a
+        pinned remainder. The remainder was arithmetic on the corpus total, so
+        it restated a number this module has no stake in and broke whenever an
+        unrelated family gained a rule; what the mechanism promises is that the
+        majority of findings never become a call.
         """
         contested = frozenset(
             {"DJA-011", "DJA-014", "DJA-015", "DJD-002", "DJP-004", "DJS-009", "DJS-010"}
@@ -306,4 +326,4 @@ class TestNotEveryFindingIsWorthACall:
         asked = [f for f in real_findings if worth_asking(f, contested)]
 
         assert len(asked) == 110
-        assert len(real_findings) - len(asked) == 135
+        assert len(asked) * 2 < len(real_findings)

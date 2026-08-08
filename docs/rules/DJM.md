@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJM` — migration safety
 
-1 rules on what a migration does to a running database at the moment it
+2 rules on what a migration does to a running database at the moment it
 is applied: a lock it holds, a table it rewrites, a statement that aborts part
 way through. These are the defects that pass every test and fail only on
 production data, because the table is empty in CI and the lock nobody waits on
@@ -54,6 +54,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | Rule | Title | Severity | Confidence |
 |---|---|---|---|
 | [`DJM-001`](#djm-001--non-nullable-column-added-with-no-default-aborts-on-a-populated-table) | Non-nullable column added with no default aborts on a populated table | high | firm |
+| [`DJM-002`](#djm-002--alterfield-holds-an-exclusive-lock-for-the-length-of-the-table) | AlterField holds an exclusive lock for the length of the table | high | firm |
 
 ---
 
@@ -76,3 +77,25 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/howto/writing-migrations/>
 - <https://www.postgresql.org/docs/current/sql-altertable.html>
+
+---
+
+### DJM-002 — AlterField holds an exclusive lock for the length of the table
+
+**Severity** high · **Confidence** firm · **Tier** static
+
+**What it means.** Changing a column's type rewrites every row, and tightening a column to `NOT NULL` scans every row to prove the constraint holds. Postgres takes `ACCESS EXCLUSIVE` for both, which blocks reads as well as writes -- the table is unavailable for the duration, not merely unwritable. The duration is set by the row count, so this is instant in CI and an outage in production.
+
+**How to fix it.** For a type change, add the new column, backfill it in batches, switch reads over, then drop the old one. For a `NOT NULL`, add a `CHECK (column IS NOT NULL) NOT VALID` constraint, `VALIDATE` it under a lock that permits reads and writes, and only then set the column `NOT NULL` -- Postgres 12 and later recognise the proven constraint and skip the scan.
+
+**What this rule cannot see.**
+
+- Static analysis cannot tell which migrations have been applied, so only the leaf of each app's history is reported. The live tier reads `django_migrations` and does not have to guess.
+- Says nothing about how many rows the table holds, which is what decides whether the lock is a blip or an outage. The live tier's `pg_class.reltuples` sizing answers that; static analysis cannot.
+- Treats a change between text-shaped fields with a non-shrinking `max_length` as free, which holds for Postgres. A backend that rewrites on a widened `varchar` would be under-reported.
+- Compares the field as the migration declares it against the state replayed from earlier migrations. Where an earlier migration was unreadable the prior column is unknown and nothing is reported.
+
+**References**
+
+- <https://www.postgresql.org/docs/current/sql-altertable.html>
+- <https://docs.djangoproject.com/en/stable/howto/writing-migrations/>
