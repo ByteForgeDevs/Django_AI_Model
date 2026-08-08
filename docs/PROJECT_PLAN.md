@@ -5273,6 +5273,28 @@ cost is real, so it stays opt-in, sandboxed, and time-limited.
   it takes `1.0` to tell them apart. The last two were the `os.name != "posix"`
   guard, unreachable on this platform and reached deliberately by a test that
   fakes `nt`, because on Windows `os.getpgid` does not exist at all.
+
+  **Corrected while building 4.1.3: the interpreter flags were wrong, and so
+  were two of the properties above.** The runner shipped with `-I`, described
+  as isolation we wanted anyway. `-I` also implies `-P`, which stops Python
+  prepending the script's directory to `sys.path`, so `python -I manage.py
+  check` dies with `ModuleNotFoundError` on the project's own settings package.
+  Every Django project imports its settings that way, which made the runner
+  unable to run the one thing the live tier exists to run. It is now `-E -s`,
+  which keeps exactly what was wanted — `PYTHON*` variables ignored, user site
+  dropped — and gives up only the part that was breaking it.
+
+  Making the project importable then broke the bytecode test, which had been
+  passing because the import could not resolve at all rather than because
+  anything was suppressed. That exposed the second defect: `-E` ignores
+  `PYTHON*` variables including *ours*, so `PYTHONDONTWRITEBYTECODE` and
+  `PYTHONUNBUFFERED` were both being discarded. The audit had been writing
+  `__pycache__` into the target's tree, and every process killed by the timeout
+  had been losing its buffered output — the evidence a live rule needs most
+  when a command hangs partway through. `-B` and `-u` now say both in the only
+  form the interpreter will listen to; the environment keeps them for
+  `run_command` callers, which pass no flags. Each flag was verified by
+  removing it and watching the behaviour it protects fail. Mutation **74/74**.
 - **4.1.3** — `LiveContext`: Django version, resolved settings, database engine, migration state.
 - **4.1.4** — Graceful degradation — every live rule declares a static fallback, and absence of the live tier is reported, never silently ignored.
 - **4.1.5** — `--live` / `--no-live` CLI flags, defaulting to off, with a clear consent message explaining that target code will be executed.

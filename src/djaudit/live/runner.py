@@ -293,15 +293,32 @@ def run_python(
 ) -> Outcome:
     """Run the target's interpreter, isolated from ours.
 
-    `-I` is the whole reason this wrapper exists rather than callers building
-    the list themselves. It implies `-s` and `-E`, so the user site directory is
-    ignored and `PYTHON*` variables are disregarded even if one reached the
-    environment by a route this module did not anticipate. That makes the
-    isolation belt-and-braces: `build_environment` refuses to *set* them, and
-    `-I` means the interpreter would ignore them anyway.
+    `-E -s` rather than `-I`, and the difference is load-bearing. `-I` is
+    documented as implying `-E -P -s`, and that `-P` is fatal here: it stops
+    Python prepending the script's own directory to `sys.path`, so
+    `python -I manage.py check` dies with `ModuleNotFoundError` on the project's
+    own settings package. Every Django project depends on that entry, so `-I`
+    would have made the live tier unable to run the one thing it exists to run.
+    Measured, not inferred, against a real project.
+
+    What we keep is what we actually wanted. `-E` makes the interpreter ignore
+    every `PYTHON*` variable, so the isolation is belt-and-braces:
+    `build_environment` refuses to *set* them and `-E` means they would be
+    disregarded even if one arrived by a route this module did not anticipate.
+    `-s` drops the user site directory, so a package installed in the invoking
+    user's home cannot answer an import on the target's behalf.
+
+    `-B` and `-u` are here because `-E` is honest about ignoring `PYTHON*`
+    variables: it ignores *ours* too. `build_environment` sets
+    `PYTHONDONTWRITEBYTECODE` and `PYTHONUNBUFFERED`, and under `-E` the
+    interpreter disregarded both, so the audit really was writing `__pycache__`
+    into the target's tree and really was losing the output of any process the
+    timeout killed. Restating them as flags is the only form the interpreter
+    will listen to. They stay in the environment as well, for `run_command`
+    callers that are not passing `-E`.
     """
     return run_command(
-        [str(interpreter.executable), "-I", *arguments],
+        [str(interpreter.executable), "-E", "-s", "-B", "-u", *arguments],
         cwd=cwd,
         timeout=timeout,
         extra_environment=extra_environment,
