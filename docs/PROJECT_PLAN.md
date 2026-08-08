@@ -5210,7 +5210,24 @@ rules come first; the live tier is then built for consumers that exist.
   shadowed `dataclasses.field` so the module did not import at all, and
   `_migration_class` preferred the resolved base over the name, handing back an
   empty `ProjectMigration` helper instead of the class Django actually loads.
-- **4.2.2** — Build the dependency graph; detect multiple leaf nodes and conflicts.
+- **4.2.2** — Build the dependency graph; detect multiple leaf nodes and conflicts. **Done** —
+  `src/djaudit/migrations/graph.py`, 23 tests, mutation **20/20**. Agrees with
+  Django on all three corpora: **29 apps, exactly one leaf each, zero conflicts,
+  zero ordering violations** in the plan. Two defects the corpus found rather
+  than the author, both about squashes:
+  - A dependency on a migration a squash *replaces* has to resolve to the
+    squash, as Django's loader does. Without it the squash had nothing depending
+    on it and read as a second leaf — pretix reported **nine** leaves in
+    `pretixbase` and a conflict Django does not have.
+  - Superseded migrations must be excluded as *dependents*, not only as
+    candidates. pretix's `sendmail.0012` depends on the very squash that
+    replaces it, which made the squash look required and the app report **no
+    leaf at all** — a state a cycle-free graph cannot be in.
+
+  The two corpora disagree on whether replaced files stay on disk (pretix keeps
+  all 157, NetBox deletes all 476), so both paths are exercised by real data.
+  `plan()` omits superseded migrations: planning both halves would have replayed
+  pretix's first 157 migrations twice, re-adding every column in them.
 - **4.2.3** — Classify operations: schema, data, index, constraint, `RunPython`, `RunSQL`, `SeparateDatabaseAndState`.
 
 ### Step 4.3 — Static migration rules
