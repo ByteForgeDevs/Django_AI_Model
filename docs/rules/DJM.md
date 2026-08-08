@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJM` — migration safety
 
-5 rules on what a migration does to a running database at the moment it
+6 rules on what a migration does to a running database at the moment it
 is applied: a lock it holds, a table it rewrites, a statement that aborts part
 way through. These are the defects that pass every test and fail only on
 production data, because the table is empty in CI and the lock nobody waits on
@@ -58,6 +58,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJM-003`](#djm-003--addindex-blocks-writes-for-the-length-of-the-index-build) | AddIndex blocks writes for the length of the index build | medium | firm |
 | [`DJM-004`](#djm-004--removefield-drops-a-column-the-running-release-still-selects) | RemoveField drops a column the running release still selects | high | firm |
 | [`DJM-005`](#djm-005--rename-moves-a-name-the-running-release-still-queries) | Rename moves a name the running release still queries | high | firm |
+| [`DJM-006`](#djm-006--irreversible-data-operation-blocks-rollback-of-a-schema-change) | Irreversible data operation blocks rollback of a schema change | medium | firm |
 
 ---
 
@@ -168,3 +169,25 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/models/fields/#db-column>
 - <https://docs.djangoproject.com/en/stable/ref/migration-operations/#renamefield>
+
+---
+
+### DJM-006 — Irreversible data operation blocks rollback of a schema change
+
+**Severity** medium · **Confidence** firm · **Tier** static
+
+**What it means.** `Migration.unapply` checks every operation's `reversible` before running any of them, so one data operation with no reverse aborts the unapply of the whole migration with `IrreversibleError`. The schema change beside it is reversible on its own and never gets the chance -- a failed deploy has no scripted way back.
+
+**How to fix it.** Move the data operation into a migration of its own, so the schema migration can be unapplied by itself and the irreversibility is confined to a migration that changes no schema. If the data pass only fills a column this same migration adds, `reverse_code=RunPython.noop` is also honest, because unapplying drops that column anyway. Do not add a `noop` reverse to an operation that destroyed data -- it does not record that the change is irreversible, it lets `migrate` walk backwards past it.
+
+**What this rule cannot see.**
+
+- Static analysis cannot tell which migrations have been applied, so only the leaf of each app's history is reported. The live tier reads `django_migrations` and does not have to guess.
+- A data operation that is irreversible on its own is not reported. That is usually the honest state for a pass that deletes or overwrites, and the rule does not read the forward function's body closely enough to tell an oversight from a decision.
+- An explicit `reverse_code=None` or `reverse_sql=None` reads as a supplied reverse and is not reported, although Django treats it as irreversible. The parser records whether the argument was written, not what it evaluates to.
+- A reverse-less operation nested in `SeparateDatabaseAndState` fails in `unapply`'s second phase rather than its first, so a migration with `atomic = False` is left partly unwound instead of wholly unmoved. Both are reported the same way.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/migration-operations/#runpython>
+- <https://docs.djangoproject.com/en/stable/howto/writing-migrations/#migrations-that-add-unique-fields>

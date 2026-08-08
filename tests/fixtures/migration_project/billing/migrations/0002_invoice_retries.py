@@ -31,9 +31,24 @@ the two are otherwise the same operation on the same kind of column.
 the previous release still names in every `SELECT` it makes. Its twin in
 `ledger` renames the same column and then pins it with `db_column`, so the
 attribute moves and the column does not.
+
+`DJM-006` is the sixth: the `RunPython` below has no reverse, so unapplying
+this migration raises `IrreversibleError` in `Migration.unapply`'s first phase
+-- before any operation runs. Every schema operation above it is reversible on
+its own and none of them gets the chance, so a failed deploy has no scripted
+way back. Its twin in `ledger` is the same backfill with
+`reverse_code=migrations.RunPython.noop`, which is honest here rather than a
+formality: unapplying drops the column the backfill wrote, so undoing the data
+pass really is a no-op.
 """
 
 from django.db import migrations, models
+
+
+def backfill_retries(apps, schema_editor):
+    """Fill the column this migration adds, for the rows `0001_initial` created."""
+    Invoice = apps.get_model("billing", "Invoice")
+    Invoice.objects.filter(retries__isnull=True).update(retries=0)
 
 
 class Migration(migrations.Migration):
@@ -62,5 +77,8 @@ class Migration(migrations.Migration):
             model_name="invoice",
             old_name="created",
             new_name="opened",
+        ),
+        migrations.RunPython(
+            code=backfill_retries,
         ),
     ]

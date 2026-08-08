@@ -280,6 +280,13 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
         'field=models.DateTimeField(auto_now_add=True, db_column="created"),',
         "field=models.DateTimeField(auto_now_add=True),",
     ),
+    (
+        "DJM-006",
+        "drop the reverse from the backfill beside the schema changes",
+        MCONTROL,
+        "            reverse_code=migrations.RunPython.noop,\n",
+        "",
+    ),
 )
 
 FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...], str], ...] = (

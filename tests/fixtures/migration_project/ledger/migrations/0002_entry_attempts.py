@@ -32,14 +32,28 @@ is written after the rename because that is the order `makemigrations`
 produces: the autodetector runs `generate_renamed_fields()` before
 `generate_altered_fields()`.
 
+The `DJM-006` control is the `RunPython` below. It is the same backfill
+`billing` runs, carrying `reverse_code=migrations.RunPython.noop` -- which is
+honest here rather than a formality, because unapplying this migration drops
+the column the backfill wrote, so undoing the data pass really is a no-op. Note
+what the control is *not*: it is not a bare `RunPython` moved into its own
+migration, because the rule's other remediation is exactly that, and a control
+built from it would be measuring a different fix from the one named here.
+
 `scripts/fixture_controls_probe.py` removes each fix in turn -- the `default=0`,
-the widened limit, the concurrency, the wrapper and the pin -- and requires the
-matching rule to then report this file, so every control is known to be
-reachable rather than assumed to be.
+the widened limit, the concurrency, the wrapper, the pin and the reverse -- and
+requires the matching rule to then report this file, so every control is known
+to be reachable rather than assumed to be.
 """
 
 from django.contrib.postgres.operations import AddIndexConcurrently
 from django.db import migrations, models
+
+
+def backfill_attempts(apps, schema_editor):
+    """Fill the column this migration adds, for the rows `0001_initial` created."""
+    Entry = apps.get_model("ledger", "Entry")
+    Entry.objects.filter(attempts__isnull=True).update(attempts=0)
 
 
 class Migration(migrations.Migration):
@@ -73,5 +87,9 @@ class Migration(migrations.Migration):
             model_name="entry",
             name="opened",
             field=models.DateTimeField(auto_now_add=True, db_column="created"),
+        ),
+        migrations.RunPython(
+            code=backfill_attempts,
+            reverse_code=migrations.RunPython.noop,
         ),
     ]

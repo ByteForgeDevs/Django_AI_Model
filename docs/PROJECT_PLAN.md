@@ -5570,7 +5570,76 @@ rules come first; the live tier is then built for consumers that exist.
   changes, so ordinary queries survive and only traversal breaks. The one
   documented gap is a model whose table was already fixed by a `db_table` in
   its own `Meta`, which the replay does not track.
-- **4.3.6** — `DJM-006` `RunPython` with no reverse, blocking rollback.
+- **4.3.6** — `DJM-006` `RunPython` with no reverse, blocking rollback. **Done** —
+  and the plain form of that specification is a bad rule, which the corpus
+  said before a line of it was written. Across the three projects there are
+  **162 `RunPython` operations and only 11 lack a reverse**; the single one of
+  those at any leaf is pretix's
+  `sendmail.0011_remove_cross_event_scheduled_mails`, whose forward pass is two
+  `.delete()` calls against rows that should never have existed. Nothing undoes
+  a delete. The naive rule would have scored **0 for 1** there, and its advice
+  would have been actively harmful: `RunPython.noop` does not mean "this cannot
+  be undone", it means "undoing this is a no-op", so adding one *permits*
+  `migrate` to walk backwards past the deletion. An honestly irreversible
+  operation says so by having no reverse, which is exactly Django's default.
+
+  So irreversibility is not the defect. The defect is irreversibility placed
+  where it revokes somebody else's reverse, and `Migration.unapply` is where
+  that becomes provable. Its **first** phase walks every operation and raises
+  `IrreversibleError` if any one is not `reversible` — before the second phase
+  executes a single statement. `RunPython.reversible` is `reverse_code is not
+  None` and `RunSQL.reversible` is `reverse_sql is not None`. So one
+  reverse-less data operation aborts the unapply of the *entire* migration, and
+  a perfectly reversible `AddField` in the same list never gets its
+  `database_backwards` called. The author of that `AddField` wrote something
+  Django can undo and a `RunPython` three lines below took it away.
+
+  The rule therefore requires a co-located operation whose reverse would
+  actually move the database — `SCHEMA`, `INDEX` or `CONSTRAINT`. `STATE` is
+  excluded because `AlterModelOptions` emits no DDL in either direction, and
+  `UNKNOWN` is excluded because a third-party operation might emit none either:
+  the same refusal to call an unrecognised operation harmless that `classify`
+  makes, applied in the direction that stays quiet. That guard is the whole
+  rule — it is what keeps pretix's leaf `.delete()` silent, and it is why the
+  measurement below is 0 rather than 1.
+
+  The remediation is **not** "add a reverse". It is *split the data operation
+  into its own migration*, which is correct whether or not the pass could have
+  been reversed: the schema migration then unapplies on its own and the
+  irreversibility is confined to a migration with no schema to unwind. `noop`
+  is offered second, for the case where the data pass only fills a column the
+  schema half adds — four of the eleven are exactly that and their filenames
+  say so — because it is only sometimes honest and this rule does not read the
+  forward body closely enough to know when.
+
+  One nesting fact was verified rather than assumed. `SeparateDatabaseAndState`
+  does not override `reversible`, and `Operation.reversible` is a plain class
+  attribute set to `True`, so a reverse-less `RunPython` *inside* the wrapper
+  passes phase one and raises from phase two instead — by which point phase two
+  has already unapplied everything listed after the wrapper, since it iterates
+  the reverse of file order. Under the default `atomic = True` the transaction
+  takes that back; under `atomic = False` it does not, and the database is left
+  half-way home. Nested operations are reported because of that, not in spite
+  of it.
+
+  Scope was extended past the specification to `RunSQL`, which has the same
+  property under a different name. It is not a flood: NetBox writes 76
+  reverse-less `RunSQL`s and only 9 of its migrations pair one with a schema
+  change, none at a leaf.
+
+  *Verified:* 35 unit tests, mutation **24/24**. Two of those tests exist
+  because the harness does not mutate subscripts or calls, so `blocked[0]` and
+  the evidence's ordering were unmeasured — both were then proved load-bearing
+  by hand. The ordering fix is worth recording: the first draft used
+  `sorted(...)` over a set, which is deterministic but **untestable**, because
+  either order of two names is the sorted order for some pair of names, and the
+  unsorted mutant survived. Replacing it with `dict.fromkeys` over file order
+  gives output that is both deterministic *and* falsifiable, and a reversal now
+  fails two tests. Sixth defect/control pair added, **30/30 controls
+  load-bearing**; the control supplies `noop` rather than moving the data pass
+  out, because building it from the other remediation would have measured a
+  different fix. **0 findings on all three corpora**, exactly as the probe
+  predicted. Corpus totals unchanged at 257.
 - **4.3.7** — `DJM-007` `RunPython` iterating an unbounded queryset.
 - **4.3.8** — `DJM-008` schema and data operations in one atomic migration, holding a lock during a backfill.
 - **4.3.9** — `DJM-009` `AddConstraint` validated immediately rather than `NOT VALID` then validated.
@@ -6150,7 +6219,7 @@ remove from them, and `6.5.3` asserts that by trying.
   Answers four questions a non-specialist actually asks — *who this affects*,
   *what it costs*, *how widespread it is*, *how urgent it is* — plus a fifth
   the vendors never print: **when this does not apply to you.** That last one
-  is free, because a measurement showed **all 72 rules carry `limitations`**,
+  is free, because a measurement showed **all 73 rules carry `limitations`**,
   the field recording what the rule cannot see. Those caveats are rendered
   **verbatim from `RuleMeta.limitations`**, never paraphrased; a mutant that
   truncated them to twenty characters was caught.
@@ -6537,10 +6606,10 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **72 rules are
+document specifies, and most of it is still only specified: **73 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-and the first five of Phase 4's migration rules.
+and the first six of Phase 4's migration rules.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against
