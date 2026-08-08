@@ -24,6 +24,7 @@ import pathlib
 
 import pytest
 
+from djaudit.context import SettingsModule, SettingsRole
 from djaudit.discovery import build_context
 from djaudit.engines import (
     Divergence,
@@ -33,6 +34,7 @@ from djaudit.engines import (
     classify,
     divergence,
     module_engines,
+    module_name,
     project_engines,
 )
 from djaudit.settings import resolve_all
@@ -500,3 +502,46 @@ class TestNarrowingToTheDivergingAlias:
         found = self.verdict(tmp_path, one_db(PG))
         with pytest.raises(dataclasses.FrozenInstanceError):
             found.verdict = Portability.DIVERGENT  # type: ignore[misc]
+
+
+class TestChoosingTheDevelopersDatabase:
+    """`default` when conditionality cannot decide it."""
+
+    def test_a_development_module_wins_over_a_production_one(self, tmp_path: pathlib.Path) -> None:
+        # Both assignments are unconditional, so `conditional` says nothing.
+        # The role does: a module that does not reach production is the
+        # developer's by definition.
+        found = divergence(choices(build(tmp_path, one_db(PG), dev=one_db(LITE))))
+        assert found.default is not None
+        assert found.default.vendor is Vendor.SQLITE
+        assert found.default.module.dotted == "config.dev"
+        assert [a.vendor for a in found.alternatives] == [Vendor.POSTGRESQL]
+
+    def test_an_unconditional_engine_in_another_module_is_an_alternative(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # Requiring an alternative to be conditional made this return nothing
+        # for the one shape the plan set out to catch.
+        found = divergence(choices(build(tmp_path, one_db(PG), dev=one_db(LITE))))
+        assert found.alternatives != ()
+        assert all(a.default for a in found.alternatives)
+
+
+class TestNamingAModule:
+    """`module_name`, the one place an unnamed module is handled."""
+
+    def test_a_dotted_name_is_used_when_there_is_one(self) -> None:
+        module = SettingsModule(
+            path=pathlib.Path("/p/config/settings.py"),
+            dotted="config.settings",
+            role=SettingsRole.PRODUCTION,
+        )
+        assert module_name(module) == "config.settings"
+
+    def test_a_root_package_falls_back_to_its_filename(self) -> None:
+        # A settings module that is its tree's root resolves to an empty
+        # dotted name, and "the 'default' database in  is ..." names nothing.
+        module = SettingsModule(
+            path=pathlib.Path("/p/__init__.py"), dotted="", role=SettingsRole.PRODUCTION
+        )
+        assert module_name(module) == "__init__.py"

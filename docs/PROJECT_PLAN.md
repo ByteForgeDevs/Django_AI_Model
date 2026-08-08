@@ -6534,7 +6534,7 @@ rules come first; the live tier is then built for consumers that exist.
   chooses to do at import time happens with the file system and network access
   of whoever typed the command. The note states why that is worth doing at all
   — only Django can say what SQL a migration emits, and only Django can give a
-  second opinion on its own deployment checks, which is 2 of 78 rules — and
+  second opinion on its own deployment checks, which is 2 of 79 rules — and
   then states exactly what the subprocess is allowed: 10 environment variables
   in, 4 refused outright, a 30-second timeout enforced by killing the process
   group, 1 MiB captured per stream, stdin closed. It records the `PASSTHROUGH`
@@ -6673,7 +6673,59 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   `test_djs_021.py` under the other pairing, plus `frozen=True` and the
   `AnnAssign` guard mypy requires for narrowing.
 
-- **5.1.3** — `DJX-001` the meta-finding: development and production use different engines, which makes every rule below relevant.
+- **5.1.3** — `DJX-001` the meta-finding: development and production use
+  different engines, which makes every rule below relevant. **Done.**
+  `src/djaudit/rules/portability.py`, `tests/rules/test_djx_001.py`.
+
+  It fires once on Healthchecks (`hc/settings.py:208`, medium/certain) and is
+  silent on NetBox and pretix, whose engines are genuinely unreadable. One
+  finding per project, not per branch: a project has one decision to make here,
+  and three findings would be three copies of the same sentence.
+
+  **It subclasses `Rule` directly rather than `SettingsRule`, which every other
+  settings rule in this project uses.** `SettingsRule.groups()` skips modules
+  whose role does not reach production, and that is correct for hardening — a
+  development module is *supposed* to have `DEBUG = True`, and reporting it is
+  how a tool teaches people to ignore it. This rule inverts the premise: the
+  development module is not an exception to the finding, it is one half of it.
+  Built on `SettingsRule` it would have silently dropped the
+  Postgres-in-prod / SQLite-in-dev shape — the exact shape Step 5.1 exists for.
+
+  The cross-module test caught a real bug in 5.1.2's `Divergence`.
+  `alternatives` required `not c.default`, which reads as "the alternatives are
+  the conditional branches" and is right *within* one module. Across two
+  modules both assignments are unconditional, so `alternatives` was empty and
+  the rule bailed on the plan's own headline case. `conditional` distinguishes
+  development from production inside a module and means nothing across modules;
+  the module's **role** is what carries that distinction, and `default` now
+  prefers a choice in a module that does not reach production. This is the one
+  place the role comparison the plan originally described is the right tool.
+
+  The message is built from how each database is actually reached, because
+  saying "with nothing set" about both halves of a cross-module divergence —
+  literally true of each within its own file — reads as a contradiction. An
+  alternative in another module is named by that module; an alternative in the
+  same module is named by its guard.
+
+  Adding the first rule of a new family broke seven tests, and three of them
+  were the interesting kind: `test_registry`, `test_engine` and `test_rule_docs`
+  each used `DJX` as their stand-in for "a family with no rules". Each therefore
+  passed on a fact about the catalogue while appearing to test a filter, and
+  each would have gone on passing had the filter been ignored entirely. They now
+  assert what they were always meant to: that selection **partitions** the
+  corpus, and that an orphaned page is detected by name rather than by DJX
+  happening to be empty. The other four are the corpus counts moving with the
+  35th reviewed Healthchecks finding.
+
+  Mutation: 23 of 26 killed. The three survivors are two reference URLs and one
+  measured equivalent — an alias whose value has no node of its own is one
+  djaudit resolved rather than read, so its `ENGINE` is unreadable too and it
+  never survives to the report with a vendor; the type still admits `None`.
+  Two mutants that survived at first were real: the guard for "every branch is
+  opt-in, so nothing is the default" had no test, and the test that would have
+  covered it asserted `findings == []` — which passes for a rule that **raises**,
+  because the engine records rule exceptions rather than propagating them. The
+  helper now asserts the rule did not crash before asserting it found nothing.
 
 ### Step 5.2 — Divergence rules
 
@@ -7597,10 +7649,11 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **78 rules are
+document specifies, and most of it is still only specified: **79 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-all ten of Phase 4's migration rules, and its deployment-check gap rule.
+all ten of Phase 4's migration rules, its deployment-check gap rule, and the
+first of Phase 5's portability family.
 `DJM-010` is the first **live** rule: the first that reads the SQL a migration
 emits rather than predicting it from the operation. `DJS-028` is the first rule
 whose subject is this tool rather than the project it is auditing.

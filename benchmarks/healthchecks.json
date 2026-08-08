@@ -345,6 +345,16 @@
       "note": "path(f'{prefix}admin/', admin.site.urls) at hc/urls.py:17. The prefix comes from the path component of SITE_ROOT (urls.py:11-13), which is empty for the default SITE_ROOT and empty for any deployment served from the root of a domain -- so for effectively every instance the admin is at /admin/, which is what the rule says, hedged to tentative precisely because that prefix cannot be read statically. None of the suppressors apply: hc/settings.py installs no django-axes, no django-otp and no two-factor package, and the line above (urls.py:16) routes admin/login/ to the project's own login view, which is a usability choice rather than a rate limit. True positive rather than accepted risk because there is a concrete change available and it is not a costly one, and because the finding is info severity and tentative confidence, so it is hidden at both default thresholds and costs a reader nothing unless they go looking. Recorded here so that the day Healthchecks adds a lockout package the rule goes quiet and the benchmark notices.",
       "reviewed": "2026-08-03",
       "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "cdc81ac2eefb302b",
+      "rule_id": "DJX-001",
+      "verdict": "true_positive",
+      "file": "hc/settings.py",
+      "line": 208,
+      "note": "Verified against source, and Healthchecks states it itself. The comment above line 206 reads \"Default database engine is SQLite. So one can just check out code, install requirements.txt and do manage.py runserver and it works\", and the one above line 220 reads \"You can switch database engine to postgres or mysql using environment variable 'DB'. Travis CI does this.\" The three assignments at 207, 221 and 242 are literal and unambiguous: sqlite3 unconditionally, postgresql under `os.getenv(\"DB\") == \"postgres\"`, mysql under `os.getenv(\"DB\") in [\"mysql\", \"mariadb\"]`. Reported once rather than once per branch, and pointed at the SQLite alias because that is the half a developer gets by doing nothing. Worth noting the assignment is annotated (`DATABASES: Mapping[str, Any] = ...`), so this also exercises the AnnAssign path -- reading only bare `Assign` would have found no database here at all.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     }
   ]
 }

@@ -211,6 +211,15 @@ def database_configs(
     return {alias: tuple(configs) for alias, configs in found.items()}
 
 
+def module_name(module: SettingsModule) -> str:
+    """A settings module's dotted name, or its filename when it has none.
+
+    A module that is its tree's root package resolves to an empty dotted name,
+    and naming a finding after the empty string names nothing.
+    """
+    return module.dotted or module.path.name
+
+
 @dataclass(frozen=True)
 class EngineChoice:
     """One database this project could end up connected to.
@@ -265,7 +274,7 @@ class EngineChoice:
 
     def describe(self) -> str:
         """A phrase naming the engine and where it was written."""
-        where = self.module.dotted or self.module.path.name
+        where = module_name(self.module)
         engine = self.engine if self.engine is not None else "an engine we cannot read"
         return f"{engine} at {where}:{self.line}"
 
@@ -442,16 +451,33 @@ class Divergence:
 
     @property
     def default(self) -> EngineChoice | None:
-        """What runs when nothing is set -- the developer's database."""
-        return next((c for c in self.relevant if c.default), None)
+        """What runs when nothing is set -- the developer's database.
+
+        When the engines are split across modules they are all unconditional,
+        so conditionality alone cannot say which one a developer gets. The
+        module's role can: a module that does not reach production is the
+        development one by definition, and it is preferred here. This is the
+        one place the role comparison the plan described is the right tool.
+        """
+        plain = [c for c in self.relevant if c.default]
+        development = [c for c in plain if not c.module.role.reaches_production]
+        return next(iter(development or plain), None)
 
     @property
     def alternatives(self) -> tuple[EngineChoice, ...]:
-        """The opt-in databases whose vendor differs from the default's."""
+        """The other databases, whose vendor differs from the default's.
+
+        Not restricted to conditional assignments. Two settings modules each
+        assigning a different engine unconditionally are a divergence with no
+        `if` anywhere in it, and requiring one here made this return nothing
+        for exactly the shape the plan set out to catch.
+        """
         default = self.default
         if default is None:
             return ()
-        return tuple(c for c in self.relevant if not c.default and c.vendor is not default.vendor)
+        return tuple(
+            c for c in self.relevant if c is not default and c.vendor is not default.vendor
+        )
 
     @property
     def relevant(self) -> tuple[EngineChoice, ...]:
