@@ -5183,6 +5183,45 @@ cost is real, so it stays opt-in, sandboxed, and time-limited.
 ### Step 4.1 — Live tier runner
 
 - **4.1.1** — Environment detection: locate the target's interpreter (`.venv`, `poetry`, `uv`, `pipenv`, system).
+  **Done** — `src/djaudit/live/interpreter.py`, 49 tests, mutation **79/79**.
+  Nothing is executed and nothing is imported; detection reads directory
+  entries and one text file per candidate, so it is safe against a repository
+  nobody has vetted.
+
+  **The environment is identified by `pyvenv.cfg`, not by the directory name**,
+  because that file is what PEP 405 defines a virtual environment as. Its three
+  creators were told apart by *making one with each* rather than by reading
+  their documentation: stdlib `venv` writes `command`, `virtualenv` writes
+  `virtualenv = 20.35.4`, `uv` writes `uv = 0.12.1`, and all three write `home`.
+  stdlib `venv` also spells the version `version` where the other two spell it
+  `version_info`.
+
+  **The load-bearing behaviour is a refusal.** djaudit runs from a virtualenv
+  of its own, so `$VIRTUAL_ENV` is normally set and normally points at *ours*.
+  Following it would run the target's `manage.py` against our Django, our
+  settings and our packages, and every resulting finding would look completely
+  ordinary — a wrong answer that does not look like a failure. `$VIRTUAL_ENV`
+  is therefore believed only when it points inside the target, and any
+  candidate resolving to `sys.prefix` is refused outright. Verified against all
+  three corpora at once: with djaudit's own `$VIRTUAL_ENV` active, detection
+  declines on healthchecks, netbox and pretix and says why.
+
+  **Environments outside the project are recorded as declines, not guesses.**
+  Poetry and pipenv key their cache directories by a hash of the project path;
+  globbing the name half and taking a single match would silently attach to a
+  different checkout of the same project, which is the mistake the module
+  exists to prevent. `.tox` is declined because it holds one environment per
+  test factor and choosing between them would choose a Python version at
+  random. Each decline names the command that would answer it properly, which
+  needs the runner from 4.1.2.
+
+  Three mutation survivors were unreachable code rather than untested code:
+  `Path.resolve` defaults to `strict=False`, which was *measured* to return the
+  path unchanged for both a missing directory and a symlink loop rather than
+  raising, so two `except OSError` handlers could never run and were removed.
+  Two more were `frozen=True, slots=True` on value holders, which became
+  `NamedTuple`s so immutability is a property of the type rather than two
+  keyword arguments a reader has to trust were passed.
 - **4.1.2** — Subprocess runner with hard timeout, output capture, and no inherited secrets.
 - **4.1.3** — `LiveContext`: Django version, resolved settings, database engine, migration state.
 - **4.1.4** — Graceful degradation — every live rule declares a static fallback, and absence of the live tier is reported, never silently ignored.
