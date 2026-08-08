@@ -1475,6 +1475,26 @@
       "note": "Verified against source. Third `cp.voucher` traversal in this module, in a third test with its own CartPosition queryset. Test code, accurate claim, no production impact.",
       "reviewed": "2026-08-04",
       "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "ae2365bf8792d1a7",
+      "rule_id": "DJM-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/plugins/banktransfer/migrations/0012_org_level_plugin.py",
+      "line": 13,
+      "note": "Verified against source. `qs = Organizer.objects.filter(Exists(Event.objects.filter(organizer_id=OuterRef('pk'), plugins__contains='pretix.plugins.banktransfer')))` is evaluated in full by `for org in qs`, so every organizer running the plugin is held in memory at once inside the migration's transaction. `DJP-007` is silent on the same lines and correctly so: `Organizer` has a hand-written `save()` at models/organizer.py:121, which a `bulk_update` would not call. That is the point of the pair -- the write advice is withheld and the fetch is still unbounded, so without this rule nothing reports it. The remediation here is `.iterator(chunk_size=...)`, not a bulk write.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "c2606298574043e9",
+      "rule_id": "DJM-007",
+      "verdict": "true_positive",
+      "file": "src/pretix/plugins/returnurl/migrations/0002_auto_20240301_1355.py",
+      "line": 21,
+      "note": "Verified against source. `EventSettingsStore.objects.filter(key='returnurl_prefix')` is iterated directly, with a `cache.delete()` and a `save()` per row. The shape is exactly what the rule describes and the fix is one call, so it is a true positive; in fairness to pretix the filter bounds the result to events that configured this plugin, which on any real install is a small number, so the practical risk is lower than the shape suggests. This is the finding the syntactic fallback exists for: `Event_SettingsStore` is created by django-hierarkey rather than declared in a models.py, so the def-use chains resolve the queryset but cannot name the model, and a rule requiring a known model -- as `DJP-007` does -- reports nothing here.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     }
   ]
 }

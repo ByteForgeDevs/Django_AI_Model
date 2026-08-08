@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJM` — migration safety
 
-6 rules on what a migration does to a running database at the moment it
+7 rules on what a migration does to a running database at the moment it
 is applied: a lock it holds, a table it rewrites, a statement that aborts part
 way through. These are the defects that pass every test and fail only on
 production data, because the table is empty in CI and the lock nobody waits on
@@ -59,6 +59,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJM-004`](#djm-004--removefield-drops-a-column-the-running-release-still-selects) | RemoveField drops a column the running release still selects | high | firm |
 | [`DJM-005`](#djm-005--rename-moves-a-name-the-running-release-still-queries) | Rename moves a name the running release still queries | high | firm |
 | [`DJM-006`](#djm-006--irreversible-data-operation-blocks-rollback-of-a-schema-change) | Irreversible data operation blocks rollback of a schema change | medium | firm |
+| [`DJM-007`](#djm-007--data-migration-iterates-a-queryset-with-no-bound-on-the-rows-fetched) | Data migration iterates a queryset with no bound on the rows fetched | medium | firm |
 
 ---
 
@@ -191,3 +192,25 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/migration-operations/#runpython>
 - <https://docs.djangoproject.com/en/stable/howto/writing-migrations/#migrations-that-add-unique-fields>
+
+---
+
+### DJM-007 — Data migration iterates a queryset with no bound on the rows fetched
+
+**Severity** medium · **Confidence** firm · **Tier** static
+
+**What it means.** A queryset is evaluated into a list before the loop's first iteration, so this migration's peak memory is the size of the whole result set. A request that does the same is bounded by a page size and recovered by a retry; `migrate` is bounded by nothing, runs against production row counts rather than a developer's, and under the default `atomic = True` a process killed part-way through rolls everything back and leaves the deploy stranded between releases.
+
+**How to fix it.** Iterate with `.iterator(chunk_size=...)`, which streams rows from the server and holds one chunk at a time. Where the loop also writes each row, combine the two: collect a chunk, issue one `bulk_update` for it, and move on -- `DJP-007`'s advice on its own asks for every row in memory at once, which is the problem this rule is about. A loop that only ever assigns the same value needs no loop: a single `queryset.update()` does it in one statement and fetches nothing.
+
+**What this rule cannot see.**
+
+- Static analysis cannot tell which migrations have been applied, so only the leaf of each app's history is reported. The live tier reads `django_migrations` and does not have to guess.
+- The row count is not knowable from source. A table with a thousand rows loads fine and is reported the same as one with a hundred million, so the finding is about the shape rather than a prediction that this particular migration will fail.
+- An iterable this tool cannot show to be a queryset is left alone, including a queryset reached through a custom manager attribute rather than `objects`.
+- Only loops written directly in the `RunPython` forward function are considered. A loop in a helper it calls is not attributed back to the migration.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#iterator>
+- <https://docs.djangoproject.com/en/stable/topics/db/optimization/#retrieve-individual-objects-using-a-unique-filtering-attribute>

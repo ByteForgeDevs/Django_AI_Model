@@ -5640,7 +5640,92 @@ rules come first; the live tier is then built for consumers that exist.
   out, because building it from the other remediation would have measured a
   different fix. **0 findings on all three corpora**, exactly as the probe
   predicted. Corpus totals unchanged at 257.
-- **4.3.7** — `DJM-007` `RunPython` iterating an unbounded queryset.
+- **4.3.7** — `DJM-007` `RunPython` iterating an unbounded queryset. **Done** —
+  the first question was not how to detect this but whether it was already
+  detected. `DJP-007` reports a loop that writes each row, it explicitly
+  includes data migrations in its rationale, and 21 of its findings across the
+  three corpora sit inside migration files. Two rules reporting the same lines
+  would be a defect in this document, not a feature.
+
+  They are not the same claim, and the clearest evidence is that **their
+  remediations contradict each other**. `DJP-007`'s harm is N round trips and
+  its fix is to collect the rows and issue one `bulk_update` — which requires
+  every row in memory at once. This rule's harm *is* every row in memory at
+  once, and its fix is `.iterator(chunk_size=...)`, which holds none of them.
+  Advice that resolves one without naming the other makes the other worse, so
+  each rule now cross-references the other and this rule's remediation spells
+  out the combined form: iterate in chunks, bulk-write within each chunk.
+
+  The non-overlap was measured rather than argued. Of the three loops in leaf
+  `RunPython` bodies corpus-wide, NetBox's `dcim.0241` iterates a module-level
+  tuple of model classes and is not a queryset at all, and the other two are
+  pretix's `banktransfer.0012` and `returnurl.0002`. **`DJP-007` reports
+  neither**, and for two different reasons that are worth recording because
+  they are the reasons this rule exists:
+
+  - `banktransfer.0012` loops over `Organizer.objects.filter(Exists(...))` and
+    calls `org.save()`. `DJP-007` declines it because `Organizer` has a
+    hand-written `save()` — its largest documented blocker, covering 53 of
+    pretix's 68 writing loops. What it withholds is the *write* advice. The
+    fetch is still unbounded and nothing else was saying so.
+  - `returnurl.0002` loops over a `django-hierarkey` table that exists in no
+    `models.py`. `DJP-007` requires a named model; the row count does not
+    depend on knowing what the rows are called.
+
+  Those two are exactly what the rule reports, at 100% precision, and they are
+  the first `DJM` findings on the corpora since `DJM-003`. Healthchecks and
+  NetBox stay at zero.
+
+  The loop analysis is `djaudit.dataflow`'s, not this rule's. `ctx.loops`
+  already walks migration files and already resolves `qs = Model.objects...`
+  through def-use chains, which is one of the two pretix shapes; re-deriving
+  it here would have been a second, worse copy of a tested component. The
+  other shape needed a syntactic fallback — a chain passing through `objects`,
+  `_default_manager` or `_base_manager` — because hierarkey's model is absent
+  from the graph and `Target.value` comes back `None`. **Both paths are
+  load-bearing and each carries exactly one corpus finding**, so the fallback
+  is not speculative surface; the evidence records which path resolved each
+  finding so a reader can tell them apart.
+
+  Two quiet directions are measured rather than assumed. `.iterator()` and
+  `.aiterator()` are the remediation, and pretix uses them 20 times in its own
+  migrations, so that guard is exercised by real history and not only by
+  fixtures. A sliced queryset caps the rows and caps the damage.
+
+  **A surviving mutant found a false positive that review had not.** The `and`
+  joining "the chain reaches a manager" to "the chain has no terminal step"
+  could not be killed, because at that point there was no terminal step to
+  reject: `for k in Order.objects.aggregate(...)` and
+  `for x in Order.objects.count()` were both reported, and both return a
+  single value. The fix reuses `querysets.TERMINAL` rather than keeping a
+  second copy of the list, and the two chain walks — one for `.iterator()`,
+  one for the manager — collapsed into a single `_chain_names` helper. That
+  helper deliberately stops at a non-attribute call, which is what makes
+  `list(qs.iterator())` report: `list` puts back everything `.iterator()`
+  streamed.
+
+  Three other survivors were redundant code rather than untested code. The
+  operation-kind check in `inspect` and again in `_forward_names` could not be
+  killed because only `RunPython` carries a callable at all, so the name
+  lookup already implied it; a `Literal[False]` sentinel in a return type was
+  a mutable annotation no runtime test could reach. All three were removed
+  rather than papered over with a test. Final mutation score **47/47**, after
+  hand-checking the harness's blind spots — the `[-1]` on the dotted callable
+  name is covered by the `Backfill.run` test, and the evidence ordering is now
+  asserted by content rather than by index alone.
+
+  One test failure was worth more than the rule. Comparing two projects built
+  by `make_project` compared the second against itself, because the fixture
+  writes every project it is handed into the same directory — the contrasting
+  shapes now live in one migration, and the test says why.
+
+  The fixture pair is shaped by the `DJP-007` boundary: `billing`'s defect
+  accumulates into a list and issues one `bulk_update`, so it is `DJP-007`-
+  clean and this rule is the only one that speaks. Had it also saved in the
+  loop, both rules would have reported the same line and the fixture would
+  have proven nothing about either. Its `ledger` twin adds
+  `.iterator(chunk_size=500)` and flushes per chunk. 7 of 7 controls in that
+  fixture are proven load-bearing, 31 of 31 across all fixtures.
 - **4.3.8** — `DJM-008` schema and data operations in one atomic migration, holding a lock during a backfill.
 - **4.3.9** — `DJM-009` `AddConstraint` validated immediately rather than `NOT VALID` then validated.
 
@@ -6219,7 +6304,7 @@ remove from them, and `6.5.3` asserts that by trying.
   Answers four questions a non-specialist actually asks — *who this affects*,
   *what it costs*, *how widespread it is*, *how urgent it is* — plus a fifth
   the vendors never print: **when this does not apply to you.** That last one
-  is free, because a measurement showed **all 73 rules carry `limitations`**,
+  is free, because a measurement showed **all 74 rules carry `limitations`**,
   the field recording what the rule cannot see. Those caveats are rendered
   **verbatim from `RuleMeta.limitations`**, never paraphrased; a mutant that
   truncated them to twenty characters was caught.
@@ -6606,10 +6691,10 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **73 rules are
+document specifies, and most of it is still only specified: **74 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-and the first six of Phase 4's migration rules.
+and the first seven of Phase 4's migration rules.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

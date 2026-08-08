@@ -284,8 +284,16 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
         "DJM-006",
         "drop the reverse from the backfill beside the schema changes",
         MCONTROL,
+        "            code=backfill_attempts,\n"
         "            reverse_code=migrations.RunPython.noop,\n",
-        "",
+        "            code=backfill_attempts,\n",
+    ),
+    (
+        "DJM-007",
+        "fetch the whole table instead of iterating it in chunks",
+        MCONTROL,
+        "attempts__isnull=True).iterator(chunk_size=500)",
+        "attempts__isnull=True)",
     ),
 )
 

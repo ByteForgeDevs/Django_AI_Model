@@ -40,8 +40,13 @@ what the control is *not*: it is not a bare `RunPython` moved into its own
 migration, because the rule's other remediation is exactly that, and a control
 built from it would be measuring a different fix from the one named here.
 
+The `DJM-007` control is `recount_attempts`, which does the same work as
+`billing`'s `recount_retries` behind `.iterator(chunk_size=500)` and flushes
+each chunk rather than accumulating the whole table. Both halves matter: the
+iterator bounds the fetch, and the flush bounds the list the fetch feeds.
+
 `scripts/fixture_controls_probe.py` removes each fix in turn -- the `default=0`,
-the widened limit, the concurrency, the wrapper, the pin and the reverse -- and
+the widened limit, the concurrency, the wrapper, the pin, the reverse and the iterator -- and
 requires the matching rule to then report this file, so every control is known
 to be reachable rather than assumed to be.
 """
@@ -54,6 +59,19 @@ def backfill_attempts(apps, schema_editor):
     """Fill the column this migration adds, for the rows `0001_initial` created."""
     Entry = apps.get_model("ledger", "Entry")
     Entry.objects.filter(attempts__isnull=True).update(attempts=0)
+
+
+def recount_attempts(apps, schema_editor):
+    """Reset the counter for every row, holding one chunk at a time."""
+    Entry = apps.get_model("ledger", "Entry")
+    batch = []
+    for entry in Entry.objects.filter(attempts__isnull=True).iterator(chunk_size=500):
+        entry.attempts = 0
+        batch.append(entry)
+        if len(batch) >= 500:
+            Entry.objects.bulk_update(batch, ["attempts"])
+            batch = []
+    Entry.objects.bulk_update(batch, ["attempts"])
 
 
 class Migration(migrations.Migration):
@@ -90,6 +108,10 @@ class Migration(migrations.Migration):
         ),
         migrations.RunPython(
             code=backfill_attempts,
+            reverse_code=migrations.RunPython.noop,
+        ),
+        migrations.RunPython(
+            code=recount_attempts,
             reverse_code=migrations.RunPython.noop,
         ),
     ]

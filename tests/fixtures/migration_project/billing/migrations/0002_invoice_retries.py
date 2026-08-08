@@ -40,6 +40,16 @@ way back. Its twin in `ledger` is the same backfill with
 `reverse_code=migrations.RunPython.noop`, which is honest here rather than a
 formality: unapplying drops the column the backfill wrote, so undoing the data
 pass really is a no-op.
+
+`DJM-007` is the seventh: `recount_retries` loops over every matching row, so
+the queryset is evaluated into a list before the first iteration and the
+migration's peak memory is the size of the table. Note what it is *not*: it is
+not an N+1 write, because it accumulates and issues one `bulk_update`. That is
+`DJP-007`'s remediation applied in full, and it makes the memory worse -- the
+rows are held twice. A fixture that also saved in the loop would have been
+reported by both rules and would not have shown that this one has its own
+claim. Its twin in `ledger` adds `.iterator(chunk_size=500)` and flushes each
+chunk, which is the combined fix.
 """
 
 from django.db import migrations, models
@@ -49,6 +59,16 @@ def backfill_retries(apps, schema_editor):
     """Fill the column this migration adds, for the rows `0001_initial` created."""
     Invoice = apps.get_model("billing", "Invoice")
     Invoice.objects.filter(retries__isnull=True).update(retries=0)
+
+
+def recount_retries(apps, schema_editor):
+    """Reset the counter for every row, one object at a time."""
+    Invoice = apps.get_model("billing", "Invoice")
+    updated = []
+    for invoice in Invoice.objects.filter(retries__isnull=True):
+        invoice.retries = 0
+        updated.append(invoice)
+    Invoice.objects.bulk_update(updated, ["retries"])
 
 
 class Migration(migrations.Migration):
@@ -80,5 +100,9 @@ class Migration(migrations.Migration):
         ),
         migrations.RunPython(
             code=backfill_retries,
+        ),
+        migrations.RunPython(
+            code=recount_retries,
+            reverse_code=migrations.RunPython.noop,
         ),
     ]
