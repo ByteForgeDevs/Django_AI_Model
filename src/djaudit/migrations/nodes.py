@@ -122,6 +122,99 @@ and still appear throughout the corpus, so both are classified rather than
 falling through to ``UNKNOWN`` and being reported as unclassifiable.
 """
 
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Signature:
+    """One operation's positional parameters, and which of them names a model."""
+
+    params: tuple[str, ...]
+    model_param: str | None = None
+
+
+def _sig(*params: str, model: str | None = None) -> Signature:
+    return Signature(params=params, model_param=model)
+
+
+SIGNATURES: dict[str, Signature] = {
+    # django.db.migrations.operations.models
+    "CreateModel": _sig("name", "fields", "options", "bases", "managers", model="name"),
+    "DeleteModel": _sig("name", model="name"),
+    "RenameModel": _sig("old_name", "new_name", model="old_name"),
+    "AlterModelTable": _sig("name", "table", model="name"),
+    "AlterModelTableComment": _sig("name", "table_comment", model="name"),
+    "AlterUniqueTogether": _sig("name", "unique_together", model="name"),
+    "AlterIndexTogether": _sig("name", "index_together", model="name"),
+    "AlterOrderWithRespectTo": _sig("name", "order_with_respect_to", model="name"),
+    "AlterModelOptions": _sig("name", "options", model="name"),
+    "AlterModelManagers": _sig("name", "managers", model="name"),
+    "AddIndex": _sig("model_name", "index", model="model_name"),
+    "RemoveIndex": _sig("model_name", "name", model="model_name"),
+    "RenameIndex": _sig("model_name", "new_name", "old_name", "old_fields", model="model_name"),
+    "AddConstraint": _sig("model_name", "constraint", model="model_name"),
+    "RemoveConstraint": _sig("model_name", "name", model="model_name"),
+    "AlterConstraint": _sig("model_name", "name", "constraint", model="model_name"),
+    # django.db.migrations.operations.fields
+    "AddField": _sig("model_name", "name", "field", "preserve_default", model="model_name"),
+    "RemoveField": _sig("model_name", "name", model="model_name"),
+    "AlterField": _sig("model_name", "name", "field", "preserve_default", model="model_name"),
+    "RenameField": _sig("model_name", "old_name", "new_name", model="model_name"),
+    # django.db.migrations.operations.special -- none of these names a model
+    "RunSQL": _sig("sql", "reverse_sql", "state_operations", "hints", "elidable"),
+    "RunPython": _sig("code", "reverse_code", "atomic", "hints", "elidable"),
+    "SeparateDatabaseAndState": _sig("database_operations", "state_operations"),
+    # django.contrib.postgres.operations
+    "AddIndexConcurrently": _sig("model_name", "index", model="model_name"),
+    "RemoveIndexConcurrently": _sig("model_name", "index_name", model="model_name"),
+    "AddConstraintNotValid": _sig("model_name", "constraint", model="model_name"),
+    "ValidateConstraint": _sig("model_name", "name", model="model_name"),
+    "CreateExtension": _sig("name"),
+    "CreateCollation": _sig("name", "locale", "provider", "deterministic"),
+    "RemoveCollation": _sig("name", "locale", "provider", "deterministic"),
+}
+"""Each operation's positional parameters and its model, in Django's own order.
+
+``makemigrations`` writes every argument by keyword, so the corpus never
+exercises position and a single guessed offset looks correct across all 875 of
+its migrations. Hand-written migrations are the ones that use position -- and
+hand-written migrations are what the lock rules exist to catch.
+
+No single offset serves them all. ``RenameModel(old, new)`` names the old model
+first; ``RenameField(model, old, new)`` names the model first and the old column
+second, so reading position 0 as ``old_name`` for both makes every positional
+``RenameField`` rename its own table. ``field`` is position 2 of ``AddField``
+and nothing at all of ``RunSQL``, whose position 0 is a SQL statement that a
+shared offset reports as a model name.
+
+``model_param`` is recorded rather than guessed for the same reason. It is
+``model_name`` for field operations, ``name`` for model operations and
+``old_name`` for ``RenameModel`` -- and for ``CreateCollation`` the ``name``
+parameter is a collation, which a rule scanning for ``model_name`` then ``name``
+would report as a table.
+
+An operation missing from this table is a third-party one, read by the looser
+rules in the parser: it may still name a model, and an operation whose model
+went unrecognised could not be marked unreadable against that model.
+"""
+
+
+def argument(op_name: str, call: ast.Call, param: str) -> ast.expr | None:
+    """One argument of an operation call, given by keyword or by Django's position.
+
+    The single place that knows where an argument lives. Every hand-rolled
+    ``call.args[1]`` is a guess that happens to be right for the operation its
+    author had in mind and wrong for the next one.
+    """
+    for keyword in call.keywords:
+        if keyword.arg == param:
+            return keyword.value
+    signature = SIGNATURES.get(op_name)
+    if signature is not None and param in signature.params:
+        position = signature.params.index(param)
+        if len(call.args) > position:
+            return call.args[position]
+    return None
+
+
 CONCURRENT_OPERATIONS = frozenset({"AddIndexConcurrently", "RemoveIndexConcurrently"})
 """Postgres-only operations that build an index without an exclusive lock."""
 
@@ -183,6 +276,12 @@ class Operation:
 
     kwargs: dict[str, ast.expr] = dataclasses.field(default_factory=dict, repr=False, compare=False)
     node: ast.Call | None = dataclasses.field(default=None, repr=False, compare=False)
+
+    def argument(self, param: str) -> ast.expr | None:
+        """One of this operation's arguments, by Django's name for it."""
+        if self.node is None:
+            return None
+        return argument(self.name, self.node, param)
 
     @property
     def touches_data(self) -> bool:

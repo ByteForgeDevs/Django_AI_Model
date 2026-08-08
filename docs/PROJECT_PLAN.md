@@ -5228,7 +5228,55 @@ rules come first; the live tier is then built for consumers that exist.
   all 157, NetBox deletes all 476), so both paths are exercised by real data.
   `plan()` omits superseded migrations: planning both halves would have replayed
   pretix's first 157 migrations twice, re-adding every column in them.
-- **4.2.3** — Classify operations: schema, data, index, constraint, `RunPython`, `RunSQL`, `SeparateDatabaseAndState`.
+- **4.2.3** — Classify operations: schema, data, index, constraint, `RunPython`, `RunSQL`, `SeparateDatabaseAndState`. **Done** —
+  classification shipped with the parser in 4.2.1, so the substance here is
+  **state replay**: `src/djaudit/migrations/state.py`, 46 tests, mutation
+  **34/34**. `AlterField` states what a column becomes and nothing about what it
+  was, so "did this change the type" and "did this make a nullable column NOT
+  NULL" — most of `DJM-002` — are unanswerable without it.
+
+  Across the three corpora the replay resolves the prior column for **100% of
+  `RemoveField`s (185), 100% of `RenameField`s (49) and 99.2% of `AlterField`s
+  (771 of 777)**, and reaches **every model the three projects declare**. It
+  ends holding 8 models it declines to speak for, each a genuine case: models
+  moved between apps by a `SeparateDatabaseAndState` whose state half we
+  deliberately drop, and pretix's one third-party operation.
+
+  Four defects, all found by measuring rather than by reading:
+  - **`RunSQL`'s first argument is not a model.** A single positional fallback
+    read it as one, inventing **78 NetBox models and 5 pretix ones** — each a
+    whole SQL statement masquerading as a table, and each then marked
+    untrustworthy by a replay that had nothing to distrust. Fixed by recording
+    Django's actual signatures, including *which* parameter names the model:
+    `model_name` for field operations, `name` for model ones, `old_name` for
+    `RenameModel`, and none at all for `RunSQL`, `RunPython` and the extension
+    and collation operations, whose `name` is not a table.
+  - **One positional offset cannot serve every operation.** `RenameModel(old,
+    new)` names the old model first; `RenameField(model, old, new)` names the
+    model first, so a shared offset made every positional `RenameField` rename
+    its own table. `field` is position 2 of `AddField` and nothing at all of
+    `RunSQL`. `makemigrations` writes every argument by keyword, so the corpus
+    never exercises position and the bug is invisible across all 875 of its
+    migrations — while hand-written migrations, the ones these rules exist to
+    catch, are exactly the ones that use it.
+  - **A rename names the column it acts on in `old_name`.** Reading `field_name`
+    left all **49** corpus renames with no prior column — the operation whose
+    safety depends most on what is being renamed. A rate of exactly zero is a
+    defect, not a measurement.
+  - **A partially readable field list was recorded as complete.** A
+    `CreateModel` whose `fields=` could not be read end to end kept whichever
+    columns parsed, which reads exactly like a table that never had the others,
+    and would have every later `AlterField` look like it invented its column.
+
+  `Applied` carries three facts about the preceding state rather than the state
+  itself. Snapshotting the whole `MigrationState` per operation is the obvious
+  shape and cost **1.07s of NetBox's replay**, against 0.06s now, to serve
+  callers that read at most three fields out of it. One of the three is
+  `created_by`, which is the difference between an expensive operation and a
+  free one: a non-nullable `AddField` against a table an *earlier* migration
+  created rewrites production's rows, and against a table *this* migration
+  creates it rewrites nothing. **85 of the corpus's 1,286 `AddField`s** are the
+  free kind.
 
 ### Step 4.3 — Static migration rules
 

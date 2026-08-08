@@ -20,9 +20,11 @@ from typing import TYPE_CHECKING
 from djaudit.astutils import dotted_name, import_bindings, literal, resolve_dotted
 from djaudit.graph.fields import field_from_call
 from djaudit.migrations.nodes import (
+    SIGNATURES,
     Dependency,
     MigrationNode,
     Operation,
+    argument,
     classify,
 )
 
@@ -41,7 +43,7 @@ _SWAPPABLE = frozenset(
     }
 )
 
-_MODEL_KWARGS = ("model_name", "name")
+_MODEL_PARAMS = ("model_name", "name")
 """Where an operation puts the model it acts on, in the order Django prefers.
 
 ``AddField`` uses ``model_name``; ``CreateModel`` and ``DeleteModel`` use
@@ -148,25 +150,40 @@ def _dependencies(
     return tuple(_dependency(item, bindings) for item in value.elts), True
 
 
-def _string_arg(call: ast.Call, name: str, position: int) -> str | None:
-    """A string argument given either by keyword or by position."""
-    for keyword in call.keywords:
-        if keyword.arg == name:
-            resolved = literal(keyword.value)
-            return resolved if isinstance(resolved, str) else None
-    if len(call.args) > position:
-        resolved = literal(call.args[position])
-        return resolved if isinstance(resolved, str) else None
-    return None
+def _string_arg(op: str, call: ast.Call, param: str) -> str | None:
+    """A string argument of an operation, or ``None`` if it is not readable."""
+    node = argument(op, call, param)
+    if node is None:
+        return None
+    resolved = literal(node)
+    return resolved if isinstance(resolved, str) else None
 
 
-def _model_name(call: ast.Call, keywords: dict[str, ast.expr]) -> str | None:
-    """The model an operation acts on, lowercased as Django writes it."""
-    for key in _MODEL_KWARGS:
-        if key in keywords:
-            resolved = literal(keywords[key])
-            if isinstance(resolved, str):
-                return resolved.lower()
+def _model_name(op: str, call: ast.Call) -> str | None:
+    """The model an operation acts on, lowercased as Django writes it.
+
+    Django's own operations are read from the parameter their signature says
+    holds the model, so the ones that hold none -- ``RunSQL``, ``RunPython``,
+    the extension and collation operations -- yield nothing rather than their
+    first argument. Reading position 0 of a ``RunSQL`` turned 78 NetBox SQL
+    statements into models, each then marked untrustworthy by a replay that had
+    nothing to distrust.
+
+    A third-party operation has no signature here, and for those the looser
+    reading stands: it may well act on a model, and one whose model went
+    unrecognised could not be marked unreadable against that model.
+    """
+    signature = SIGNATURES.get(op)
+    if signature is not None:
+        if signature.model_param is None:
+            return None
+        found = _string_arg(op, call, signature.model_param)
+        return found.lower() if found is not None else None
+
+    for param in _MODEL_PARAMS:
+        found = _string_arg(op, call, param)
+        if found is not None:
+            return found.lower()
     if call.args:
         resolved = literal(call.args[0])
         if isinstance(resolved, str):
@@ -182,18 +199,14 @@ def _run_python_details(call: ast.Call, keywords: dict[str, ast.expr]) -> tuple[
     absent argument which is a decision nobody made.
     """
     reverse = "reverse_code" in keywords or len(call.args) > 1
-    forward: ast.expr | None = keywords.get("code")
-    if forward is None and call.args:
-        forward = call.args[0]
+    forward = argument("RunPython", call, "code")
     return reverse, dotted_name(forward) if forward is not None else None
 
 
 def _run_sql_details(call: ast.Call, keywords: dict[str, ast.expr]) -> tuple[bool, str | None]:
     """Whether a ``RunSQL`` has a reverse, and its forward SQL if readable."""
     reverse = "reverse_sql" in keywords or len(call.args) > 1
-    forward: ast.expr | None = keywords.get("sql")
-    if forward is None and call.args:
-        forward = call.args[0]
+    forward = argument("RunSQL", call, "sql")
     if forward is None:
         return reverse, None
     resolved = literal(forward)
@@ -216,13 +229,14 @@ def _operation(node: ast.expr, bindings: dict[str, str]) -> Operation | None:
     keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
 
     field_node = None
-    if "field" in keywords and isinstance(keywords["field"], ast.Call):
+    declared = argument(name, node, "field")
+    if isinstance(declared, ast.Call):
         # Positional trust: Django accepts only a field instance under
-        # ``field=``, so the ``*Field`` naming convention is not needed here
+        # ``field``, so the ``*Field`` naming convention is not needed here
         # and would only drop the third-party ones.
         field_node = field_from_call(
-            _string_arg(node, "name", 1) or "",
-            keywords["field"],
+            _string_arg(name, node, "name") or "",
+            declared,
             bindings,
             assume_field=True,
         )
@@ -241,17 +255,17 @@ def _operation(node: ast.expr, bindings: dict[str, str]) -> Operation | None:
 
     field_name = None
     if name in {"AddField", "RemoveField", "AlterField"}:
-        field_name = _string_arg(node, "name", 1)
+        field_name = _string_arg(name, node, "name")
 
     return Operation(
         name=name,
         kind=classify(name),
         lineno=node.lineno,
         end_lineno=node.end_lineno or node.lineno,
-        model_name=_model_name(node, keywords),
+        model_name=_model_name(name, node),
         field_name=field_name,
-        old_name=_string_arg(node, "old_name", 0),
-        new_name=_string_arg(node, "new_name", 1),
+        old_name=_string_arg(name, node, "old_name"),
+        new_name=_string_arg(name, node, "new_name"),
         field=field_node,
         reverse=reverse,
         sql=sql,
