@@ -75,7 +75,9 @@ class TestThresholds:
 
 class TestSelection:
     def test_selecting_an_unrelated_family_runs_nothing(self, vulnerable_project):
-        result = engine.run(vulnerable_project, families={Family.DJM})
+        # DJX is the family with no rules yet. Naming a populated one here would
+        # make this pass for the wrong reason the moment its rules land.
+        result = engine.run(vulnerable_project, families={Family.DJX})
         assert result.rules_run == 0
         assert result.findings == []
 

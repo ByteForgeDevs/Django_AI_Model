@@ -69,7 +69,9 @@ class TestLookup:
 
     def test_select_by_family(self):
         assert select(families={Family.DJS})
-        assert select(families={Family.DJM}) == []
+        assert select(families={Family.DJM})
+        # DJX has no rules yet, so it is what an empty selection looks like.
+        assert select(families={Family.DJX}) == []
 
     def test_select_by_tier(self):
         assert select(tiers={Tier.STATIC})

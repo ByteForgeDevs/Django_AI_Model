@@ -5280,7 +5280,69 @@ rules come first; the live tier is then built for consumers that exist.
 
 ### Step 4.3 — Static migration rules
 
-- **4.3.1** — `DJM-001` `AddField` non-nullable with a default, rewriting the table.
+- **4.3.1** — `DJM-001` `AddField` non-nullable with nothing to fill it. **Done.**
+  Two things had to be settled before any rule in this family could be written,
+  and both were settled by measurement.
+
+  **The premise in this line was wrong.** It specified "non-nullable with a
+  default, rewriting the table". Postgres 11 made `ADD COLUMN ... DEFAULT
+  <constant>` a catalogue-only change and Django's own floor is Postgres 14, so
+  that rewrite does not happen on any supported version; the rule would have
+  reported **307 operations** across the three corpora for a cost that is not
+  paid. The failure that does still happen is the opposite one — NOT NULL with
+  *no* default has nothing to write into existing rows, so Postgres rejects the
+  statement and the migration aborts part-applied. Django defends this twice and
+  both had to be subtracted: `makemigrations` prompts for a one-off default, so
+  survivors are hand-written — which is exactly what this family targets — and
+  `Field.get_default()` returns `''` rather than `None` for fields whose
+  `empty_strings_allowed` is set, which is **103 of NetBox's 199** non-nullable
+  `AddField`s with no declared default. Table-valued fields (`ManyToManyField`,
+  `TaggableManager` — 64 more) have no column to constrain at all.
+
+  **The family's reporting scope.** Every `DJM` rule judges an event rather than
+  a state, and almost every event it can see has already happened. That is worse
+  than noise: a migration in a shipped project's history *demonstrably ran*, so
+  a lock or abort reported against it is **provably false**. Reporting
+  family-wide would have produced ~1,600 findings against the 245 the entire
+  rest of the tool emits, at a true-positive rate of zero. So the live tier
+  reads `django_migrations` and is exact, and the static tier reports **the leaf
+  of each app's history** — the tip, where a migration being written now lands.
+  Declared as a heuristic in every rule's `limitations`: it over-reports a leaf
+  that shipped long ago and misses the first of two migrations added together.
+  Measured: the rule's predicate fires **44 times on NetBox's full history and 0
+  under leaf scope**, and each of those 44 is a false positive by the argument
+  above.
+
+  A second suppression fell out of the same measurement and generalises the
+  `creates_its_own_table` fact from 4.2.3: a table created by a migration that is
+  *itself* still pending is empty when the operation reaches it, because both run
+  in one deploy. That is what makes squashed initial migrations quiet — NetBox's
+  `circuits.0002_squashed_0029` adds 36 non-nullable FKs to tables
+  `0001_squashed` creates. It also subsumes `creates_its_own_table` outright,
+  which mutation testing exposed as dead code: a migration creating its own table
+  is in scope by construction whenever it is inspected.
+
+  **A Phase 3 decision had to be revisited.** `scope.py` demotes any finding in a
+  `migrations/` directory one rank, on the reasoning that a data migration runs
+  once against a known row count and is frozen afterwards. That is right for a
+  `DJP` query that happens to live in a migration and inverted for this family,
+  where the migration is not the setting of the defect but its subject —
+  demoting them would mark down every member of a family by definition. `DJM` is
+  now exempt, and still records its scope so the exemption is auditable.
+
+  Recall cannot be measured on a shipped project for the reason above, so
+  `tests/fixtures/migration_project` was built for it: `billing` carries the
+  defect, `ledger` its correctly-written twin differing only in the `default`,
+  and the manifest forbids findings in `ledger` by file rather than by line.
+  `fixture_controls_probe.py` grew a per-fixture control marker — a migration
+  cannot be named `controls.py` — and proves the twin reachable by removing its
+  default.
+
+  *Verified:* 17 unit tests, mutation 10/10 after three survivors each drove a
+  fix — the `AddField` name guard was untested and `AlterField` also carries a
+  field, the unknown-creator path had no case, and `creates_its_own_table` was
+  dead. 100% precision and recall on the new fixture, 25/25 controls
+  load-bearing, and 0 findings on all three benchmark projects.
 - **4.3.2** — `DJM-002` `AlterField` changing type or nullability on a large table.
 - **4.3.3** — `DJM-003` `AddIndex` without `CONCURRENTLY` (`AddIndexConcurrently`).
 - **4.3.4** — `DJM-004` `RemoveField` deployed alongside code still referencing it, breaking rolling deploys.
@@ -5865,7 +5927,7 @@ remove from them, and `6.5.3` asserts that by trying.
   Answers four questions a non-specialist actually asks — *who this affects*,
   *what it costs*, *how widespread it is*, *how urgent it is* — plus a fifth
   the vendors never print: **when this does not apply to you.** That last one
-  is free, because a measurement showed **all 67 rules carry `limitations`**,
+  is free, because a measurement showed **all 68 rules carry `limitations`**,
   the field recording what the rule cannot see. Those caveats are rendered
   **verbatim from `RuleMeta.limitations`**, never paraphrased; a mutant that
   truncated them to twenty characters was caught.
@@ -6244,7 +6306,7 @@ conversation.
 | 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | **Complete** (PR #3) — `DJA-001`…`DJA-015`, `DJD-001`…`DJD-003`, 100% precision on three real targets |
 | 3 | Performance and injection | 6 | 36 | **Complete** (PR #5) — `DJP-001`…`DJP-010`, `DJI-001`…`DJI-012`, 100% precision on three real targets |
-| 4 | Migration safety and live tier | 6 | 28 | Not started — **runs after Phase 6**, see the amendment there |
+| 4 | Migration safety and live tier | 6 | 28 | In progress — steps 4.2 and 4.3 under way, **runs after Phase 6**, see the amendment there |
 | 5 | Portability and external adapters | 4 | 20 | Not started — **runs after Phase 6** |
 | 6 | LLM layer | 5 | 19 | In progress — **pulled forward, runs after Phase 3** |
 | 7 | Distribution | 3 | 10 | Not started |
@@ -6252,10 +6314,10 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **67 rules are
+document specifies, and most of it is still only specified: **68 rules are
 implemented** and registered today — every rule introduced by phases 0 through
-2, plus the first ten of Phase 3's and the first twelve of its injection
-family.
+2, plus the first ten of Phase 3's, the first twelve of its injection family,
+and the first of Phase 4's migration rules.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

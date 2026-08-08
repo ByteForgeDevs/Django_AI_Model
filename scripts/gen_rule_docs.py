@@ -146,6 +146,33 @@ BLURBS: dict[Family, Blurb] = {
             "never a total."
         ),
     ),
+    Family.DJM: Blurb(
+        heading="migration safety",
+        summary=(
+            "{count} rules on what a migration does to a running database at the moment it\n"
+            "is applied: a lock it holds, a table it rewrites, a statement that aborts part\n"
+            "way through. These are the defects that pass every test and fail only on\n"
+            "production data, because the table is empty in CI and the lock nobody waits on\n"
+            "is free."
+        ),
+        scope=(
+            "This family reports only on migrations that have **not yet been applied**, and\n"
+            "that restriction is what makes it usable rather than a preference. A migration\n"
+            "sitting in a project's history demonstrably ran, so a finding against it is not\n"
+            "merely unactionable -- it is false. Reporting across the 875 migrations in the\n"
+            "three benchmark projects would have produced roughly 1600 findings with a\n"
+            "true-positive rate of zero.\n"
+            "\n"
+            "The live tier answers this exactly, by reading `django_migrations`. The static\n"
+            "tier cannot, so it reports the leaf of each app's history -- the tip, where a\n"
+            "migration being written now lands. That is a heuristic and every rule says so in\n"
+            "its limitations: it over-reports a leaf that shipped long ago, and misses the\n"
+            "first of two migrations added together. Because recall cannot be measured on a\n"
+            "shipped project for the reason above, it is measured against\n"
+            "`tests/fixtures/migration_project` instead, where each defect has a\n"
+            "correctly-written twin that must stay silent."
+        ),
+    ),
 }
 
 HEADER = """<!--

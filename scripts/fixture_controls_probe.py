@@ -238,9 +238,25 @@ INJECTION_UNFIXES: tuple[Unfix, ...] = (
     ),
 )
 
-FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...]], ...] = (
-    ("orm_project", ORM, ORM_UNFIXES),
-    ("injection_project", INJECTION, INJECTION_UNFIXES),
+MIGRATION = ROOT / "tests/fixtures/migration_project"
+MCONTROL = MIGRATION / "ledger/migrations/0002_entry_attempts.py"
+
+MIGRATION_UNFIXES: tuple[Unfix, ...] = (
+    (
+        "DJM-001",
+        "drop the default from the added non-nullable column",
+        MCONTROL,
+        "field=models.IntegerField(default=0),",
+        "field=models.IntegerField(),",
+    ),
+)
+
+FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...], str], ...] = (
+    ("orm_project", ORM, ORM_UNFIXES, "controls.py"),
+    ("injection_project", INJECTION, INJECTION_UNFIXES, "controls.py"),
+    # A migration cannot be called controls.py, so this fixture keeps its
+    # controls in a whole app instead of a single file.
+    ("migration_project", MIGRATION, MIGRATION_UNFIXES, "ledger/"),
 )
 
 
@@ -252,13 +268,13 @@ def findings(fixture: Path) -> list[tuple[str, str, int]]:
     return [(f.rule_id, f.location.file, f.location.line) for f in result.findings]
 
 
-def probe(name: str, fixture: Path, unfixes: tuple[Unfix, ...]) -> list[str]:
+def probe(name: str, fixture: Path, unfixes: tuple[Unfix, ...], control: str) -> list[str]:
     """Un-fix every control in one fixture. Returns the failures."""
     baseline = findings(fixture)
     base_keys = set(baseline)
-    leaked = [f for f in baseline if "controls.py" in f[1]]
+    leaked = [f for f in baseline if control in f[1]]
     assert not leaked, leaked
-    print(f"{name}: {len(baseline)} findings, none of them in controls.py")
+    print(f"{name}: {len(baseline)} findings, none of them in {control}")
 
     failures: list[str] = []
     reached: list[tuple[str, str, int]] = []
@@ -290,7 +306,7 @@ def probe(name: str, fixture: Path, unfixes: tuple[Unfix, ...]) -> list[str]:
         if e.get("line") is not None
     }
     for rule_id, file, line in sorted(reached):
-        if file.endswith("controls.py"):
+        if control in file:
             continue
         aimed = pinned.get((rule_id, file))
         if aimed == line:
@@ -314,9 +330,9 @@ def probe(name: str, fixture: Path, unfixes: tuple[Unfix, ...]) -> list[str]:
 def main() -> int:
     failures: list[str] = []
     total = 0
-    for name, fixture, unfixes in FIXTURES:
+    for name, fixture, unfixes, control in FIXTURES:
         total += len(unfixes)
-        failures.extend(probe(name, fixture, unfixes))
+        failures.extend(probe(name, fixture, unfixes, control))
     for failure in failures:
         print(failure)
     print(f"{total - len(failures)} of {total} controls proven load-bearing across all fixtures")

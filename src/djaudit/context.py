@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from djaudit.dataflow.querysets import QuerysetValue
     from djaudit.dataflow.scopes import Scope
     from djaudit.graph.nodes import ModelGraph
+    from djaudit.migrations.graph import MigrationGraph
+    from djaudit.migrations.state import Applied
 
 MAX_SNIPPET_LENGTH = 240
 
@@ -107,6 +109,8 @@ class ProjectContext:
     _api_surface: ApiSurface | None = field(default=None, repr=False)
     _loops: tuple[LoopSite, ...] | None = field(default=None, repr=False)
     _modules: dict[str, Path] | None = field(default=None, repr=False)
+    _migration_graph: MigrationGraph | None = field(default=None, repr=False)
+    _migration_history: tuple[Applied, ...] | None = field(default=None, repr=False)
     _scopes: dict[Path, Scope | None] = field(default_factory=dict, repr=False)
     _def_use: dict[int, DefUse] = field(default_factory=dict, repr=False)
     _tracked: dict[int, dict[int, QuerysetValue]] = field(default_factory=dict, repr=False)
@@ -142,6 +146,35 @@ class ProjectContext:
 
             self._api_surface = build_api_surface(self, self.model_graph)
         return self._api_surface
+
+    @property
+    def migration_graph(self) -> MigrationGraph:
+        """Every migration in the project, parsed and linked once per run.
+
+        Lazy like the model graph, and for a sharper reason: parsing 875
+        migrations is wasted work for the many runs that never ask a `DJM`
+        question, and migrations are the one input a project can have thousands
+        of without anybody noticing.
+        """
+        if self._migration_graph is None:
+            from djaudit.migrations.graph import build_migration_graph  # noqa: PLC0415  (cycle)
+
+            self._migration_graph = build_migration_graph(self)
+        return self._migration_graph
+
+    @property
+    def migration_history(self) -> tuple[Applied, ...]:
+        """Each operation in dependency order, with the state it acted against.
+
+        Separate from `migration_graph` because replay costs materially more
+        than parsing, and a rule that only wants to know which migrations exist
+        should not pay for the state machine.
+        """
+        if self._migration_history is None:
+            from djaudit.migrations.state import replay  # noqa: PLC0415  (cycle)
+
+            self._migration_history = tuple(replay(self.migration_graph))
+        return self._migration_history
 
     @property
     def loops(self) -> tuple[LoopSite, ...]:
