@@ -30,6 +30,9 @@ VIEWS = ORM / "inventory/views.py"
 INJECTION = ROOT / "tests/fixtures/injection_project"
 ICONTROLS = INJECTION / "shop/controls.py"
 
+PORTABILITY = ROOT / "tests/fixtures/portability_project"
+PQUERIES = PORTABILITY / "warehouse/queries.py"
+
 Unfix = tuple[str, str, Path, str, str]
 
 ORM_UNFIXES: tuple[Unfix, ...] = (
@@ -311,12 +314,28 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
     ),
 )
 
+PORTABILITY_UNFIXES: tuple[Unfix, ...] = (
+    (
+        "DJX-003",
+        "ask the per-group-latest question with DISTINCT ON instead of a subquery",
+        PQUERIES,
+        "    newest = (\n"
+        '        Item.objects.filter(sku=models.OuterRef("sku")).order_by("-id").values("pk")[:1]\n'
+        "    )\n"
+        "    return Item.objects.filter(pk__in=models.Subquery(newest))\n",
+        '    return Item.objects.order_by("sku", "-id").distinct("sku")\n',
+    ),
+)
+
 FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...], str], ...] = (
     ("orm_project", ORM, ORM_UNFIXES, "controls.py"),
     ("injection_project", INJECTION, INJECTION_UNFIXES, "controls.py"),
     # A migration cannot be called controls.py, so this fixture keeps its
     # controls in a whole app instead of a single file.
     ("migration_project", MIGRATION, MIGRATION_UNFIXES, "ledger/"),
+    # Nor can a settings module or a models module, so this fixture keeps the
+    # controls in a whole app too: `warehouse` is `catalog` written portably.
+    ("portability_project", PORTABILITY, PORTABILITY_UNFIXES, "warehouse/"),
 )
 
 

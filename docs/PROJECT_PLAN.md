@@ -6534,7 +6534,7 @@ rules come first; the live tier is then built for consumers that exist.
   chooses to do at import time happens with the file system and network access
   of whoever typed the command. The note states why that is worth doing at all
   — only Django can say what SQL a migration emits, and only Django can give a
-  second opinion on its own deployment checks, which is 2 of 79 rules — and
+  second opinion on its own deployment checks, which is 2 of 80 rules — and
   then states exactly what the subprocess is allowed: 10 environment variables
   in, 4 refused outright, a 30-second timeout enforced by killing the process
   group, 1 MiB captured per stream, stdin closed. It records the `PASSTHROUGH`
@@ -6730,11 +6730,60 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
 ### Step 5.2 — Divergence rules
 
 - **5.2.1** — `DJX-002` `JSONField` querying with semantics that differ between backends.
-- **5.2.2** — `DJX-003` `distinct('field')`, which is Postgres-only.
+- **5.2.2** — `DJX-003` `distinct('field')`, which is Postgres-only. **Done.**
+  `src/djaudit/rules/portability.py`, `tests/rules/test_djx_003.py`.
+
+  Before writing it, the corpus was measured for every construct Step 5.2
+  targets, and the result reshaped the step. Healthchecks is the **only**
+  benchmark project that passes the divergence gate, and it contains almost
+  none of these constructs: zero `JSONField`, zero `ArrayField`, zero
+  `icontains`, zero `Trunc`, and two `.distinct()` calls that are both the
+  portable no-argument form. NetBox and pretix are full of them — NetBox writes
+  three genuine `distinct('field')` calls — and both are excluded by the gate
+  because their `ENGINE` is computed and cannot be read.
+
+  So **the corpus can measure this family's precision and cannot measure its
+  recall even in principle.** That is not a defect in the corpus; it is what
+  the family is about. It does mean `tests/fixtures/portability_project` is not
+  a closing task but a prerequisite, and it was therefore built first, ahead of
+  its position at 5.4.1. Its `config/settings.py` carries the divergence and
+  everything else in it is hardened, so deleting one `if` silences the entire
+  family there — which is the difference between a portability rule and a
+  style rule.
+
+  Two shared bases came out of this substep. `DivergenceRule` gates on
+  `reaches`, not `could_reach`: a possibility-based gate would fire every rule
+  in the family on NetBox and pretix, which have never run SQLite, and that is
+  how a family earns a permanent place in someone's ignore list. `QueryRule`
+  adds the file walk, the textual prefilter and — importantly — the check that
+  the call sits on a chain the queryset tracker recognises, so a project's own
+  `Report.distinct('sku')` helper is not reported. A rule matching the method
+  name alone would be a rule about spelling.
+
+  `ProjectContext.divergence` was added alongside, following `model_graph`'s
+  existing lazy-property-with-deferred-import pattern. Eight rules asking the
+  same project-wide question independently would resolve every settings module
+  eight times: 89ms on Healthchecks and 147ms on pretix, measured, for eight
+  identical answers.
 - **5.2.3** — `DJX-004` case-sensitivity and collation divergence in `iexact`, `icontains`, and ordering.
 - **5.2.4** — `DJX-005` Postgres-only fields (`ArrayField`, `HStoreField`, `JSONField` operators, ranges) in a project that runs SQLite in development.
 - **5.2.5** — `DJX-006` deferred constraint and transaction semantics differences.
-- **5.2.6** — `DJX-007` foreign keys unenforced by default under SQLite.
+- **5.2.6** — ~~`DJX-007` foreign keys unenforced by default under SQLite.~~
+  **Withdrawn: the premise is false on every Django this tool supports.**
+  Django's SQLite backend executes `PRAGMA foreign_keys = ON` on every
+  connection it opens (`django/db/backends/sqlite3/base.py:208`), and has since
+  Django 2.0. Foreign keys *are* enforced under SQLite. The rule as planned
+  would have reported a defect that does not exist — on a family whose entire
+  claim is that a divergence is a thing you can point at.
+
+  It is replaced by `DJX-007` **`select_for_update()` is silently discarded on
+  SQLite**, which is the same defect class stated about something that is
+  actually true. Measured, not recalled: `has_select_for_update` is `False` on
+  SQLite, and the compiler gates the clause on it
+  (`django/db/models/sql/compiler.py:840`), so no `FOR UPDATE` is emitted and
+  **nothing is raised**. Row locking a developer wrote and tested under SQLite
+  is a no-op, their tests for it pass vacuously, and the contention it was
+  written to prevent appears only in production.
 - **5.2.7** — `DJX-008` date and time truncation with timezone handling that differs by backend.
 - **5.2.8** — `DJX-009` `max_length` enforced by Postgres but not SQLite.
 
@@ -7649,7 +7698,7 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **79 rules are
+document specifies, and most of it is still only specified: **80 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
 all ten of Phase 4's migration rules, its deployment-check gap rule, and the

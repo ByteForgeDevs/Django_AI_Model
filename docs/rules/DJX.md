@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJX` — cross-database portability
 
-1 rules on the gap between the database a developer runs and the one
+2 rules on the gap between the database a developer runs and the one
 that serves requests. Nothing here is a vulnerability and nothing here fails
 at import time. These are the defects that pass the whole test suite and then
 fail on production data, because the test suite ran against the other engine.
@@ -51,6 +51,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | Rule | Title | Severity | Confidence |
 |---|---|---|---|
 | [`DJX-001`](#djx-001--development-and-production-run-different-database-engines) | development and production run different database engines | medium | certain |
+| [`DJX-003`](#djx-003--distinct-on-is-used-in-a-project-that-also-runs-sqlite) | DISTINCT ON is used in a project that also runs SQLite | high | certain |
 
 ---
 
@@ -69,4 +70,23 @@ $ djaudit run . --min-severity info --min-confidence tentative
 **References**
 
 - <https://docs.djangoproject.com/en/stable/ref/settings/#databases>
+- <https://docs.djangoproject.com/en/stable/ref/databases/>
+
+---
+
+### DJX-003 — DISTINCT ON is used in a project that also runs SQLite
+
+**Severity** high · **Confidence** certain · **Tier** static
+
+**What it means.** `distinct(*fields)` compiles to Postgres' `DISTINCT ON`. Django gates it on the `can_distinct_on_fields` feature flag, which SQLite sets to False, and raises `NotSupportedError` when the queryset is evaluated rather than when it is written. In a project that runs both engines the query works in production and fails outright in development, so it is the rare divergence that is louder on the developer's machine than in production -- and it still fails, on a code path a test may never reach.
+
+**How to fix it.** Express the same intent portably, with a subquery selecting the row you want per group and an `__in` filter against it, or accept the dependency deliberately and run Postgres in development too.
+
+**What this rule cannot see.**
+
+- Only reported when the project is evidenced to reach both SQLite and Postgres. NetBox writes three genuine `distinct('field')` calls and is not reported, because NetBox runs Postgres and only Postgres -- there is no divergence there to report.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#distinct>
 - <https://docs.djangoproject.com/en/stable/ref/databases/>

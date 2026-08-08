@@ -92,6 +92,27 @@ class TestWhenItFires:
         assert found.location.file.endswith("settings.py")
         assert LITE in found.location.snippet
 
+    def test_it_points_at_the_alias_not_the_whole_setting(self, tmp_path: pathlib.Path) -> None:
+        # Every other shape in this file writes DATABASES on one line, which
+        # collapses the alias's own configuration and the setting that
+        # contains it onto one line and hides the difference. A real settings
+        # module spreads the dict over six, and a project with several aliases
+        # would send a reader to `DATABASES = {` for a finding about one.
+        spread = (
+            "DATABASES = {\n"
+            "    'default': {\n"
+            "        'NAME': 'app',\n"
+            f"        'ENGINE': '{LITE}',\n"
+            "    }\n"
+            "}\n"
+            "import os\n"
+            "if os.getenv('DB') == 'postgres':\n    " + one_db(PG)
+        )
+        found = findings(build(tmp_path, spread))[0]
+        assert found.location.line == 5
+        assert LITE in found.location.snippet
+        assert "DATABASES" not in found.location.snippet
+
     def test_a_development_module_is_half_the_finding_not_an_exemption(
         self, tmp_path: pathlib.Path
     ) -> None:
