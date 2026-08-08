@@ -5347,6 +5347,44 @@ cost is real, so it stays opt-in, sandboxed, and time-limited.
   hypothesis.
 
 - **4.1.4** — Graceful degradation — every live rule declares a static fallback, and absence of the live tier is reported, never silently ignored.
+
+  **Done.** `src/djaudit/degradation.py`, 35 tests, mutation **20/20**.
+
+  The failure mode is quiet: a run without the live tier emits fewer findings,
+  and fewer findings are indistinguishable from a cleaner codebase. So every
+  live rule that does not run is counted and named in `RunResult.degraded`,
+  printed by the terminal reporter under *not checked*, with the reason
+  separated into the three cases that need three different actions — consent
+  not given, environment unavailable, live ran. A test renders the reporter and
+  reads the output, because a degradation recorded in a field nobody prints is
+  the same silence.
+
+  `RuleMeta` gains `fallback` (a written sentence naming what is *lost*, not a
+  reassurance) and `fallback_rules` (static ids, verified to exist). The gate
+  landing before the first live rule is the point: the catalogue is all-static
+  today, so the compliance test passes over an empty set, and on its own is not
+  evidence. It is paired with a control that runs the same loop over a
+  synthesised live rule with no declaration and asserts it is rejected.
+  `covered_by` is filtered by what actually ran — telling a reader they are
+  covered by a fallback they also excluded is precisely the false reassurance
+  this module exists to prevent.
+
+  **A consent bypass found while building it.** `select()` documented that
+  `include` wins over every other filter, and it did — including the tier. So
+  `--rule DJM-010` would have executed the target's code on a run that never
+  asked for the live tier. Measured before it was believed, on a registered
+  live rule: with `tiers={STATIC}` the tier filter alone excluded it, and
+  adding `include` brought it back. A tier is a capability, not a preference,
+  so it is now applied *before* `include`; the override that was wanted — over
+  families, exclusions and thresholds — is intact and tested.
+
+  `degradation.py` sits outside `djaudit.live` deliberately. That package's
+  invariant is that every module in it executes target code and is written as
+  though the target were hostile; this one only reads rule metadata. Putting it
+  there made `import djaudit.engine` pull in the whole subprocess stack to
+  print a sentence — measured at **148ms, down to 66ms** once moved, with
+  `subprocess` no longer imported by an audit run at all.
+
 - **4.1.5** — `--live` / `--no-live` CLI flags, defaulting to off, with a clear consent message explaining that target code will be executed.
 
 ### Step 4.2 — Migration graph

@@ -10,6 +10,7 @@ from djaudit import fingerprint as fp
 from djaudit import scope
 from djaudit.baseline import Baseline
 from djaudit.context import ProjectContext
+from djaudit.degradation import Degradation, assess
 from djaudit.discovery import build_context
 from djaudit.gcpolicy import deferred_full_collection
 from djaudit.models import Confidence, Family, Finding, Severity, Tier
@@ -34,6 +35,8 @@ class RunResult:
     filtered_threshold: int = 0
     rules_run: int = 0
     rule_errors: dict[str, str] = field(default_factory=dict)
+    degraded: Degradation | None = None
+    """Live-tier rules this run did not reach. Reported, never silently dropped."""
     duration_seconds: float = 0.0
 
     @property
@@ -45,6 +48,19 @@ class RunResult:
         for finding in self.findings:
             counts[finding.severity] += 1
         return counts
+
+
+def _why_not_live(ctx: ProjectContext, tiers: set[Tier]) -> str:
+    """The reader's answer to "why is this shorter than I expected".
+
+    Distinguishes the three ways a live rule fails to run, because they need
+    three different actions: give consent, install a virtualenv, or nothing.
+    """
+    if Tier.LIVE not in tiers:
+        return "the live tier was not requested"
+    if not ctx.live:
+        return "the live tier was requested but the target's environment is unavailable"
+    return "the live tier ran"
 
 
 def _passes_threshold(finding: Finding, min_severity: Severity, min_confidence: Confidence) -> bool:
@@ -108,10 +124,14 @@ def _audit(
     if tiers is None:
         tiers = {Tier.STATIC} if not ctx.live else {Tier.STATIC, Tier.LIVE}
 
-    result = RunResult(context=ctx)
+    selected = select(families=families, tiers=tiers, include=include, exclude=exclude)
+    result = RunResult(
+        context=ctx,
+        degraded=assess(_why_not_live(ctx, tiers), ran={r.meta.id for r in selected}),
+    )
     collected: list[Finding] = []
 
-    for rule_cls in select(families=families, tiers=tiers, include=include, exclude=exclude):
+    for rule_cls in selected:
         result.rules_run += 1
         try:
             collected.extend(_run_rule(rule_cls, ctx))

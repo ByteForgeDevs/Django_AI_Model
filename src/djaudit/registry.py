@@ -41,6 +41,21 @@ class RuleMeta:
     rationale: str
     remediation: str
     references: tuple[str, ...] = ()
+
+    fallback: str = ""
+    """What still covers this ground when the live tier is unavailable.
+
+    Required of every ``Tier.LIVE`` rule and enforced in ``tests/live``. A live
+    rule that does not run makes the report shorter, and a shorter report reads
+    as a cleaner codebase; this sentence is what lets `djaudit` say *what was
+    not checked* instead of silently checking less. It should name the loss, not
+    reassure -- a static rule inferring a table rewrite and a live rule reading
+    the emitted ``ALTER TABLE`` are not the same check at two confidences.
+    """
+
+    fallback_rules: tuple[str, ...] = ()
+    """Static rule ids that partially cover this rule. Verified to exist."""
+
     limitations: tuple[str, ...] = ()
     """What this rule cannot see, in the reader's terms.
 
@@ -141,14 +156,17 @@ def select(
     include: set[str] | None = None,
     exclude: set[str] | None = None,
 ) -> list[type[Rule]]:
-    """Filter the catalogue. ``include`` wins over every other filter."""
+    """Filter the catalogue. ``include`` wins over every filter except ``tiers``."""
     rules = all_rules()
+    if tiers is not None:
+        # Applied before ``include`` because a tier is a capability, not a
+        # preference: naming a live rule explicitly must not be a way to make
+        # djaudit execute the target's code on a run that never consented to it.
+        rules = [r for r in rules if r.meta.tier in tiers]
     if include:
         return [r for r in rules if r.meta.id in include]
     if families is not None:
         rules = [r for r in rules if r.meta.family in families]
-    if tiers is not None:
-        rules = [r for r in rules if r.meta.tier in tiers]
     if exclude:
         rules = [r for r in rules if r.meta.id not in exclude]
     return rules
