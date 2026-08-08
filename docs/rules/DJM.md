@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJM` — migration safety
 
-2 rules on what a migration does to a running database at the moment it
+3 rules on what a migration does to a running database at the moment it
 is applied: a lock it holds, a table it rewrites, a statement that aborts part
 way through. These are the defects that pass every test and fail only on
 production data, because the table is empty in CI and the lock nobody waits on
@@ -55,6 +55,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 |---|---|---|---|
 | [`DJM-001`](#djm-001--non-nullable-column-added-with-no-default-aborts-on-a-populated-table) | Non-nullable column added with no default aborts on a populated table | high | firm |
 | [`DJM-002`](#djm-002--alterfield-holds-an-exclusive-lock-for-the-length-of-the-table) | AlterField holds an exclusive lock for the length of the table | high | firm |
+| [`DJM-003`](#djm-003--addindex-blocks-writes-for-the-length-of-the-index-build) | AddIndex blocks writes for the length of the index build | medium | firm |
 
 ---
 
@@ -99,3 +100,25 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://www.postgresql.org/docs/current/sql-altertable.html>
 - <https://docs.djangoproject.com/en/stable/howto/writing-migrations/>
+
+---
+
+### DJM-003 — AddIndex blocks writes for the length of the index build
+
+**Severity** medium · **Confidence** firm · **Tier** static
+
+**What it means.** Postgres builds an index under a `SHARE` lock, which permits reads and blocks every write until the build finishes. On a table with millions of rows that is minutes of failed writes during a deploy, and the migration gives no sign of it: the duration depends on the row count, so it is instant in CI.
+
+**How to fix it.** Use `django.contrib.postgres.operations.AddIndexConcurrently`, which emits `CREATE INDEX CONCURRENTLY` and blocks neither reads nor writes. It cannot run inside a transaction, so the migration also needs `atomic = False`, and it must be the only operation in that migration for the rest to stay transactional. The build is slower and leaves an `INVALID` index behind if it fails, which is dropped and retried rather than repaired.
+
+**What this rule cannot see.**
+
+- Static analysis cannot tell which migrations have been applied, so only the leaf of each app's history is reported. The live tier reads `django_migrations` and does not have to guess.
+- Says nothing about how many rows the table holds, which is what decides whether the build is instant or a deploy-long write outage. The live tier's `pg_class.reltuples` sizing answers that.
+- Concurrent index builds are a Postgres feature. On SQLite or MySQL the lock differs and the remediation does not apply, and this rule does not detect which backend the project uses.
+- Operations that replace the whole `index_together` collection are not reported, because whether `AlterIndexTogether` builds an index or drops one depends on prior state this rule does not replay.
+
+**References**
+
+- <https://www.postgresql.org/docs/current/sql-createindex.html>
+- <https://docs.djangoproject.com/en/stable/ref/contrib/postgres/operations/>

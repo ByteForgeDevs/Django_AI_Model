@@ -256,6 +256,13 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
         "field=models.CharField(db_index=True, max_length=128),",
         "field=models.CharField(db_index=True, max_length=32),",
     ),
+    (
+        "DJM-003",
+        "build the index in the transaction instead of concurrently",
+        MCONTROL,
+        "AddIndexConcurrently(",
+        "migrations.AddIndex(",
+    ),
 )
 
 FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...], str], ...] = (

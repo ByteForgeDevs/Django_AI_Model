@@ -98,7 +98,7 @@ class TestTheGroundTruth:
         accepted = sum(1 for f in truth if not f.is_true_positive)
 
         assert true_positives == 194
-        assert accepted == 58
+        assert accepted == 63
 
     def test_every_finding_carries_its_target(self, truth: list[ReviewedFinding]) -> None:
         assert {f.target for f in truth} == {"healthchecks", "netbox", "pretix"}
@@ -304,8 +304,8 @@ class TestTheHarnessDoesNotLeakTheAnswer:
 class TestHeldOutIsTheHonestNumber:
     """The gap between the two by-rule baselines is the point.
 
-    Fitted on its own test set the rule lookup reaches 84.3% on accepted risks.
-    Held out it reaches 51.0%. Reporting the first as "a lookup table already
+    Fitted on its own test set the rule lookup reaches 87.3% on accepted risks.
+    Held out it reaches 52.4%. Reporting the first as "a lookup table already
     does this well" would have been a measurement of memorisation.
     """
 
@@ -326,16 +326,67 @@ class TestHeldOutIsTheHonestNumber:
     def test_the_honest_number_is_about_half(self, truth: list[ReviewedFinding]) -> None:
         """Pinned, because this is the figure the phase's argument rests on.
 
-        It moved from 26/51 when `DJM-002` landed: that rule contributed seven
-        findings, all reviewed `accepted_risk`, and a rule whose verdicts are
-        unanimous is one held-out prediction gets right. So the ratio improved
-        for a reason that is understood rather than drifting, which is the only
-        kind of movement a pinned figure should be allowed.
+        It has now moved twice, in opposite directions, and both movements are
+        understood rather than drift -- which is the only kind of movement a
+        pinned figure should be allowed.
+
+        `DJM-002` took it from 26/51 to 33/58: seven findings, all reviewed
+        `accepted_risk`, spread over two targets. A rule that appears in more
+        than one target is in the training table for every fold that scores it,
+        and a rule whose verdicts are unanimous is one the lookup gets right.
+
+        `DJM-003` then took it from 33/58 to 33/63 -- five more accepted risks
+        and not one of them predicted. Its findings are all netbox, so it is
+        trained on for the two folds that have none of it to score and missing
+        from the one that scores all five. See
+        `test_a_single_target_rule_is_confidently_wrong_in_its_own_fold`,
+        which holds the mechanism rather than leaving it as a comment here.
         """
         honest = held_out_by_rule(truth)
 
-        assert honest.recall(Verdict.ACCEPTED_RISK) == pytest.approx(33 / 58, abs=0.005)
+        assert honest.recall(Verdict.ACCEPTED_RISK) == pytest.approx(33 / 63, abs=0.005)
         assert honest.recall(Verdict.TRUE_POSITIVE) == pytest.approx(190 / 194, abs=0.005)
+
+    def test_a_single_target_rule_is_confidently_wrong_in_its_own_fold(
+        self, truth: list[ReviewedFinding]
+    ) -> None:
+        """Why a lenient rule can *lower* the held-out number by landing.
+
+        Leave-one-target-out cannot see a rule that fires on one target: the
+        fold that scores its findings is the one fold trained without it. What
+        makes that cost real rather than merely absent is `ByRule`'s fallback --
+        an unseen rule id is answered `TRUE_POSITIVE`, not abstained on -- so
+        every finding of a single-target *lenient* rule is scored as a wrong
+        verdict.
+
+        Asserting the fallback is the point, though it is worth being exact
+        about how much this adds: a baseline that abstained on unseen rules
+        would score an *identical* accepted-risk recall, the very figure the
+        test above pins as the honest number, and would be caught only by the
+        true-positive recall alongside it (190/194 becomes 168/194). So the
+        headline number cannot see the difference. This test can, and it names
+        the rule responsible instead of moving a ratio by an unexplained
+        amount.
+        """
+        targets: dict[str, set[str]] = {}
+        for finding in truth:
+            targets.setdefault(finding.rule_id, set()).add(finding.target)
+        lenient = {
+            rule
+            for rule, seen in targets.items()
+            if len(seen) == 1 and all(not f.is_true_positive for f in truth if f.rule_id == rule)
+        }
+
+        assert lenient, "no single-target lenient rule left; this test now proves nothing"
+
+        for rule in lenient:
+            (target,) = targets[rule]
+            train = [f for f in truth if f.target != target]
+            assert rule not in {f.rule_id for f in train}, rule
+            predictions = {
+                ByRule.learned_from(train).classify(f) for f in truth if f.rule_id == rule
+            }
+            assert predictions == {Verdict.TRUE_POSITIVE}, rule
 
     def test_folds_are_pooled_not_averaged(self, truth: list[ReviewedFinding]) -> None:
         """Pretix has 141 findings and healthchecks 33. Averaging the three
@@ -359,7 +410,7 @@ class TestTheContestedSet:
         rules = {f.rule_id for f in truth}
 
         assert len(contested) == 7
-        assert len(rules) == 30
+        assert len(rules) == 31
 
     def test_the_contested_rules_are_the_ones_with_both_verdicts(
         self, truth: list[ReviewedFinding]

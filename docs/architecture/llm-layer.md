@@ -128,7 +128,7 @@ alternative is users discovering them by being misled.
 
 ### The corpus prior is small
 
-`CORPUS_PRIOR` settles findings from 6 rules over 116 human-reviewed findings,
+`CORPUS_PRIOR` settles findings from 7 rules over 121 human-reviewed findings,
 and only where the review was unanimous across at least
 `MINIMUM_OBSERVATIONS = 5` findings. That is a genuine record, and it is three
 projects' worth. A rule not in the table is not settled, and the honest answer

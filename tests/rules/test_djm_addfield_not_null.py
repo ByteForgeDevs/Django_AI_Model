@@ -14,7 +14,7 @@ Build = Callable[[dict[str, str]], ProjectContext]
 SETTINGS = "INSTALLED_APPS = ['shop']\n"
 
 
-def migration(operations: str, deps: str = "") -> str:
+def migration(operations: str, deps: str = "", atomic: bool | None = None) -> str:
     """One migration module wrapping ``operations``.
 
     The template is dedented *before* the operations are substituted, because
@@ -22,6 +22,11 @@ def migration(operations: str, deps: str = "") -> str:
     a multi-line value indented less than the template makes dedent strip by
     that smaller amount and leave `class Migration` indented, which is a syntax
     error and parses to no migration at all.
+
+    ``atomic`` is omitted entirely when left as `None`, rather than written out
+    as `atomic = True`. Django's default is True and a migration that states it
+    is rare, so emitting it always would mean no test ever exercised the shape
+    the corpora actually contain.
     """
     template = textwrap.dedent(
         """
@@ -30,13 +35,17 @@ def migration(operations: str, deps: str = "") -> str:
 
 
         class Migration(migrations.Migration):
-            dependencies = [{deps}]
+        {atomic}    dependencies = [{deps}]
             operations = [
         {operations}
             ]
         """
     )
-    return template.format(deps=deps, operations=textwrap.indent(operations, " " * 8))
+    return template.format(
+        deps=deps,
+        operations=textwrap.indent(operations, " " * 8),
+        atomic="" if atomic is None else f"    atomic = {atomic}\n",
+    )
 
 
 def project(build: Build, files: dict[str, str]) -> ProjectContext:

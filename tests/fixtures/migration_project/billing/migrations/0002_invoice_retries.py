@@ -14,6 +14,11 @@ Postgres re-verify every existing value, which rewrites the table under
 `ACCESS EXCLUSIVE`. Its twin in `ledger` widens the same column instead, which
 Postgres has skipped rewriting since 9.2 -- the pair differs only in the
 direction of the change.
+`DJM-003` is the third: `AddIndex` on `invoice`, a table `0001_initial`
+created and filled, so Postgres builds the index under a `SHARE` lock and
+blocks every write until it finishes. Its twin in `ledger` uses
+`AddIndexConcurrently` on a non-atomic migration, which is the same index built
+without blocking anything.
 """
 
 from django.db import migrations, models
@@ -32,5 +37,9 @@ class Migration(migrations.Migration):
             model_name="invoice",
             name="reference",
             field=models.CharField(db_index=True, max_length=32),
+        ),
+        migrations.AddIndex(
+            model_name="invoice",
+            index=models.Index(fields=["reference"], name="billing_invoice_ref_idx"),
         ),
     ]

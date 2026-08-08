@@ -7,334 +7,14 @@
   "max_false_positive_rate": 0.1,
   "findings": [
     {
-      "fingerprint": "c2ae47c4a80cb3c1",
-      "rule_id": "DJA-003",
+      "fingerprint": "fbf3831f58a6089b",
+      "rule_id": "DJS-025",
       "verdict": "accepted_risk",
-      "file": "netbox/users/api/views.py",
-      "line": 56,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "TokenProvisionView at users/api/views.py:56. The reading is exactly right: permission_classes = [] and the route is POST, so an anonymous caller can reach it. It is also deliberate, and its own docstring says so -- \"Non-authenticated REST API endpoint via which a user may create a Token\". This is the credential-exchange endpoint: the caller POSTs a username and password, TokenProvisionSerializer validates them, and a Token comes back. Every token-authenticated API needs exactly one door like this, and it cannot be behind the authentication it exists to grant. Recorded as accepted rather than a false positive because the finding's claim is true and worth a reviewer's five seconds -- an endpoint that opens itself to anonymous POST should have to justify itself once, and this one does. The credential check happens inside the serializer, which DJA-003 states plainly that it cannot see."
-    },
-    {
-      "fingerprint": "2a90d8d66199b623",
-      "rule_id": "DJA-010",
-      "verdict": "accepted_risk",
-      "file": "netbox/extras/api/serializers_/events.py",
-      "line": 44,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading. Webhook.secret is the HMAC key NetBox signs outgoing payloads with, and the model's own help text says it is deliberately not transmitted in the request -- because it is transmitted here instead, in every GET of the webhook. The endpoint requires the extras.view_webhook permission, so this is an administrative disclosure rather than an open one, and NetBox intends it: an operator has to read the secret back to configure the receiving end. Accepted as designed. The rule is right that a shared signing key is served on every read, and a reviewer who does not already know that should be told."
-    },
-    {
-      "fingerprint": "a962e1def2056c5b",
-      "rule_id": "DJA-010",
-      "verdict": "accepted_risk",
-      "file": "netbox/users/api/serializers_/tokens.py",
-      "line": 18,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading, and deliberate. Token.key is the API token's stored value, marked read_only_fields = ('key',) -- which stops writes and guarantees reads, exactly the half that does not help. NetBox shows the key so an operator can retrieve a token they created; the endpoint is restricted to the token's owner or a user holding grant_token. Accepted as designed."
-    },
-    {
-      "fingerprint": "e78d346346603dc8",
-      "rule_id": "DJA-010",
-      "verdict": "accepted_risk",
-      "file": "netbox/users/api/serializers_/tokens.py",
-      "line": 19,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading. TokenSerializer declares token = CharField(default=Token.generate), so the full token value is both accepted and returned. This is how NetBox lets a caller supply their own token or read back a generated one, and it is the single most sensitive value the API handles. Accepted as designed, with the same ownership restriction as the key field on line 18."
-    },
-    {
-      "fingerprint": "f905f00592dcacf5",
-      "rule_id": "DJA-010",
-      "verdict": "accepted_risk",
-      "file": "netbox/users/api/serializers_/tokens.py",
-      "line": 82,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading. TokenProvisionSerializer exists to exchange a username and password for a token, so returning the token is the entire purpose of the endpoint -- there is no version of this view that does not do it. Accepted as designed. Related to the DJA-003 entry on the same view, which reports that it is reachable anonymously; both are true and both are intentional."
-    },
-    {
-      "fingerprint": "68473210b515642c",
-      "rule_id": "DJA-010",
-      "verdict": "accepted_risk",
-      "file": "netbox/users/api/serializers_/tokens.py",
-      "line": 96,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading, same endpoint as line 82. The provisioning response carries key alongside token so a caller can identify the credential it was just issued. Accepted as designed."
-    },
-    {
-      "fingerprint": "7f693b9790d115a5",
-      "rule_id": "DJA-010",
-      "verdict": "accepted_risk",
-      "file": "netbox/users/api/serializers_/users.py",
-      "line": 35,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading, low value. UserSerializer.is_active tells a caller which accounts can still log in, which is account-status disclosure rather than a credential leak -- hence MEDIUM. The endpoint requires users.view_user. Accepted: an administrative user API that could not report whether an account was active would be unable to do its job."
-    },
-    {
-      "fingerprint": "1a112797fea25284",
-      "rule_id": "DJA-010",
-      "verdict": "accepted_risk",
-      "file": "netbox/users/api/serializers_/users.py",
-      "line": 36,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading. Group membership on the user model is authority-granting information: it tells an attacker which account is worth phishing. Restricted to users.view_user, and managing group membership is what this endpoint is for. Accepted as designed."
-    },
-    {
-      "fingerprint": "a1d4483d14114e3e",
-      "rule_id": "DJA-010",
-      "verdict": "accepted_risk",
-      "file": "netbox/users/api/serializers_/users.py",
-      "line": 43,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading, same argument as the groups field above. The effective permission list is the most direct answer to 'which account should I target', but a user-administration API cannot withhold it from the administrators using it. Accepted as designed."
-    },
-    {
-      "fingerprint": "cdb1961fef652b6d",
-      "rule_id": "DJA-011",
-      "verdict": "accepted_risk",
-      "file": "netbox/dcim/api/serializers_/racks.py",
-      "line": 169,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading, intended workflow. RackReservation.user records who holds the reservation, and reserving rack units on behalf of a colleague is a normal data-centre operation -- an API that forced the reservation onto the caller would be less useful, not safer. Gated behind dcim.add_rackreservation. Accepted as designed."
-    },
-    {
-      "fingerprint": "db88223d73c4fea6",
-      "rule_id": "DJA-011",
-      "verdict": "true_positive",
-      "file": "netbox/extras/api/serializers_/bookmarks.py",
-      "line": 18,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading, and no guard found. BookmarkViewSet sets queryset = Bookmark.objects.all() with no get_queryset override, and BookmarkSerializer declares user = UserSerializer(nested=True) with no read_only, no validate() and no perform_create. A caller holding extras.add_bookmark can POST a bookmark owned by another user. The impact is low -- unwanted rows in someone else's bookmark list -- but nothing in the code suggests the assignment was considered, which is what separates this from the Token and JournalEntry entries above."
-    },
-    {
-      "fingerprint": "f6c766f9d96b4990",
-      "rule_id": "DJA-011",
-      "verdict": "accepted_risk",
-      "file": "netbox/extras/api/serializers_/journaling.py",
-      "line": 22,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading. created_by is PrimaryKeyRelatedField(queryset=User.objects.all(), default=CurrentUserDefault()), so it defaults to the caller but still accepts any user id, and get_fields() locks it only on update. A caller with extras.add_journalentry can therefore attribute a journal entry to a colleague. The CurrentUserDefault and the update-time lock are both deliberate, so this is a considered design allowing administrative attribution rather than an oversight. Accepted. Worth noting that CurrentUserDefault is not a protection -- HiddenField(default=CurrentUserDefault()) would be, and the rule is silent on that spelling."
-    },
-    {
-      "fingerprint": "08022c5dca4246c9",
-      "rule_id": "DJA-011",
-      "verdict": "true_positive",
-      "file": "netbox/extras/api/serializers_/notifications.py",
-      "line": 21,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading, and the highest-impact of the unguarded set. NotificationSerializer accepts user with no read_only and no validate(), and NotificationViewSet does not scope its queryset, so a caller with extras.add_notification can inject a notification into another user's feed. A notification is UI text NetBox itself renders and the recipient has every reason to trust, which makes this a plausible phishing primitive rather than merely noise."
-    },
-    {
-      "fingerprint": "01c295adb25219e6",
-      "rule_id": "DJA-011",
-      "verdict": "true_positive",
-      "file": "netbox/extras/api/serializers_/notifications.py",
-      "line": 60,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading, same shape as NotificationSerializer above. Subscription.user decides who receives change notifications for an object, and the field is writable with no check, so a caller with extras.add_subscription can subscribe another user to arbitrary objects and fill their feed. No validate(), no perform_create, no queryset scoping on SubscriptionViewSet."
-    },
-    {
-      "fingerprint": "5333e70f6afbfdf7",
-      "rule_id": "DJA-011",
-      "verdict": "true_positive",
-      "file": "netbox/extras/api/serializers_/savedfilters.py",
-      "line": 12,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading. SavedFilter.user is writable with no check, so a caller with extras.add_savedfilter can create a filter attributed to another user. SavedFilterViewSet uses SharedObjectQuerySetMixin, which governs who may *read* shared objects and says nothing about who may be named as owner on write."
-    },
-    {
-      "fingerprint": "7c8361875e739ad4",
-      "rule_id": "DJA-011",
-      "verdict": "true_positive",
-      "file": "netbox/extras/api/serializers_/tableconfigs.py",
-      "line": 11,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading, same shape as SavedFilterSerializer. TableConfig.user is writable with no check, so a caller with extras.add_tableconfig can create a table configuration owned by someone else and change what that user sees in their table columns."
-    },
-    {
-      "fingerprint": "2b5d4e88c6d04541",
-      "rule_id": "DJA-011",
-      "verdict": "accepted_risk",
-      "file": "netbox/users/api/serializers_/tokens.py",
-      "line": 23,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "True reading, and NetBox knows it. TokenSerializer.user is writable on create -- get_fields() only makes it read-only when self.instance is not None -- so the request body chooses whose token this becomes, which is account takeover if nothing stops it. Something does: validate() calls user_may_grant_token(request.user, token_user) and raises PermissionDenied otherwise, with a comment explaining why has_perm(obj=None) was not good enough. This is exactly the mitigation the rule's first limitation says it cannot see. Accepted as designed, and the most instructive entry in this file: the defect and the fix look identical in the field list."
-    },
-    {
-      "fingerprint": "610886f9574d777e",
-      "rule_id": "DJA-014",
-      "verdict": "true_positive",
-      "file": "netbox/extras/filtersets.py",
-      "line": 81,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "WebhookFilterSet.Meta.fields lists 'secret'. Webhook.secret is the HMAC key used to sign outgoing payloads, and the model's own help text says it 'is not transmitted in the request' -- so the project has already decided callers must not read it, and then made it a query parameter. The lookup generated is exact, which makes this a confirmation oracle rather than an extraction one: a caller with permission to list webhooks can test a guessed secret one request at a time instead of reading it outright. Bounded by needing extras.view_webhook, but a signing key should not be answerable by the API under any permission."
-    },
-    {
-      "fingerprint": "dc81dab69cc15bbf",
-      "rule_id": "DJA-014",
-      "verdict": "accepted_risk",
-      "file": "netbox/users/filtersets.py",
-      "line": 172,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "TokenFilterSet.Meta.fields lists 'key'. The name matches SECRET_FIELDS and the reading is correct, but NetBox's v2 tokens split the credential in two: 'key' is documented as the 'v2 token identification key' and verification is done against hmac_digest, so filtering on it confirms an identifier rather than a secret. For a legacy v1 token 'key' still is the whole credential, which is why this is accepted rather than dismissed. Listing tokens requires authentication and NetBox scopes the queryset to the requesting user, so the oracle is only available for rows the caller can already read."
-    },
-    {
-      "fingerprint": "304af1b9ef537cdc",
-      "rule_id": "DJA-015",
-      "verdict": "true_positive",
-      "file": "netbox/users/api/views.py",
-      "line": 56,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "TokenProvisionView takes a username and password over an anonymous POST and returns an API token. NetBox sets no DEFAULT_THROTTLE_CLASSES, so nothing limits how fast it can be asked. DJA-003 already reports that this endpoint is anonymous and that is deliberate -- its docstring says so -- but being unthrottled is a separate decision and not one the code records anywhere. An unauthenticated endpoint that answers 'is this password correct' at network speed is the definition of a credential-stuffing target."
-    },
-    {
-      "fingerprint": "2965abdf69949411",
-      "rule_id": "DJP-001",
-      "verdict": "true_positive",
-      "file": "netbox/dcim/models/cables.py",
-      "line": 1001,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "Verified against source. `local_cable_terminations` is a CableTermination queryset with no select_related, and the loop reads `lct.cable` to build a Q filter. One query per termination on a path-tracing routine that runs on cable save, which is exactly where NetBox feels it."
-    },
-    {
-      "fingerprint": "6c609735c950eddb",
-      "rule_id": "DJP-001",
-      "verdict": "true_positive",
-      "file": "netbox/dcim/models/cables.py",
-      "line": 1099,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "Verified against source. `all([ct._provider_network for ct in circuit_terminations])` traverses a forward FK on every row of an unselected queryset. Reported tentative rather than firm because the queryset is `CircuitTermination.objects.filter(qs)` where `qs` is a Q object passed positionally, which the chain reader cannot narrate; the traversal itself is not in doubt."
-    },
-    {
-      "fingerprint": "e210cf85ecf32dbb",
-      "rule_id": "DJP-001",
-      "verdict": "true_positive",
-      "file": "netbox/dcim/models/cables.py",
-      "line": 1103,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "Verified against source, and re-verified against Django's own source, which corrected an earlier note here. This is the same queryset as :1099, iterated again four lines later, and the second pass costs nothing: `QuerySet._fetch_all` returns the cached `_result_cache` rather than re-querying, and `ForwardManyToOneDescriptor.__get__` consults `field.get_cached_value(instance)` before touching the database, so ``ct._provider_network`` was already resolved on these exact instances at :1099. The defect is real -- `CircuitTermination.objects.filter(qs)` still has no `select_related`, and fixing it fixes both sites -- but this line's message overstates it, because no query is issued here. Counted as a true positive on the defect and as a redundant report on the cost; both are published in the README rather than netted off."
-    },
-    {
-      "fingerprint": "8b9ceb94384386d1",
-      "rule_id": "DJP-001",
-      "verdict": "true_positive",
-      "file": "netbox/dcim/models/cables.py",
-      "line": 1107,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "Verified against source. Third traversal of the same unselected CircuitTermination queryset, this time `ct.cable`. Tentative for the same positional-Q reason as :1099. Kept as a distinct finding because it names a different relation, and `select_related` would need both `_provider_network` and `cable` to silence the block."
-    },
-    {
-      "fingerprint": "58f24e9d0bba1008",
-      "rule_id": "DJP-001",
-      "verdict": "true_positive",
-      "file": "netbox/dcim/models/cables.py",
-      "line": 1114,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "Verified against source, and re-verified against Django's own source, which corrected an earlier note here. This is the same queryset as :1107, iterated again seven lines later, and the second pass costs nothing: `QuerySet._fetch_all` returns the cached `_result_cache` rather than re-querying, and `ForwardManyToOneDescriptor.__get__` consults `field.get_cached_value(instance)` before touching the database, so ``ct.cable`` was already resolved on these exact instances at :1107. The defect is real -- `CircuitTermination.objects.filter(qs)` still has no `select_related`, and fixing it fixes both sites -- but this line's message overstates it, because no query is issued here. Counted as a true positive on the defect and as a redundant report on the cost; both are published in the README rather than netted off."
-    },
-    {
-      "fingerprint": "8b1caf5af5475940",
-      "rule_id": "DJP-001",
-      "verdict": "true_positive",
-      "file": "netbox/dcim/models/devices.py",
-      "line": 314,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "Verified against source. `Device.objects.filter(device_type=self, position__isnull=False)` with `d.rack.get_available_units(...)` in the body. NetBox's own comment two lines above admits the cost: \"This validation will impose a very high performance penalty when there are many instances to check\". The rule found the thing the authors already knew about, from the source alone."
-    },
-    {
-      "fingerprint": "d699e7986bb8730c",
-      "rule_id": "DJP-001",
-      "verdict": "true_positive",
-      "file": "netbox/dcim/tests/test_views.py",
-      "line": 4578,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "Verified against source and true by mechanism: a VirtualDeviceContext queryset with no select_related, reading `vdc.device` per row in an assertEqual. It is test code, so the production cost is nil and nobody should act on it. Recorded true_positive rather than false_positive because the claim is accurate; whether test files deserve DJP findings is a scoping question for the rule, not a verdict on this one."
-    },
-    {
-      "fingerprint": "dbb115c93389b59e",
-      "rule_id": "DJP-001",
-      "verdict": "true_positive",
-      "file": "netbox/netbox/search/backends.py",
-      "line": 187,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "Verified against source. `[r for r in results if r.object_type == object_type]` compares a forward FK object per row of a CachedValue queryset, which loads the related ContentType row each time; `r.object_type_id == object_type.pk` answers the same question for free. High severity because the comprehension is nested inside the loop over object types above it. Tentative confidence because `results` arrives as a parameter-fed chain the reader cannot fully narrate. The `prefetch_related_objects` call on the next line is unrelated -- it prefetches `object__*`, not `object_type`."
-    },
-    {
-      "fingerprint": "bac8a36dcc286cac",
-      "rule_id": "DJP-001",
-      "verdict": "true_positive",
-      "file": "netbox/virtualization/tests/test_views.py",
-      "line": 494,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-04",
-      "note": "Verified against source. A VirtualMachine queryset with `vm.device` read per row inside a bulk-edit assertion. True by mechanism, test code, no production cost -- the same scoping question as the two other test-file findings rather than a wrong claim."
-    },
-    {
-      "fingerprint": "69a7db935ca4b526",
-      "rule_id": "DJP-002",
-      "verdict": "true_positive",
-      "file": "netbox/extras/tests/test_custom_validation.py",
-      "line": 143,
-      "reviewer": "Zambagarrah",
+      "file": "base_requirements.txt",
+      "line": 15,
+      "note": "django-debug-toolbar in base_requirements.txt:15, pinned through to requirements.txt:4. NetBox handles this about as well as it can be handled with a single distribution: settings.py:472 lists debug_toolbar in INSTALLED_APPS and settings.py:511 removes it again under `if not DEBUG and 'collectstatic' not in sys.argv`, so the app is not installed on a normal production run. That is precisely why DJS-024 stays silent here and why this rule speaks instead: the package is still on the machine, and what keeps the toolbar off is the value of DEBUG rather than the absence of the code. NetBox is a self-hosted product whose operators are told to enable DEBUG when troubleshooting -- shipping the toolbar so that it works when they do is a deliberate product decision, not an oversight, and splitting the image in two to avoid it would cost their users more than it saves. Accepted rather than false positive because the statement is true and the exposure is real: an operator who leaves DEBUG on after an incident gets a SQL panel, and NetBox's own threat model would rather they knew that. The rule is low severity for exactly this reason -- it is a fact about the deployment, not an accusation.",
       "reviewed": "2026-08-03",
-      "note": "`for provider in Provider.objects.all():` at line 142 with `len(provider.asns.all())` at 143. `asns` is a forward ManyToManyField on circuits.Provider, so the far side is many rows and no join can flatten it -- `select_related` is not an option here, only `prefetch_related('asns')`. The queryset is a bare `.all()` with no prefetch, so this is one extra SELECT per provider. Test code, so the runtime cost is a slow suite rather than a slow request, but the detection is exactly right and the fix is one chained call."
-    },
-    {
-      "fingerprint": "39500fbbb00f2aa5",
-      "rule_id": "DJP-002",
-      "verdict": "true_positive",
-      "file": "netbox/extras/tests/test_custom_validation.py",
-      "line": 155,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-03",
-      "note": "`for provider in Provider.objects.all():` at line 154 with `provider.asns.exists()` at 155. `.exists()` is genuinely fixed by prefetching and this is worth stating because it is not obvious: the related manager's `get_queryset()` returns the entry in `_prefetched_objects_cache` when one exists, and `QuerySet.exists()` short-circuits to `bool(self._result_cache)` whenever the cache is populated. So `prefetch_related('asns')` removes this query rather than merely adding one. Without it, one SELECT per provider."
-    },
-    {
-      "fingerprint": "de29c809fb2d61fc",
-      "rule_id": "DJP-003",
-      "verdict": "true_positive",
-      "file": "netbox/dcim/api/serializers_/cables.py",
-      "line": 123,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-06",
-      "note": "`CabledObjectSerializer.get_link_peers_type` at line 119 opens with `if not obj.cable:`, and `CircuitTerminationSerializer` inherits it. `circuits.CircuitTermination.cable` is a ForeignKey, and `CircuitTerminationViewSet.queryset` is a bare `CircuitTermination.objects.all()` (circuits/api/views.py:54) that fetches it by neither `select_related` nor `prefetch_related`. One query per terminated circuit on every list page. The serializer also declares `cable = CableSerializer(nested=True)`, so the same row is wanted twice over; the fix is one `select_related('cable')` on the view."
-    },
-    {
-      "fingerprint": "c82dbe3ea7e96b27",
-      "rule_id": "DJP-003",
-      "verdict": "true_positive",
-      "file": "netbox/extras/api/serializers_/scripts.py",
-      "line": 150,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-06",
-      "note": "`ScriptSerializer.get_display` at line 149 returns `f'{obj.name} ({obj.module})'`, and `extras.Script.module` is a ForeignKey to `ScriptModule` (extras/models/scripts.py:33). `ScriptViewSet.queryset` is a bare `Script.objects.all()` (extras/api/views.py:316) with no `select_related('module')` anywhere in the chain, so listing N scripts loads N module rows one at a time. The getter is declared on the serializer itself here but `display` is inherited, which is the shape the rule is built for: the declaration, the traversal and the queryset are in three different places and none of them shows a loop."
+      "reviewer": "Zambagarrah"
     },
     {
       "fingerprint": "f1f383bb7a9ce78e",
@@ -342,9 +22,9 @@
       "verdict": "true_positive",
       "file": "netbox/core/tests/test_models.py",
       "line": 293,
-      "reviewer": "Zambagarrah",
+      "note": "A `Notification.objects.filter(...).count()` asserted inside a loop over three job statuses. Three queries where one grouped count would do. Correct detection, demoted by the tests scope, and the loop is over a literal tuple so the cost is fixed and small.",
       "reviewed": "2026-08-07",
-      "note": "A `Notification.objects.filter(...).count()` asserted inside a loop over three job statuses. Three queries where one grouped count would do. Correct detection, demoted by the tests scope, and the loop is over a literal tuple so the cost is fixed and small."
+      "reviewer": "Zambagarrah"
     },
     {
       "fingerprint": "cf45ca92c360bed5",
@@ -352,9 +32,9 @@
       "verdict": "true_positive",
       "file": "netbox/core/tests/test_models.py",
       "line": 321,
-      "reviewer": "Zambagarrah",
+      "note": "Same per-status count assertion, this time over the two failure statuses, in the `NOTIFICATION_ON_FAILURE` case. Two queries. Correct and demoted for the same reason as the sibling findings in this file; recorded so the family's behaviour on repeated shapes stays visible.",
       "reviewed": "2026-08-07",
-      "note": "Same per-status count assertion, this time over the two failure statuses, in the `NOTIFICATION_ON_FAILURE` case. Two queries. Correct and demoted for the same reason as the sibling findings in this file; recorded so the family's behaviour on repeated shapes stays visible."
+      "reviewer": "Zambagarrah"
     },
     {
       "fingerprint": "75e3dd343a024241",
@@ -362,9 +42,89 @@
       "verdict": "true_positive",
       "file": "netbox/core/tests/test_models.py",
       "line": 343,
-      "reviewer": "Zambagarrah",
+      "note": "Third instance of the per-status count in this test class, covering `NOTIFICATION_NEVER`. The three findings in this file are distinct loops in distinct test methods rather than one loop counted three times, which is the property the `Step.call` keying is there to preserve.",
       "reviewed": "2026-08-07",
-      "note": "Third instance of the per-status count in this test class, covering `NOTIFICATION_NEVER`. The three findings in this file are distinct loops in distinct test methods rather than one loop counted three times, which is the property the `Step.call` keying is there to preserve."
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "de29c809fb2d61fc",
+      "rule_id": "DJP-003",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/api/serializers_/cables.py",
+      "line": 123,
+      "note": "`CabledObjectSerializer.get_link_peers_type` at line 119 opens with `if not obj.cable:`, and `CircuitTerminationSerializer` inherits it. `circuits.CircuitTermination.cable` is a ForeignKey, and `CircuitTerminationViewSet.queryset` is a bare `CircuitTermination.objects.all()` (circuits/api/views.py:54) that fetches it by neither `select_related` nor `prefetch_related`. One query per terminated circuit on every list page. The serializer also declares `cable = CableSerializer(nested=True)`, so the same row is wanted twice over; the fix is one `select_related('cable')` on the view.",
+      "reviewed": "2026-08-06",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "cdb1961fef652b6d",
+      "rule_id": "DJA-011",
+      "verdict": "accepted_risk",
+      "file": "netbox/dcim/api/serializers_/racks.py",
+      "line": 169,
+      "note": "True reading, intended workflow. RackReservation.user records who holds the reservation, and reserving rack units on behalf of a colleague is a normal data-centre operation -- an API that forced the reservation onto the caller would be less useful, not safer. Gated behind dcim.add_rackreservation. Accepted as designed.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "2965abdf69949411",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/models/cables.py",
+      "line": 1001,
+      "note": "Verified against source. `local_cable_terminations` is a CableTermination queryset with no select_related, and the loop reads `lct.cable` to build a Q filter. One query per termination on a path-tracing routine that runs on cable save, which is exactly where NetBox feels it.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "6c609735c950eddb",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/models/cables.py",
+      "line": 1099,
+      "note": "Verified against source. `all([ct._provider_network for ct in circuit_terminations])` traverses a forward FK on every row of an unselected queryset. Reported tentative rather than firm because the queryset is `CircuitTermination.objects.filter(qs)` where `qs` is a Q object passed positionally, which the chain reader cannot narrate; the traversal itself is not in doubt.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "e210cf85ecf32dbb",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/models/cables.py",
+      "line": 1103,
+      "note": "Verified against source, and re-verified against Django's own source, which corrected an earlier note here. This is the same queryset as :1099, iterated again four lines later, and the second pass costs nothing: `QuerySet._fetch_all` returns the cached `_result_cache` rather than re-querying, and `ForwardManyToOneDescriptor.__get__` consults `field.get_cached_value(instance)` before touching the database, so ``ct._provider_network`` was already resolved on these exact instances at :1099. The defect is real -- `CircuitTermination.objects.filter(qs)` still has no `select_related`, and fixing it fixes both sites -- but this line's message overstates it, because no query is issued here. Counted as a true positive on the defect and as a redundant report on the cost; both are published in the README rather than netted off.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "8b9ceb94384386d1",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/models/cables.py",
+      "line": 1107,
+      "note": "Verified against source. Third traversal of the same unselected CircuitTermination queryset, this time `ct.cable`. Tentative for the same positional-Q reason as :1099. Kept as a distinct finding because it names a different relation, and `select_related` would need both `_provider_network` and `cable` to silence the block.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "58f24e9d0bba1008",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/models/cables.py",
+      "line": 1114,
+      "note": "Verified against source, and re-verified against Django's own source, which corrected an earlier note here. This is the same queryset as :1107, iterated again seven lines later, and the second pass costs nothing: `QuerySet._fetch_all` returns the cached `_result_cache` rather than re-querying, and `ForwardManyToOneDescriptor.__get__` consults `field.get_cached_value(instance)` before touching the database, so ``ct.cable`` was already resolved on these exact instances at :1107. The defect is real -- `CircuitTermination.objects.filter(qs)` still has no `select_related`, and fixing it fixes both sites -- but this line's message overstates it, because no query is issued here. Counted as a true positive on the defect and as a redundant report on the cost; both are published in the README rather than netted off.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "8b1caf5af5475940",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/models/devices.py",
+      "line": 314,
+      "note": "Verified against source. `Device.objects.filter(device_type=self, position__isnull=False)` with `d.rack.get_available_units(...)` in the body. NetBox's own comment two lines above admits the cost: \"This validation will impose a very high performance penalty when there are many instances to check\". The rule found the thing the authors already knew about, from the source alone.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     },
     {
       "fingerprint": "740294ea8db3a707",
@@ -372,9 +132,9 @@
       "verdict": "true_positive",
       "file": "netbox/dcim/tests/test_models.py",
       "line": 1857,
-      "reviewer": "Zambagarrah",
+      "note": "`FrontPort.objects.get` is called once per front-port template while verifying a module bay installation, so the assertion loop issues one query per port. Demoted by the tests scope. Real, and the kind of loop that makes a model test suite slow once the fixture grows, but not a production path.",
       "reviewed": "2026-08-07",
-      "note": "`FrontPort.objects.get` is called once per front-port template while verifying a module bay installation, so the assertion loop issues one query per port. Demoted by the tests scope. Real, and the kind of loop that makes a model test suite slow once the fixture grows, but not a production path."
+      "reviewer": "Zambagarrah"
     },
     {
       "fingerprint": "9a0c895330955856",
@@ -382,9 +142,19 @@
       "verdict": "true_positive",
       "file": "netbox/dcim/tests/test_models.py",
       "line": 1864,
-      "reviewer": "Zambagarrah",
+      "note": "The paired `PortMapping.objects.get` in the same loop body, doubling the per-iteration cost to two queries. Recorded separately because it is a second round trip rather than a re-read of the first. Test scope, so demoted; the detection itself is exact.",
       "reviewed": "2026-08-07",
-      "note": "The paired `PortMapping.objects.get` in the same loop body, doubling the per-iteration cost to two queries. Recorded separately because it is a second round trip rather than a re-read of the first. Test scope, so demoted; the detection itself is exact."
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "d699e7986bb8730c",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/dcim/tests/test_views.py",
+      "line": 4578,
+      "note": "Verified against source and true by mechanism: a VirtualDeviceContext queryset with no select_related, reading `vdc.device` per row in an assertEqual. It is test code, so the production cost is nil and nobody should act on it. Recorded true_positive rather than false_positive because the claim is accurate; whether test files deserve DJP findings is a scoping question for the rule, not a verdict on this one.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     },
     {
       "fingerprint": "981a1ef575704733",
@@ -392,9 +162,9 @@
       "verdict": "true_positive",
       "file": "netbox/dcim/utils.py",
       "line": 130,
-      "reviewer": "Zambagarrah",
+      "note": "`create_interfaces` loops over the interface templates that declare a bridge and calls `Interface.objects.get(device=..., name=...)` for each, so instantiating a device type with fifty bridged interfaces costs fifty queries. The names are all derivable before the loop, so one `in_bulk`-style fetch keyed on name would replace the whole set. Firm and correct.",
       "reviewed": "2026-08-07",
-      "note": "`create_interfaces` loops over the interface templates that declare a bridge and calls `Interface.objects.get(device=..., name=...)` for each, so instantiating a device type with fifty bridged interfaces costs fifty queries. The names are all derivable before the loop, so one `in_bulk`-style fetch keyed on name would replace the whole set. Firm and correct."
+      "reviewer": "Zambagarrah"
     },
     {
       "fingerprint": "fba8824185f02225",
@@ -402,289 +172,99 @@
       "verdict": "true_positive",
       "file": "netbox/dcim/utils.py",
       "line": 136,
-      "reviewer": "Zambagarrah",
+      "note": "The second `Interface.objects.get` in the same loop resolves the bridge target, doubling the per-template cost to two queries. Same remediation as the first: both lookups are by `(device, name)` and every name is known before the loop starts, so a single prefetch into a dict would serve both. Counted separately because it is a distinct round trip, not an alias of the first.",
       "reviewed": "2026-08-07",
-      "note": "The second `Interface.objects.get` in the same loop resolves the bridge target, doubling the per-template cost to two queries. Same remediation as the first: both lookups are by `(device, name)` and every name is known before the loop starts, so a single prefetch into a dict would serve both. Counted separately because it is a distinct round trip, not an alias of the first."
+      "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "2ed8530373f579aa",
-      "rule_id": "DJP-004",
+      "fingerprint": "db88223d73c4fea6",
+      "rule_id": "DJA-011",
       "verdict": "true_positive",
-      "file": "netbox/extras/tests/test_customfields.py",
-      "line": 1202,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "`Site.objects.get(pk=response.data[i]['id'])` inside a loop over the API response rows, so a three-object bulk-create test issues three extra queries to re-read what it just posted. `in_bulk` on the returned ids would collapse them. Demoted by the tests scope; detection is exact."
+      "file": "netbox/extras/api/serializers_/bookmarks.py",
+      "line": 18,
+      "note": "True reading, and no guard found. BookmarkViewSet sets queryset = Bookmark.objects.all() with no get_queryset override, and BookmarkSerializer declares user = UserSerializer(nested=True) with no read_only, no validate() and no perform_create. A caller holding extras.add_bookmark can POST a bookmark owned by another user. The impact is low -- unwanted rows in someone else's bookmark list -- but nothing in the code suggests the assignment was considered, which is what separates this from the Token and JournalEntry entries above.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "274cd8143e968df8",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/extras/tests/test_customfields.py",
-      "line": 1282,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "The same re-read-per-row pattern in the update variant of the custom-fields API test. Distinct loop, distinct method, same remediation. Recorded separately because the two findings are genuinely two loops, not one loop reported twice."
+      "fingerprint": "2a90d8d66199b623",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/extras/api/serializers_/events.py",
+      "line": 44,
+      "note": "True reading. Webhook.secret is the HMAC key NetBox signs outgoing payloads with, and the model's own help text says it is deliberately not transmitted in the request -- because it is transmitted here instead, in every GET of the webhook. The endpoint requires the extras.view_webhook permission, so this is an administrative disclosure rather than an open one, and NetBox intends it: an operator has to read the secret back to configure the receiving end. Accepted as designed. The rule is right that a shared signing key is served on every read, and a reviewer who does not already know that should be told.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "92522647c47ffa66",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/extras/tests/test_event_rules.py",
-      "line": 212,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "`EventRule.objects.get(name='Event Rule 1')` is called inside a loop over queued jobs, and the argument does not depend on the loop variable at all -- the identical row is fetched on every iteration. This is the clearest possible case: hoisting the query above the loop is a pure win with no behavioural change. Test scope, so demoted, but the pattern is worth flagging anywhere."
+      "fingerprint": "f6c766f9d96b4990",
+      "rule_id": "DJA-011",
+      "verdict": "accepted_risk",
+      "file": "netbox/extras/api/serializers_/journaling.py",
+      "line": 22,
+      "note": "True reading. created_by is PrimaryKeyRelatedField(queryset=User.objects.all(), default=CurrentUserDefault()), so it defaults to the caller but still accepts any user id, and get_fields() locks it only on update. A caller with extras.add_journalentry can therefore attribute a journal entry to a colleague. The CurrentUserDefault and the update-time lock are both deliberate, so this is a considered design allowing administrative attribution rather than an oversight. Accepted. Worth noting that CurrentUserDefault is not a protection -- HiddenField(default=CurrentUserDefault()) would be, and the rule is silent on that spelling.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "fd85a3edcde6ade8",
-      "rule_id": "DJP-004",
+      "fingerprint": "08022c5dca4246c9",
+      "rule_id": "DJA-011",
       "verdict": "true_positive",
-      "file": "netbox/extras/tests/test_event_rules.py",
-      "line": 301,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "Same loop-invariant `EventRule.objects.get` in the object-updated test, fetching 'Event Rule 2' once per queued job. Identical remediation: bind it to a local above the loop. Correct detection."
+      "file": "netbox/extras/api/serializers_/notifications.py",
+      "line": 21,
+      "note": "True reading, and the highest-impact of the unguarded set. NotificationSerializer accepts user with no read_only and no validate(), and NotificationViewSet does not scope its queryset, so a caller with extras.add_notification can inject a notification into another user's feed. A notification is UI text NetBox itself renders and the recipient has every reason to trust, which makes this a plausible phishing primitive rather than merely noise.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "e366d127226e50fb",
-      "rule_id": "DJP-004",
+      "fingerprint": "01c295adb25219e6",
+      "rule_id": "DJA-011",
       "verdict": "true_positive",
-      "file": "netbox/extras/tests/test_event_rules.py",
-      "line": 362,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "Third loop-invariant `EventRule.objects.get`, this time for 'Event Rule 3' in the object-deleted test. All three were written the same way, which is the recurring-copy pattern that makes automated detection worth more than review here."
+      "file": "netbox/extras/api/serializers_/notifications.py",
+      "line": 60,
+      "note": "True reading, same shape as NotificationSerializer above. Subscription.user decides who receives change notifications for an object, and the field is writable with no check, so a caller with extras.add_subscription can subscribe another user to arbitrary objects and fill their feed. No validate(), no perform_create, no queryset scoping on SubscriptionViewSet.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "8a388fd48f4831c3",
-      "rule_id": "DJP-004",
+      "fingerprint": "5333e70f6afbfdf7",
+      "rule_id": "DJA-011",
       "verdict": "true_positive",
-      "file": "netbox/ipam/management/commands/rebuild_prefixes.py",
-      "line": 23,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "`rebuild_prefixes` counts prefixes per VRF inside a loop over every VRF, purely to print a progress line. One `VRF.objects.annotate(Count('prefixes'))` would produce the same output in a single query. The loop body then calls `rebuild_prefixes(vrf.pk)`, which is the expensive part, so the count is not the dominant cost -- but it is still one avoidable round trip per VRF in a management command."
+      "file": "netbox/extras/api/serializers_/savedfilters.py",
+      "line": 12,
+      "note": "True reading. SavedFilter.user is writable with no check, so a caller with extras.add_savedfilter can create a filter attributed to another user. SavedFilterViewSet uses SharedObjectQuerySetMixin, which governs who may *read* shared objects and says nothing about who may be named as owner on write.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "ee45e5c2be7e22a8",
-      "rule_id": "DJP-004",
+      "fingerprint": "c82dbe3ea7e96b27",
+      "rule_id": "DJP-003",
       "verdict": "true_positive",
-      "file": "netbox/ipam/tests/test_views.py",
-      "line": 738,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "`Prefix.objects.filter(...).exists()` asserted once per generated prefix inside `for i in range(3)`. Three existence queries where one `filter(prefix__in=[...])` and a count would do. Bounded and cheap, demoted by the tests scope, but a correct reading of the code."
-    },
-    {
-      "fingerprint": "e863b1a600f15434",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/ipam/tests/test_views.py",
-      "line": 759,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "The IPv6 variant of the same assertion loop, four iterations, four existence queries. Same remediation. Recorded to keep the benchmark honest about how often this rule fires on assertion loops, which is the main thing the tests-scope demotion is calibrated against."
-    },
-    {
-      "fingerprint": "fab88a9441d36103",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/ipam/tests/test_views.py",
-      "line": 783,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "Eight existence queries, one per expected hex value, in the uppercase-hex prefix test. The list is a literal, so the query count is fixed at eight; a single `values_list('prefix', flat=True)` fetch compared against the expected set would replace the loop entirely."
-    },
-    {
-      "fingerprint": "a2b673de63af290a",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/ipam/tests/test_views.py",
-      "line": 2222,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "`VLAN.objects.filter(group=..., vid=vid, name=...).exists()` once per expected VID, and the expected list can run to dozens of entries for a range pattern like '1,10-20,300-305'. This is the largest of the assertion loops in this file by query count. Correct, demoted by scope."
-    },
-    {
-      "fingerprint": "386ee0a887694fec",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/ipam/tests/test_views.py",
-      "line": 2286,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "`VLANGroup.objects.get(name=group_name)` inside the case loop -- one query per parameterised case. Only two cases here, so the cost is trivial, but the shape is the same one that matters in production code and the rule cannot tell the difference from the loop alone."
-    },
-    {
-      "fingerprint": "57ef1913c4d95dbe",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/ipam/tests/test_views.py",
-      "line": 2287,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "`VLAN.objects.count()` captured as `initial_count` at the top of each case iteration. Loop-invariant in intent but not in fact, since the preceding case creates VLANs -- so it genuinely must be re-read and the remediation is to track the expected count in Python instead. Correct detection."
-    },
-    {
-      "fingerprint": "7373785802e09734",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/ipam/tests/test_views.py",
-      "line": 2296,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "The closing `VLAN.objects.count()` assertion in the same case loop, a second round trip per case. Distinct call from the `initial_count` read above it, so it is a separate finding rather than an alias, which is what keying on the call node is for."
-    },
-    {
-      "fingerprint": "377b6bca0ff37e42",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/ipam/tests/test_views.py",
-      "line": 2298,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "The only depth-2 finding in NetBox: an existence query inside `for vid in expected_vids` which is itself inside `for pattern, expected_vids, group_name in cases`, so the total is the product of the two loop bounds. Escalated to critical by the nested-loop rule and then demoted by the tests scope, which is the interaction the two adjustments are meant to produce."
-    },
-    {
-      "fingerprint": "822c6113921fd82b",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/ipam/tests/test_views.py",
-      "line": 2315,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "`VLAN.objects.count()` asserted once per invalid pattern, verifying nothing was created. Five iterations, five counts. The count is genuinely required each time to prove the invariant held, so the honest fix is fewer assertions rather than a hoisted query. Correct, low practical impact."
-    },
-    {
-      "fingerprint": "1c16b2066c581f92",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/netbox/authentication/__init__.py",
-      "line": 185,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "Remote authentication resolves each group name with its own `Group.objects.get(name=name)`, so a user carrying twenty group assertions costs twenty queries on every login. A single `Group.objects.in_bulk(remote_groups, field_name='name')` would answer all of them, with the `DoesNotExist` branch becoming a membership test on the returned mapping. Bounded by the identity provider's group count rather than by table size, but it runs on the login path."
-    },
-    {
-      "fingerprint": "89aaabca87c16d49",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/netbox/authentication/__init__.py",
-      "line": 274,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "The same per-name `Group.objects.get` pattern in the second remote-auth backend, this time over `settings.REMOTE_AUTH_DEFAULT_GROUPS`. The list is configuration rather than user input, so it is usually short, but the query count still scales with it and the fix is the same single `in_bulk` call. Reported and correct; the practical severity depends on deployment configuration."
-    },
-    {
-      "fingerprint": "3da5a2c37f80664f",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/netbox/authentication/__init__.py",
-      "line": 396,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "Third occurrence of the same loop in the third remote-auth backend, again over `REMOTE_AUTH_DEFAULT_GROUPS`. That djaudit finds all three independently is the useful property here: the pattern was copied between backends, and a reviewer reading one file would have no reason to suspect the other two. Same remediation, same bound on cost."
-    },
-    {
-      "fingerprint": "6724221399ead0c3",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/users/tests/test_api.py",
-      "line": 457,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "`Token.objects.get(pk=obj['id'])` per row of the API response, to validate each returned plaintext token. The ids are all known from `response.data`, so `in_bulk` would serve the loop in one query. Demoted by the tests scope; the detection is exact and the remediation is straightforward."
-    },
-    {
-      "fingerprint": "6a8e427b79d5fb7b",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/utilities/testing/base.py",
-      "line": 187,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "`ObjectType.objects.get(pk=value)` inside `model_to_dict`'s field loop in NetBox's shared test utilities, so every content-type-valued field on every compared instance costs a query. This one is worth more than most test findings because the helper is called from a large share of the API test suite, so the multiplier is the whole suite rather than one method. `ObjectType` is also eminently cacheable. Still demoted by scope, since it is test-support code."
-    },
-    {
-      "fingerprint": "da8a779c148d48ea",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "netbox/utilities/testing/views.py",
-      "line": 1163,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-07",
-      "note": "`ObjectChange.objects.filter(...).order_by('-time').first()` per primary key while verifying bulk rename changelog entries, so the assertion costs one query per renamed object. One filtered query over `changed_object_id__in=pk_list` would return the whole set. Shared test utility, so it runs across many test classes; demoted by scope but genuinely worth fixing."
-    },
-    {
-      "fingerprint": "b44564b3128344df",
-      "rule_id": "DJP-005",
-      "verdict": "true_positive",
-      "file": "netbox/ipam/tests/test_models.py",
-      "line": 1695,
-      "reviewer": "Zambagarrah",
+      "file": "netbox/extras/api/serializers_/scripts.py",
+      "line": 150,
+      "note": "`ScriptSerializer.get_display` at line 149 returns `f'{obj.name} ({obj.module})'`, and `extras.Script.module` is a ForeignKey to `ScriptModule` (extras/models/scripts.py:33). `ScriptViewSet.queryset` is a bare `Script.objects.all()` (extras/api/views.py:316) with no `select_related('module')` anywhere in the chain, so listing N scripts loads N module rows one at a time. The getter is declared on the serializer itself here but `display` is inherited, which is the shape the rule is built for: the declaration, the traversal and the queryset are in three different places and none of them shows a loop.",
       "reviewed": "2026-08-06",
-      "note": "`test_get_available_vids` binds `child_vids = VLAN.objects.filter(group=vlangroup).values_list('vid', flat=True)` and then calls `len(child_vids)` to assert it equals 4. The name is read nowhere else in the method -- the next statement calls `vlangroup.get_available_vids()` and asserts on a different list -- so every matching row is fetched and turned into a tuple purely to produce an integer. `.count()` is the correct call and compiles to `SELECT COUNT(*)`. It is a test, so the cost does not reach production and severity is demoted to low by `djaudit.scope`, but the reading is right."
+      "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "745b70a3b644900f",
-      "rule_id": "DJS-006",
-      "verdict": "accepted_risk",
-      "file": "netbox/netbox/settings.py",
-      "line": 205,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-02",
-      "note": "SECURE_SSL_REDIRECT at settings.py:205. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason. NetBox additionally documents running behind nginx or Apache, which is the usual place for this redirect."
+      "fingerprint": "7c8361875e739ad4",
+      "rule_id": "DJA-011",
+      "verdict": "true_positive",
+      "file": "netbox/extras/api/serializers_/tableconfigs.py",
+      "line": 11,
+      "note": "True reading, same shape as SavedFilterSerializer. TableConfig.user is writable with no check, so a caller with extras.add_tableconfig can create a table configuration owned by someone else and change what that user sees in their table columns.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "2ddc67e5415029ff",
-      "rule_id": "DJS-007",
-      "verdict": "accepted_risk",
-      "file": "netbox/netbox/settings.py",
-      "line": 204,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-02",
-      "note": "Correct, and quiet on purpose. NetBox exposes SECURE_HSTS_SECONDS at settings.py:204 as a documented operator knob defaulting to 0, alongside SECURE_HSTS_INCLUDE_SUBDOMAINS and SECURE_HSTS_PRELOAD, so enabling it is a deliberate operator decision. HSTS is the one security header whose absence from the Django settings is weak evidence: nginx, a load balancer and every CDN can send Strict-Transport-Security, it is extremely common to set it there, and none of that is visible from inside the repository. The rule reports this at low/tentative for exactly that reason, which is why it does not appear in a default run. Recorded as accepted rather than a false positive because the statement is true -- Django is not sending the header -- and because a project that assumes the proxy is doing it and is wrong has no way to find out except by being attacked."
-    },
-    {
-      "fingerprint": "60882482a7c33223",
-      "rule_id": "DJS-009",
-      "verdict": "accepted_risk",
-      "file": "netbox/netbox/settings.py",
-      "line": 219,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-02",
-      "note": "SESSION_COOKIE_SECURE at settings.py:219. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason."
-    },
-    {
-      "fingerprint": "a1ef84b11c682b77",
-      "rule_id": "DJS-010",
-      "verdict": "accepted_risk",
-      "file": "netbox/netbox/settings.py",
-      "line": 100,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-02",
-      "note": "CSRF_COOKIE_SECURE at settings.py:100. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason."
-    },
-    {
-      "fingerprint": "47a5c85aea75a78f",
-      "rule_id": "DJS-012",
-      "verdict": "accepted_risk",
-      "file": "netbox/netbox/settings.py",
-      "line": 601,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-02",
-      "note": "Correct, well-formed, and exactly what the rule is designed to say quietly rather than loudly. netbox/netbox/settings.py:601 is the textbook ('HTTP_X_FORWARDED_PROTO', 'https'), which is the right configuration for the nginx or Apache deployment NetBox documents, and the line immediately below it sets USE_X_FORWARDED_HOST = True for the same reason. There is no misspelling and no alternative NetBox could sensibly choose. What the finding records is the invariant this creates -- that every route to the application must pass through a proxy which overwrites the header -- and that invariant is a deployment property we cannot see from the repository, which is why the rule caps itself at low/tentative and stays out of a default run. Accepted rather than a false positive because the statement is true and worth one review; it is the kind of finding a reader is meant to confirm once and then suppress."
-    },
-    {
-      "fingerprint": "fbf3831f58a6089b",
-      "rule_id": "DJS-025",
-      "verdict": "accepted_risk",
-      "file": "base_requirements.txt",
-      "line": 15,
-      "reviewer": "Zambagarrah",
-      "reviewed": "2026-08-03",
-      "note": "django-debug-toolbar in base_requirements.txt:15, pinned through to requirements.txt:4. NetBox handles this about as well as it can be handled with a single distribution: settings.py:472 lists debug_toolbar in INSTALLED_APPS and settings.py:511 removes it again under `if not DEBUG and 'collectstatic' not in sys.argv`, so the app is not installed on a normal production run. That is precisely why DJS-024 stays silent here and why this rule speaks instead: the package is still on the machine, and what keeps the toolbar off is the value of DEBUG rather than the absence of the code. NetBox is a self-hosted product whose operators are told to enable DEBUG when troubleshooting -- shipping the toolbar so that it works when they do is a deliberate product decision, not an oversight, and splitting the image in two to avoid it would cost their users more than it saves. Accepted rather than false positive because the statement is true and the exposure is real: an operator who leaves DEBUG on after an incident gets a SQL panel, and NetBox's own threat model would rather they knew that. The rule is low severity for exactly this reason -- it is a fact about the deployment, not an accusation."
+      "fingerprint": "610886f9574d777e",
+      "rule_id": "DJA-014",
+      "verdict": "true_positive",
+      "file": "netbox/extras/filtersets.py",
+      "line": 81,
+      "note": "WebhookFilterSet.Meta.fields lists 'secret'. Webhook.secret is the HMAC key used to sign outgoing payloads, and the model's own help text says it 'is not transmitted in the request' -- so the project has already decided callers must not read it, and then made it a query parameter. The lookup generated is exact, which makes this a confirmation oracle rather than an extraction one: a caller with permission to list webhooks can test a guessed secret one request at a time instead of reading it outright. Bounded by needing extras.view_webhook, but a signing key should not be answerable by the API under any permission.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     },
     {
       "fingerprint": "d5fafec9537724ca",
@@ -692,9 +272,9 @@
       "verdict": "true_positive",
       "file": "netbox/extras/migrations/0115_convert_dashboard_widgets.py",
       "line": 14,
-      "reviewer": "Zambagarrah",
+      "note": "A RunPython data migration walking extras.Dashboard and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. Rewrites a JSON config in memory, so nothing in the body needs the database.",
       "reviewed": "2026-08-04",
-      "note": "A RunPython data migration walking extras.Dashboard and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. Rewrites a JSON config in memory, so nothing in the body needs the database."
+      "reviewer": "Zambagarrah"
     },
     {
       "fingerprint": "710dbbeff537b829",
@@ -702,9 +282,409 @@
       "verdict": "true_positive",
       "file": "netbox/extras/migrations/0117_move_objectchange.py",
       "line": 27,
-      "reviewer": "Zambagarrah",
+      "note": "A RunPython data migration walking extras.Dashboard and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. The file name is about ObjectChange but the rows written really are Dashboards -- the migration rewrites objectchange references stored inside dashboard configs, so the model the rule names is right.",
       "reviewed": "2026-08-04",
-      "note": "A RunPython data migration walking extras.Dashboard and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. The file name is about ObjectChange but the rows written really are Dashboards -- the migration rewrites objectchange references stored inside dashboard configs, so the model the rule names is right."
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "69a7db935ca4b526",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_custom_validation.py",
+      "line": 143,
+      "note": "`for provider in Provider.objects.all():` at line 142 with `len(provider.asns.all())` at 143. `asns` is a forward ManyToManyField on circuits.Provider, so the far side is many rows and no join can flatten it -- `select_related` is not an option here, only `prefetch_related('asns')`. The queryset is a bare `.all()` with no prefetch, so this is one extra SELECT per provider. Test code, so the runtime cost is a slow suite rather than a slow request, but the detection is exactly right and the fix is one chained call.",
+      "reviewed": "2026-08-03",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "39500fbbb00f2aa5",
+      "rule_id": "DJP-002",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_custom_validation.py",
+      "line": 155,
+      "note": "`for provider in Provider.objects.all():` at line 154 with `provider.asns.exists()` at 155. `.exists()` is genuinely fixed by prefetching and this is worth stating because it is not obvious: the related manager's `get_queryset()` returns the entry in `_prefetched_objects_cache` when one exists, and `QuerySet.exists()` short-circuits to `bool(self._result_cache)` whenever the cache is populated. So `prefetch_related('asns')` removes this query rather than merely adding one. Without it, one SELECT per provider.",
+      "reviewed": "2026-08-03",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "2ed8530373f579aa",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_customfields.py",
+      "line": 1202,
+      "note": "`Site.objects.get(pk=response.data[i]['id'])` inside a loop over the API response rows, so a three-object bulk-create test issues three extra queries to re-read what it just posted. `in_bulk` on the returned ids would collapse them. Demoted by the tests scope; detection is exact.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "274cd8143e968df8",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_customfields.py",
+      "line": 1282,
+      "note": "The same re-read-per-row pattern in the update variant of the custom-fields API test. Distinct loop, distinct method, same remediation. Recorded separately because the two findings are genuinely two loops, not one loop reported twice.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "92522647c47ffa66",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_event_rules.py",
+      "line": 212,
+      "note": "`EventRule.objects.get(name='Event Rule 1')` is called inside a loop over queued jobs, and the argument does not depend on the loop variable at all -- the identical row is fetched on every iteration. This is the clearest possible case: hoisting the query above the loop is a pure win with no behavioural change. Test scope, so demoted, but the pattern is worth flagging anywhere.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "fd85a3edcde6ade8",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_event_rules.py",
+      "line": 301,
+      "note": "Same loop-invariant `EventRule.objects.get` in the object-updated test, fetching 'Event Rule 2' once per queued job. Identical remediation: bind it to a local above the loop. Correct detection.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "e366d127226e50fb",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/extras/tests/test_event_rules.py",
+      "line": 362,
+      "note": "Third loop-invariant `EventRule.objects.get`, this time for 'Event Rule 3' in the object-deleted test. All three were written the same way, which is the recurring-copy pattern that makes automated detection worth more than review here.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "8a388fd48f4831c3",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/management/commands/rebuild_prefixes.py",
+      "line": 23,
+      "note": "`rebuild_prefixes` counts prefixes per VRF inside a loop over every VRF, purely to print a progress line. One `VRF.objects.annotate(Count('prefixes'))` would produce the same output in a single query. The loop body then calls `rebuild_prefixes(vrf.pk)`, which is the expensive part, so the count is not the dominant cost -- but it is still one avoidable round trip per VRF in a management command.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "b44564b3128344df",
+      "rule_id": "DJP-005",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_models.py",
+      "line": 1695,
+      "note": "`test_get_available_vids` binds `child_vids = VLAN.objects.filter(group=vlangroup).values_list('vid', flat=True)` and then calls `len(child_vids)` to assert it equals 4. The name is read nowhere else in the method -- the next statement calls `vlangroup.get_available_vids()` and asserts on a different list -- so every matching row is fetched and turned into a tuple purely to produce an integer. `.count()` is the correct call and compiles to `SELECT COUNT(*)`. It is a test, so the cost does not reach production and severity is demoted to low by `djaudit.scope`, but the reading is right.",
+      "reviewed": "2026-08-06",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "ee45e5c2be7e22a8",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 738,
+      "note": "`Prefix.objects.filter(...).exists()` asserted once per generated prefix inside `for i in range(3)`. Three existence queries where one `filter(prefix__in=[...])` and a count would do. Bounded and cheap, demoted by the tests scope, but a correct reading of the code.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "e863b1a600f15434",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 759,
+      "note": "The IPv6 variant of the same assertion loop, four iterations, four existence queries. Same remediation. Recorded to keep the benchmark honest about how often this rule fires on assertion loops, which is the main thing the tests-scope demotion is calibrated against.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "fab88a9441d36103",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 783,
+      "note": "Eight existence queries, one per expected hex value, in the uppercase-hex prefix test. The list is a literal, so the query count is fixed at eight; a single `values_list('prefix', flat=True)` fetch compared against the expected set would replace the loop entirely.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "a2b673de63af290a",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 2222,
+      "note": "`VLAN.objects.filter(group=..., vid=vid, name=...).exists()` once per expected VID, and the expected list can run to dozens of entries for a range pattern like '1,10-20,300-305'. This is the largest of the assertion loops in this file by query count. Correct, demoted by scope.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "386ee0a887694fec",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 2286,
+      "note": "`VLANGroup.objects.get(name=group_name)` inside the case loop -- one query per parameterised case. Only two cases here, so the cost is trivial, but the shape is the same one that matters in production code and the rule cannot tell the difference from the loop alone.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "57ef1913c4d95dbe",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 2287,
+      "note": "`VLAN.objects.count()` captured as `initial_count` at the top of each case iteration. Loop-invariant in intent but not in fact, since the preceding case creates VLANs -- so it genuinely must be re-read and the remediation is to track the expected count in Python instead. Correct detection.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "7373785802e09734",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 2296,
+      "note": "The closing `VLAN.objects.count()` assertion in the same case loop, a second round trip per case. Distinct call from the `initial_count` read above it, so it is a separate finding rather than an alias, which is what keying on the call node is for.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "377b6bca0ff37e42",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 2298,
+      "note": "The only depth-2 finding in NetBox: an existence query inside `for vid in expected_vids` which is itself inside `for pattern, expected_vids, group_name in cases`, so the total is the product of the two loop bounds. Escalated to critical by the nested-loop rule and then demoted by the tests scope, which is the interaction the two adjustments are meant to produce.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "822c6113921fd82b",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/ipam/tests/test_views.py",
+      "line": 2315,
+      "note": "`VLAN.objects.count()` asserted once per invalid pattern, verifying nothing was created. Five iterations, five counts. The count is genuinely required each time to prove the invariant held, so the honest fix is fewer assertions rather than a hoisted query. Correct, low practical impact.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "1c16b2066c581f92",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/netbox/authentication/__init__.py",
+      "line": 185,
+      "note": "Remote authentication resolves each group name with its own `Group.objects.get(name=name)`, so a user carrying twenty group assertions costs twenty queries on every login. A single `Group.objects.in_bulk(remote_groups, field_name='name')` would answer all of them, with the `DoesNotExist` branch becoming a membership test on the returned mapping. Bounded by the identity provider's group count rather than by table size, but it runs on the login path.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "89aaabca87c16d49",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/netbox/authentication/__init__.py",
+      "line": 274,
+      "note": "The same per-name `Group.objects.get` pattern in the second remote-auth backend, this time over `settings.REMOTE_AUTH_DEFAULT_GROUPS`. The list is configuration rather than user input, so it is usually short, but the query count still scales with it and the fix is the same single `in_bulk` call. Reported and correct; the practical severity depends on deployment configuration.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "3da5a2c37f80664f",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/netbox/authentication/__init__.py",
+      "line": 396,
+      "note": "Third occurrence of the same loop in the third remote-auth backend, again over `REMOTE_AUTH_DEFAULT_GROUPS`. That djaudit finds all three independently is the useful property here: the pattern was copied between backends, and a reviewer reading one file would have no reason to suspect the other two. Same remediation, same bound on cost.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "dbb115c93389b59e",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/netbox/search/backends.py",
+      "line": 187,
+      "note": "Verified against source. `[r for r in results if r.object_type == object_type]` compares a forward FK object per row of a CachedValue queryset, which loads the related ContentType row each time; `r.object_type_id == object_type.pk` answers the same question for free. High severity because the comprehension is nested inside the loop over object types above it. Tentative confidence because `results` arrives as a parameter-fed chain the reader cannot fully narrate. The `prefetch_related_objects` call on the next line is unrelated -- it prefetches `object__*`, not `object_type`.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "a1ef84b11c682b77",
+      "rule_id": "DJS-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 100,
+      "note": "CSRF_COOKIE_SECURE at settings.py:100. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "2ddc67e5415029ff",
+      "rule_id": "DJS-007",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 204,
+      "note": "Correct, and quiet on purpose. NetBox exposes SECURE_HSTS_SECONDS at settings.py:204 as a documented operator knob defaulting to 0, alongside SECURE_HSTS_INCLUDE_SUBDOMAINS and SECURE_HSTS_PRELOAD, so enabling it is a deliberate operator decision. HSTS is the one security header whose absence from the Django settings is weak evidence: nginx, a load balancer and every CDN can send Strict-Transport-Security, it is extremely common to set it there, and none of that is visible from inside the repository. The rule reports this at low/tentative for exactly that reason, which is why it does not appear in a default run. Recorded as accepted rather than a false positive because the statement is true -- Django is not sending the header -- and because a project that assumes the proxy is doing it and is wrong has no way to find out except by being attacked.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "745b70a3b644900f",
+      "rule_id": "DJS-006",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 205,
+      "note": "SECURE_SSL_REDIRECT at settings.py:205. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason. NetBox additionally documents running behind nginx or Apache, which is the usual place for this redirect.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "60882482a7c33223",
+      "rule_id": "DJS-009",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 219,
+      "note": "SESSION_COOKIE_SECURE at settings.py:219. NetBox exposes this as a first-class, documented configuration parameter -- it is written up in docs/configuration/security.md and was introduced deliberately in 3.4 (issue #11386) alongside the other two. The False in settings.py is the fallback for `getattr(configuration, ...)`, where `configuration` is the operator's configuration.py, a file that lives outside the repository we are scanning and is therefore invisible to static analysis by construction. There is nothing here for a NetBox developer to change: the value is the operator's to set. Recorded as accepted rather than a false positive because the statement the rule makes -- that the shipped default is off -- is true, and the finding is annotated environment-dependent for exactly this reason.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "47a5c85aea75a78f",
+      "rule_id": "DJS-012",
+      "verdict": "accepted_risk",
+      "file": "netbox/netbox/settings.py",
+      "line": 601,
+      "note": "Correct, well-formed, and exactly what the rule is designed to say quietly rather than loudly. netbox/netbox/settings.py:601 is the textbook ('HTTP_X_FORWARDED_PROTO', 'https'), which is the right configuration for the nginx or Apache deployment NetBox documents, and the line immediately below it sets USE_X_FORWARDED_HOST = True for the same reason. There is no misspelling and no alternative NetBox could sensibly choose. What the finding records is the invariant this creates -- that every route to the application must pass through a proxy which overwrites the header -- and that invariant is a deployment property we cannot see from the repository, which is why the rule caps itself at low/tentative and stays out of a default run. Accepted rather than a false positive because the statement is true and worth one review; it is the kind of finding a reader is meant to confirm once and then suppress.",
+      "reviewed": "2026-08-02",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "cb314528f979929e",
+      "rule_id": "DJM-003",
+      "verdict": "accepted_risk",
+      "file": "netbox/tenancy/migrations/0024_default_ordering_indexes.py",
+      "line": 13,
+      "note": "Index on `contact.name`. All five belong to one coordinated NetBox change -- a `*_default_ordering_indexes` migration added to ten apps at once, 52 AddIndex operations in total -- which makes them the best available demonstration of what the family's leaf scope does, in both directions at once. It reports these five because `users`, `tenancy` and `vpn` have had no migration since, and says nothing about the other 47 because their apps moved on. And these five demonstrably ran, since they are in shipped history. The reading is right and the cost is real; what static analysis cannot supply is whether the migration is still pending, which is the live tier's job. Accepted: contacts are hand-entered records, so this table is small in practice.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "f1dcef9db3f97f3f",
+      "rule_id": "DJM-003",
+      "verdict": "accepted_risk",
+      "file": "netbox/tenancy/migrations/0024_default_ordering_indexes.py",
+      "line": 17,
+      "note": "Composite index on `contactassignment(contact, priority, role, id)`. All five belong to one coordinated NetBox change -- a `*_default_ordering_indexes` migration added to ten apps at once, 52 AddIndex operations in total -- which makes them the best available demonstration of what the family's leaf scope does, in both directions at once. It reports these five because `users`, `tenancy` and `vpn` have had no migration since, and says nothing about the other 47 because their apps moved on. And these five demonstrably ran, since they are in shipped history. The reading is right and the cost is real; what static analysis cannot supply is whether the migration is still pending, which is the live tier's job. This is the one of the five worth pausing over: contact assignments are a join table that grows with the object count rather than with the number of people, so on a large DCIM install it is the only one where the write block could be felt. Still accepted -- NetBox needs the index for its default ordering, and a one-off build is cheaper than the sort it removes -- but it is the finding a reader should size before a deploy, and sizing is exactly what the live tier adds.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "a962e1def2056c5b",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/tokens.py",
+      "line": 18,
+      "note": "True reading, and deliberate. Token.key is the API token's stored value, marked read_only_fields = ('key',) -- which stops writes and guarantees reads, exactly the half that does not help. NetBox shows the key so an operator can retrieve a token they created; the endpoint is restricted to the token's owner or a user holding grant_token. Accepted as designed.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "e78d346346603dc8",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/tokens.py",
+      "line": 19,
+      "note": "True reading. TokenSerializer declares token = CharField(default=Token.generate), so the full token value is both accepted and returned. This is how NetBox lets a caller supply their own token or read back a generated one, and it is the single most sensitive value the API handles. Accepted as designed, with the same ownership restriction as the key field on line 18.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "2b5d4e88c6d04541",
+      "rule_id": "DJA-011",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/tokens.py",
+      "line": 23,
+      "note": "True reading, and NetBox knows it. TokenSerializer.user is writable on create -- get_fields() only makes it read-only when self.instance is not None -- so the request body chooses whose token this becomes, which is account takeover if nothing stops it. Something does: validate() calls user_may_grant_token(request.user, token_user) and raises PermissionDenied otherwise, with a comment explaining why has_perm(obj=None) was not good enough. This is exactly the mitigation the rule's first limitation says it cannot see. Accepted as designed, and the most instructive entry in this file: the defect and the fix look identical in the field list.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "f905f00592dcacf5",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/tokens.py",
+      "line": 82,
+      "note": "True reading. TokenProvisionSerializer exists to exchange a username and password for a token, so returning the token is the entire purpose of the endpoint -- there is no version of this view that does not do it. Accepted as designed. Related to the DJA-003 entry on the same view, which reports that it is reachable anonymously; both are true and both are intentional.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "68473210b515642c",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/tokens.py",
+      "line": 96,
+      "note": "True reading, same endpoint as line 82. The provisioning response carries key alongside token so a caller can identify the credential it was just issued. Accepted as designed.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "7f693b9790d115a5",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/users.py",
+      "line": 35,
+      "note": "True reading, low value. UserSerializer.is_active tells a caller which accounts can still log in, which is account-status disclosure rather than a credential leak -- hence MEDIUM. The endpoint requires users.view_user. Accepted: an administrative user API that could not report whether an account was active would be unable to do its job.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "1a112797fea25284",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/users.py",
+      "line": 36,
+      "note": "True reading. Group membership on the user model is authority-granting information: it tells an attacker which account is worth phishing. Restricted to users.view_user, and managing group membership is what this endpoint is for. Accepted as designed.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "a1d4483d14114e3e",
+      "rule_id": "DJA-010",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/serializers_/users.py",
+      "line": 43,
+      "note": "True reading, same argument as the groups field above. The effective permission list is the most direct answer to 'which account should I target', but a user-administration API cannot withhold it from the administrators using it. Accepted as designed.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "c2ae47c4a80cb3c1",
+      "rule_id": "DJA-003",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/api/views.py",
+      "line": 56,
+      "note": "TokenProvisionView at users/api/views.py:56. The reading is exactly right: permission_classes = [] and the route is POST, so an anonymous caller can reach it. It is also deliberate, and its own docstring says so -- \"Non-authenticated REST API endpoint via which a user may create a Token\". This is the credential-exchange endpoint: the caller POSTs a username and password, TokenProvisionSerializer validates them, and a Token comes back. Every token-authenticated API needs exactly one door like this, and it cannot be behind the authentication it exists to grant. Recorded as accepted rather than a false positive because the finding's claim is true and worth a reviewer's five seconds -- an endpoint that opens itself to anonymous POST should have to justify itself once, and this one does. The credential check happens inside the serializer, which DJA-003 states plainly that it cannot see.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "304af1b9ef537cdc",
+      "rule_id": "DJA-015",
+      "verdict": "true_positive",
+      "file": "netbox/users/api/views.py",
+      "line": 56,
+      "note": "TokenProvisionView takes a username and password over an anonymous POST and returns an API token. NetBox sets no DEFAULT_THROTTLE_CLASSES, so nothing limits how fast it can be asked. DJA-003 already reports that this endpoint is anonymous and that is deliberate -- its docstring says so -- but being unthrottled is a separate decision and not one the code records anywhere. An unauthenticated endpoint that answers 'is this password correct' at network speed is the definition of a credential-stuffing target.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "dc81dab69cc15bbf",
+      "rule_id": "DJA-014",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/filtersets.py",
+      "line": 172,
+      "note": "TokenFilterSet.Meta.fields lists 'key'. The name matches SECRET_FIELDS and the reading is correct, but NetBox's v2 tokens split the credential in two: 'key' is documented as the 'v2 token identification key' and verification is done against hmac_digest, so filtering on it confirms an identifier rather than a secret. For a legacy v1 token 'key' still is the whole credential, which is why this is accepted rather than dismissed. Listing tokens requires authentication and NetBox scopes the queryset to the requesting user, so the oracle is only available for rows the caller can already read.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     },
     {
       "fingerprint": "c14a626cfae996bd",
@@ -712,9 +692,79 @@
       "verdict": "true_positive",
       "file": "netbox/users/migrations/0009_update_group_perms.py",
       "line": 16,
-      "reviewer": "Zambagarrah",
+      "note": "A data migration swapping a content type on every ObjectPermission. True as read, and the honest remediation here is smaller than the rule's: object_types.remove()/add() are M2M operations that write immediately, so perm.save() is not merely one query per row, it is a query per row that does nothing at all. Deleting it is better than bulk_update. Kept as a true positive because the statement the rule makes -- one write per iteration over rows of a known model -- is correct, and it points at real waste.",
       "reviewed": "2026-08-04",
-      "note": "A data migration swapping a content type on every ObjectPermission. True as read, and the honest remediation here is smaller than the rule's: object_types.remove()/add() are M2M operations that write immediately, so perm.save() is not merely one query per row, it is a query per row that does nothing at all. Deleting it is better than bulk_update. Kept as a true positive because the statement the rule makes -- one write per iteration over rows of a known model -- is correct, and it points at real waste."
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "d002f528ede93d1c",
+      "rule_id": "DJM-003",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/migrations/0016_default_ordering_indexes.py",
+      "line": 11,
+      "note": "Index on `objectpermission.name`. All five belong to one coordinated NetBox change -- a `*_default_ordering_indexes` migration added to ten apps at once, 52 AddIndex operations in total -- which makes them the best available demonstration of what the family's leaf scope does, in both directions at once. It reports these five because `users`, `tenancy` and `vpn` have had no migration since, and says nothing about the other 47 because their apps moved on. And these five demonstrably ran, since they are in shipped history. The reading is right and the cost is real; what static analysis cannot supply is whether the migration is still pending, which is the live tier's job. Accepted rather than wrong: an object-permission table holds tens to hundreds of rows on any deployment, so the build is over before a write would notice.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "90e4b505a24ea29e",
+      "rule_id": "DJM-003",
+      "verdict": "accepted_risk",
+      "file": "netbox/users/migrations/0016_default_ordering_indexes.py",
+      "line": 15,
+      "note": "Index on `token.-created`, a descending index for the default ordering. All five belong to one coordinated NetBox change -- a `*_default_ordering_indexes` migration added to ten apps at once, 52 AddIndex operations in total -- which makes them the best available demonstration of what the family's leaf scope does, in both directions at once. It reports these five because `users`, `tenancy` and `vpn` have had no migration since, and says nothing about the other 47 because their apps moved on. And these five demonstrably ran, since they are in shipped history. The reading is right and the cost is real; what static analysis cannot supply is whether the migration is still pending, which is the live tier's job. Accepted: API tokens are per-user and few, so the build is brief.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "6724221399ead0c3",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/users/tests/test_api.py",
+      "line": 457,
+      "note": "`Token.objects.get(pk=obj['id'])` per row of the API response, to validate each returned plaintext token. The ids are all known from `response.data`, so `in_bulk` would serve the loop in one query. Demoted by the tests scope; the detection is exact and the remediation is straightforward.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "6a8e427b79d5fb7b",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/utilities/testing/base.py",
+      "line": 187,
+      "note": "`ObjectType.objects.get(pk=value)` inside `model_to_dict`'s field loop in NetBox's shared test utilities, so every content-type-valued field on every compared instance costs a query. This one is worth more than most test findings because the helper is called from a large share of the API test suite, so the multiplier is the whole suite rather than one method. `ObjectType` is also eminently cacheable. Still demoted by scope, since it is test-support code.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "da8a779c148d48ea",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "netbox/utilities/testing/views.py",
+      "line": 1163,
+      "note": "`ObjectChange.objects.filter(...).order_by('-time').first()` per primary key while verifying bulk rename changelog entries, so the assertion costs one query per renamed object. One filtered query over `changed_object_id__in=pk_list` would return the whole set. Shared test utility, so it runs across many test classes; demoted by scope but genuinely worth fixing.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "bac8a36dcc286cac",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "netbox/virtualization/tests/test_views.py",
+      "line": 494,
+      "note": "Verified against source. A VirtualMachine queryset with `vm.device` read per row inside a bulk-edit assertion. True by mechanism, test code, no production cost -- the same scoping question as the two other test-file findings rather than a wrong claim.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "9235b0a78b1ae643",
+      "rule_id": "DJM-003",
+      "verdict": "accepted_risk",
+      "file": "netbox/vpn/migrations/0012_default_ordering_indexes.py",
+      "line": 13,
+      "note": "Composite index on `tunneltermination(tunnel, role, id)`. All five belong to one coordinated NetBox change -- a `*_default_ordering_indexes` migration added to ten apps at once, 52 AddIndex operations in total -- which makes them the best available demonstration of what the family's leaf scope does, in both directions at once. It reports these five because `users`, `tenancy` and `vpn` have had no migration since, and says nothing about the other 47 because their apps moved on. And these five demonstrably ran, since they are in shipped history. The reading is right and the cost is real; what static analysis cannot supply is whether the migration is still pending, which is the live tier's job. Accepted: terminations are bounded by the tunnel count, a couple per tunnel.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     }
   ]
 }

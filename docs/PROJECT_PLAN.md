@@ -5377,6 +5377,55 @@ rules come first; the live tier is then built for consumers that exist.
   foreign key pointing at it. All accepted, none wrong. 100% precision on all
   three benchmarks.
 - **4.3.3** — `DJM-003` `AddIndex` without `CONCURRENTLY` (`AddIndexConcurrently`).
+  **Done** (`src/djaudit/rules/djm_addindex_blocking.py`).
+
+  Postgres builds an index under `SHARE`: reads continue, every write blocks
+  until it finishes. Deliberately **one rank below `DJM-002`**, and the gap is
+  the message — `ACCESS EXCLUSIVE` makes a table unavailable, `SHARE` leaves it
+  readable, and a site building an index still serves pages while failing
+  checkouts. Flattening them would tell a reader two different situations need
+  the same urgency.
+
+  The remedy is two edits, not one. `AddIndexConcurrently` sets `atomic =
+  False` and calls `_ensure_not_in_transaction` — read in Django's source
+  rather than assumed — so a remediation naming only the operation produces a
+  migration that refuses to run. The finding says which of the two is missing,
+  and carries the migration's `atomic` flag as evidence.
+
+  Two operations are excluded and both are documented rather than silent.
+  `AddIndexConcurrently` is the fix. `AlterIndexTogether` replaces the whole
+  `index_together` collection, so whether it builds an index, drops one, or
+  does both depends on prior state this rule does not replay — reporting it
+  unconditionally would flag removals as though they took a build lock.
+
+  All 5 NetBox findings belong to one coordinated `*_default_ordering_indexes`
+  change spanning **10 apps and 52 `AddIndex` operations**. Leaf scope reports
+  the 5 whose apps have had no migration since and is silent on the other 47,
+  though those 47 ran on exactly the same deploy. Both arms of the family's
+  scope heuristic — the false positives it removes and the true positives it
+  gives up — are visible in a single change, and the triage notes say so.
+
+  **It also lowered a headline figure, which is the result worth keeping.**
+  Held-out accepted-risk recall went 33/58 to 33/63: five more accepted risks,
+  none of them predicted. Leave-one-target-out cannot see a rule confined to
+  one target — it is trained on for the two folds with none of its findings to
+  score and absent from the fold that scores all five — and because `ByRule`
+  answers `TRUE_POSITIVE` for an unseen rule rather than abstaining, those five
+  are scored as confidently wrong rather than merely unscored. The mechanism is
+  now a test that names the responsible rule, not a comment; measuring it
+  showed the accepted-risk figure alone could not have caught the difference
+  between the two fallbacks, since abstaining scores an identical 52.4% and
+  moves only the true-positive column. Fitted-vs-held-out is now 87.3% / 52.4%.
+
+  *Verified:* 17 unit tests, mutation 14/14. The four survivors were all
+  message integrity: blanking the `.` in `shop.0002_index` left every substring
+  assertion passing while producing a citation nobody can paste back. Fixed by
+  pinning the whole sentence and the whole evidence string, and by
+  cross-checking the `path:line` citation against the finding's own location
+  instead of a fixture-dependent literal. 5 findings on NetBox, all genuine
+  indexes on long-standing tables; 0 on healthchecks and pretix. Third
+  defect/control pair added to `migration_project`, 27/27 controls
+  load-bearing.
 - **4.3.4** — `DJM-004` `RemoveField` deployed alongside code still referencing it, breaking rolling deploys.
 - **4.3.5** — `DJM-005` `RenameField` or `RenameModel`, which cannot be rolled out without downtime.
 - **4.3.6** — `DJM-006` `RunPython` with no reverse, blocking rollback.
@@ -5959,7 +6008,7 @@ remove from them, and `6.5.3` asserts that by trying.
   Answers four questions a non-specialist actually asks — *who this affects*,
   *what it costs*, *how widespread it is*, *how urgent it is* — plus a fifth
   the vendors never print: **when this does not apply to you.** That last one
-  is free, because a measurement showed **all 69 rules carry `limitations`**,
+  is free, because a measurement showed **all 70 rules carry `limitations`**,
   the field recording what the rule cannot see. Those caveats are rendered
   **verbatim from `RuleMeta.limitations`**, never paraphrased; a mutant that
   truncated them to twenty characters was caught.
@@ -6346,10 +6395,10 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **69 rules are
+document specifies, and most of it is still only specified: **70 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-and the first two of Phase 4's migration rules.
+and the first three of Phase 4's migration rules.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against
