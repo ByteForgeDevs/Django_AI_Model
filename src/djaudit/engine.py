@@ -34,6 +34,14 @@ class RunResult:
     suppressed_baseline: int = 0
     filtered_threshold: int = 0
     rules_run: int = 0
+    corroborated: int = 0
+    """How many Django deployment checks landed on a finding of ours.
+
+    Counted rather than inferred: a live run where Django confirmed nothing and
+    a static run where it was never asked both show zero findings raised to
+    `certain`, and they are not the same situation.
+    """
+
     rule_errors: dict[str, str] = field(default_factory=dict)
     degraded: Degradation | None = None
     """Live-tier rules this run did not reach. Reported, never silently dropped."""
@@ -155,6 +163,7 @@ def _audit(
             result.rule_errors[rule_cls.meta.id] = f"{type(exc).__name__}: {exc}"
 
     result.total_raw = len(collected)
+    collected, result.corroborated = _corroborate(ctx, collected)
 
     kept: list[Finding] = []
     for finding in collected:
@@ -179,6 +188,44 @@ def _audit(
     result.findings = sorted(above, key=lambda f: f.sort_key)
     result.duration_seconds = time.perf_counter() - started
     return result
+
+
+def _corroborate(ctx: ProjectContext, findings: list[Finding]) -> tuple[list[Finding], int]:
+    """Merge Django's deployment check into our own findings, if it can run.
+
+    Lives here rather than in a rule because no rule may edit another rule's
+    output, and the whole point is that our `DJS` findings and Django's checks
+    are two readings of one defect. Everything is imported inside the function:
+    a static audit must not pay for `subprocess`, and `tests/test_import_cost`
+    fails if it does.
+    """
+    if not ctx.live or ctx.live_context is None or ctx.manage_py is None:
+        return findings, 0
+
+    from djaudit.live.checks import run_deployment_check  # noqa: PLC0415
+    from djaudit.live.corroborate import corroborate  # noqa: PLC0415
+    from djaudit.live.sqlmigrate import Target  # noqa: PLC0415
+
+    target = Target.of(ctx.live_context, ctx.manage_py)
+    if target is None:
+        # No `default` alias to describe. The deployment check itself does not
+        # touch a database, but `Target` is the only interpreter this tool is
+        # allowed to run -- it is built from what the user disclosed -- and
+        # inventing a backend to satisfy the constructor would be fabricating
+        # the one field we would then be reporting on.
+        return findings, 0
+
+    try:
+        report = run_deployment_check(target)
+    except OSError:
+        # Same isolation as a rule: the deployment check is a subprocess into
+        # someone else's project, and a run that cannot make it must degrade to
+        # the static answer rather than lose every finding collected so far.
+        return findings, 0
+
+    result = corroborate(findings, report)
+    ctx.deployment_gaps = result.unclaimed
+    return list(result.findings), result.merged
 
 
 def _run_rule(rule_cls: type[Rule], ctx: ProjectContext) -> list[Finding]:

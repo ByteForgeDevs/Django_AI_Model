@@ -215,8 +215,14 @@ class TestAgainstARealDatabase:
         assert result.get("sized") is not None
 
     def test_a_fresh_table_reports_an_unknown_row_count(self, live_project: Path) -> None:
-        """The `-1` convention, from the server rather than from a fixture."""
-        self.sql(live_project, "CREATE TABLE fresh (id int)")
+        """The `-1` convention, from the server rather than from a fixture.
+
+        Autovacuum is disabled on this table because it would otherwise analyse
+        it at a moment nobody chose, and the test would pass or fail depending
+        on how busy the machine was. It first failed exactly that way: alone it
+        was quick enough, in the full suite autovacuum got there first.
+        """
+        self.sql(live_project, "CREATE TABLE fresh (id int) WITH (autovacuum_enabled = false)")
         self.sql(live_project, "INSERT INTO fresh SELECT g FROM generate_series(1,500) g")
         size = read_sizes(self.target(live_project)).get("fresh")
         assert size is not None
@@ -226,7 +232,7 @@ class TestAgainstARealDatabase:
     def test_and_analysing_it_makes_the_count_known(self, live_project: Path) -> None:
         """The control for the test above: the same table, same query, after
         the one operation that changes the answer."""
-        self.sql(live_project, "CREATE TABLE fresh (id int)")
+        self.sql(live_project, "CREATE TABLE fresh (id int) WITH (autovacuum_enabled = false)")
         self.sql(live_project, "INSERT INTO fresh SELECT g FROM generate_series(1,500) g")
         self.sql(live_project, "ANALYZE fresh")
         size = read_sizes(self.target(live_project)).get("fresh")
@@ -236,7 +242,10 @@ class TestAgainstARealDatabase:
     def test_the_size_tracks_the_data(self, live_project: Path) -> None:
         """Bytes are exact from the first row, which is the whole reason they
         are the signal rather than `reltuples`."""
-        self.sql(live_project, "CREATE TABLE grows (id int, body text)")
+        self.sql(
+            live_project,
+            "CREATE TABLE grows (id int, body text) WITH (autovacuum_enabled = false)",
+        )
         self.sql(
             live_project,
             "INSERT INTO grows SELECT g, repeat('x', 500) FROM generate_series(1,20000) g",

@@ -6303,7 +6303,45 @@ rules come first; the live tier is then built for consumers that exist.
   test that iterated `SECTIONS.items()` to prove `SECTIONS` was right: it built
   its input from the constant it was checking, so a section named `GRUMBLES`
   would have satisfied it.
-- **4.5.2** — Deduplication against our static `DJS` findings — when Django and djaudit agree, report once with both as evidence.
+- **4.5.2** — Deduplication against our static `DJS` findings — when Django and
+  djaudit agree, report once with both as evidence. **Done.**
+
+  It is a merge rather than a deduplication, because **each half knows
+  something the other cannot**. Our rule read the source, so it has a
+  `file:line` and can name the assignment to change; Django reports `?` for an
+  object, because by the time its checks run, settings are values and the file
+  they came from is gone. Django resolved those values through every import,
+  override and environment variable, so it knows what the setting *is*; our
+  rule knows only what the source says, and emits `tentative` when the source
+  does not settle it. So our finding keeps its location and gains Django's
+  sentence as evidence, and a confirmed finding is raised to `certain`.
+
+  **Confirmation raises confidence; silence never lowers it.** Django's checks
+  are narrower than ours -- nothing on CORS, fast password hashers, or a
+  `SECURE_PROXY_SSL_HEADER` that trusts a client header -- and a silenced check
+  leaves no trace but a count. Reading "Django did not mention it" as "Django
+  disagrees" would let a project quiet our findings by quieting Django's.
+
+  The mapping was read out of `django/core/checks/security/` rather than
+  matched by title, and it is many-to-one because Django distinguishes *how* a
+  setting came to be wrong: an insecure session cookie is `W010`, `W011` or
+  `W012` depending on whether sessions are enabled through `INSTALLED_APPS`,
+  through `MIDDLEWARE`, or are simply configured that way. All three are one
+  defect and one line to fix, so they produce one finding that cites all three.
+
+  It runs in the engine, not in a rule, because no rule may edit another rule's
+  output. Every import is function-level and behind `ctx.live`, so a static
+  audit still never loads `subprocess` -- `tests/test_import_cost.py` fails if
+  that stops being true.
+
+  The Django checks with **no** rule of ours are recorded on the context as
+  `deployment_gaps`. Nothing reports them yet; that is 4.5.3.
+
+  Mutation testing removed an unreachable fallback in `_confirm` -- every id it
+  looks up was read off the report a moment earlier -- and narrowing the
+  parameter to `Report` now enforces at type-check time what a runtime guard
+  had been asserting. 47/48, the one survivor documented as equivalent because
+  `Unknown` answers nothing to every question by design.
 - **4.5.3** — `DJS-028` gap report: settings Django flags that our static tier missed. A self-auditing rule that measures our own recall.
 
 ### Step 4.6 — Benchmark and document

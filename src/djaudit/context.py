@@ -112,6 +112,15 @@ class ProjectContext:
     consented to.
     """
 
+    deployment_gaps: frozenset[str] = frozenset()
+    """Django deployment checks that fired with no rule of ours to receive them.
+
+    Filled by the engine after `manage.py check --deploy` runs, and read by
+    `DJS-028`, which reports our own recall gap. Empty on a static run, which
+    is why `DJS-028` is a live rule: an empty set here means "we did not ask",
+    not "there is nothing missing".
+    """
+
     live_problem: str | None = None
     """Why the live tier is unavailable, when it was asked for and did not start.
 
