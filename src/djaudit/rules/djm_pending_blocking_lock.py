@@ -68,6 +68,8 @@ from djaudit.registry import Rule, RuleMeta, register
 
 if TYPE_CHECKING:
     from djaudit.live.sqlmigrate import Emitted, Statement, Target
+    from djaudit.live.tables import Size, Sizes
+    from djaudit.live.tables import Unknown as TablesUnknown
 
 BUDGET = 40
 """How many pending migrations to render before giving up on the rest.
@@ -137,9 +139,13 @@ class BlockingPendingMigration(Rule):
             "no lock rather than as taking the strongest one, because this "
             "rule reports at `certain` and a guess is not a thing to be "
             "certain about. The static rules still see the operation.",
-            "Duration scales with the row count, which this rule does not "
-            "read, so a blocking scan over an empty table is reported with the "
-            "same severity as one over ten million rows.",
+            "Severity is scaled by the table's size on disk, read from "
+            "`pg_class`, using a rate of 16 ms per megabyte measured on one "
+            "machine rewriting one column shape. It is an order of magnitude, "
+            "not a promise about your hardware.",
+            "A table the size query did not return, and a database it could "
+            "not reach, both leave severity exactly as declared. Absent "
+            "information never makes a finding quieter.",
             f"At most {BUDGET} pending migrations are rendered per run, in "
             "the order they would run, because each one is a subprocess "
             "against the live database. Any beyond that are not examined.",
@@ -183,10 +189,42 @@ class BlockingPendingMigration(Rule):
         # point at and no edit the reader could make there.
         nodes = {node.key: node for node in ctx.migration_graph.plan()}
         mine = [key for key in plan.unapplied if key in nodes]
+        if not mine:
+            return
+
+        # Read once, not per migration: it is a subprocess against the live
+        # database, and every finding in this run asks it the same question.
+        # Deferred until there is something to report so a fully-migrated
+        # project pays nothing for it.
+        sizes = self._sizes(target)
         for key in mine[:BUDGET]:
             emitted = self._emit(target, *key)
             if emitted is not None:
-                yield from self._judge(ctx, emitted, nodes[key])
+                yield from self._judge(ctx, emitted, nodes[key], sizes)
+
+    def _sizes(self, target: Target) -> Sizes | TablesUnknown:
+        from djaudit.live.tables import read_sizes  # noqa: PLC0415
+
+        return read_sizes(target)
+
+    def _severity(self, size: Size | None) -> Severity:
+        """How bad this is, given how much data the lock is held across.
+
+        Only ever *lowers* the declared severity, and only on a measurement.
+        An unreadable database, an unrecognised table or a size nobody could
+        take leaves the finding exactly as the rule declared it -- raising
+        severity should take evidence, and lowering it should take more,
+        because a finding nobody reads is the failure mode that matters here.
+
+        The boundaries are the measured 16 ms/MB read backwards: 64 MB is about
+        a second, past which the lock outlives an ordinary request timeout, and
+        8 MB is about 130 ms, inside what one slow request costs anyway.
+        """
+        from djaudit.live.tables import NOTICEABLE, SUSTAINED  # noqa: PLC0415
+
+        if size is None or size.stored >= SUSTAINED:
+            return self.meta.severity
+        return Severity.MEDIUM if size.stored >= NOTICEABLE else Severity.LOW
 
     def _target(self, ctx: ProjectContext) -> Target | None:
         """The interpreter and backend to ask, or nothing at all.
@@ -221,9 +259,14 @@ class BlockingPendingMigration(Rule):
         return result
 
     def _judge(
-        self, ctx: ProjectContext, emitted: Emitted, node: MigrationNode
+        self,
+        ctx: ProjectContext,
+        emitted: Emitted,
+        node: MigrationNode,
+        sizes: Sizes | TablesUnknown | None = None,
     ) -> Iterator[Finding]:
         from djaudit.live.locks import classify, worst  # noqa: PLC0415
+        from djaudit.live.tables import estimate  # noqa: PLC0415
 
         dangerous = [
             statement for statement in emitted.statements if classify(statement.sql).dangerous
@@ -243,12 +286,16 @@ class BlockingPendingMigration(Rule):
         if verdict is None:
             return
         statement = next(s for s in dangerous if s.sql == verdict.statement)
+        size = sizes.get(verdict.table) if sizes is not None else None
+        scale = estimate(size)
         yield self.finding(
             location=self._locate(ctx, emitted, statement, node),
+            severity=self._severity(size),
             message=(
                 f"`{emitted.app}.{emitted.name}` is not applied yet and emits "
                 f"`{_summarise(statement.sql)}`, which {verdict.explain()}."
                 + (f" Operation: {statement.operation}." if statement.operation else "")
+                + (f" {scale}" if scale else "")
             ),
             evidence=(
                 Evidence(
@@ -261,7 +308,8 @@ class BlockingPendingMigration(Rule):
                     content=(
                         f"lock={verdict.lock.value} work={verdict.work.value} "
                         f"table={verdict.table or 'unknown'} backend={emitted.backend} "
-                        f"atomic={emitted.atomic}"
+                        f"atomic={emitted.atomic} "
+                        f"size={size.describe() if size else 'not measured'}"
                     ),
                     source=f"manage.py sqlmigrate {emitted.app} {emitted.name}",
                 ),

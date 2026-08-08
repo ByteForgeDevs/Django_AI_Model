@@ -276,7 +276,8 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - The lock and work classification is measured against PostgreSQL and applies to no other backend, so the rule declines to report unless the alias that emitted the SQL is Postgres or PostGIS.
 - A statement the classifier has not measured is treated as taking no lock rather than as taking the strongest one, because this rule reports at `certain` and a guess is not a thing to be certain about. The static rules still see the operation.
-- Duration scales with the row count, which this rule does not read, so a blocking scan over an empty table is reported with the same severity as one over ten million rows.
+- Severity is scaled by the table's size on disk, read from `pg_class`, using a rate of 16 ms per megabyte measured on one machine rewriting one column shape. It is an order of magnitude, not a promise about your hardware.
+- A table the size query did not return, and a database it could not reach, both leave severity exactly as declared. Absent information never makes a finding quieter.
 - At most 40 pending migrations are rendered per run, in the order they would run, because each one is a subprocess against the live database. Any beyond that are not examined.
 - Only migrations belonging to the project's own apps are reported. A pending migration from an installed package is real, but it cannot be cited as a line in the project's source and cannot be edited there, so it is left to the package's own release notes.
 

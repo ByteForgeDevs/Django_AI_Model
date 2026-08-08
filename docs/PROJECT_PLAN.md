@@ -6220,7 +6220,44 @@ rules come first; the live tier is then built for consumers that exist.
   Timing was checked against `origin/main` rather than against a remembered
   number: healthchecks 3.43s here, 3.49s on main, so the phase adds nothing
   measurable. The gate's local margin is thin, but it is thin on main too.
-- **4.4.4** — Table size estimation from `pg_class.reltuples` when a database connection is available, so severity scales with actual row count.
+- **4.4.4** — Table size estimation when a database connection is available, so
+  severity scales with how much data the lock is actually held across. **Done.**
+
+  **This step's premise was wrong, in the same way 4.4.2's was.** It specified
+  `pg_class.reltuples`, and reltuples is `-1` on a table that has never been
+  analysed -- not zero, because zero would be a claim Postgres has no basis for.
+  That is the state of nearly every table in a freshly restored database, which
+  is exactly the database someone runs migrations against. Reading it as "empty"
+  would downgrade the highest-risk case available. `pg_relation_size` is exact
+  from the first row inserted, so **bytes are the signal and rows are a
+  courtesy**, reported when known and named as unanalysed when not.
+
+  The thresholds are measurements, not round numbers. Rewriting a `varchar(200)`
+  column to `varchar(50)` on PostgreSQL 18.1 took 12ms at 1,000 rows (96 kB),
+  22ms at 10,000 (912 kB), 135ms at 100,000 (8.9 MB) and 1,422ms at 1,000,000
+  (88.8 MB). Above ten thousand rows the cost is linear in bytes with a stable
+  constant -- 15.2 ms/MB and 16.0 ms/MB at the two largest sizes. `SUSTAINED`
+  (64 MB) and `NOTICEABLE` (8 MB) are that constant read backwards: about a
+  second, and about 130ms.
+
+  **Severity only ever moves down, and only on a measurement.** An unreadable
+  database, a table the query did not return, a size nobody could take: each
+  leaves the declared severity alone. Raising severity should take evidence and
+  lowering it should take more, because the failure that matters here is a real
+  outage filtered out by a `--min-severity` flag.
+
+  Two things mutation testing could not see, both asserted directly. A command
+  that succeeds while printing nothing readable now returns `Unknown` rather
+  than an empty mapping -- an empty mapping reports itself as available and then
+  answers `None` for every table, presenting a failure to measure as a
+  measurement. And a fully-migrated project is never asked for sizes at all; the
+  guard changes no finding, only what the run costs, so a test counts the calls.
+  The size module finished at 44/44 mutants killed and the rule at 59/60, its
+  one survivor documented in the source as equivalent.
+
+  A test also fixes the format spec against a value that can show it: 100 MB
+  renders identically with and without `:.1f`, so the assertion uses a size that
+  does not divide evenly.
 
 ### Step 4.5 — Deployment check adapter
 

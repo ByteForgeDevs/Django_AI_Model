@@ -21,6 +21,7 @@ import pytest
 from djaudit.context import ProjectContext
 from djaudit.live.context import LiveContext
 from djaudit.live.sqlmigrate import Emitted, Statement
+from djaudit.live.tables import MEGABYTE, Size
 from djaudit.migrations.nodes import MigrationNode
 from djaudit.models import Confidence, EvidenceKind, Family, Finding, Severity, Tier
 from djaudit.rules.djm_pending_blocking_lock import (
@@ -106,7 +107,7 @@ class TestWhatItReports:
         (command,) = [e for e in finding.evidence if e.kind is EvidenceKind.COMMAND_OUTPUT]
         assert command.content == (
             "lock=ACCESS EXCLUSIVE work=rewrite table=blog_post "
-            "backend=django.db.backends.postgresql atomic=False"
+            "backend=django.db.backends.postgresql atomic=False size=not measured"
         )
         assert command.source == "manage.py sqlmigrate blog 0002_change"
 
@@ -328,6 +329,34 @@ class TestAgainstARealProject:
         )
         assert list(BlockingPendingMigration().check(self.context(live_project))) == []
 
+    def test_a_migrated_project_is_never_asked_for_table_sizes(self, live_project: Path) -> None:
+        """The size query is a subprocess against the live database, and a
+        project with nothing pending has no finding to scale. Mutation testing
+        cannot see this guard -- dropping it changes no finding, only what the
+        run costs -- so the cost is what gets asserted."""
+        import subprocess
+
+        asked: list[str] = []
+
+        class Counting(BlockingPendingMigration):
+            def _sizes(self, target: object) -> object:  # type: ignore[override]
+                asked.append("once")
+                return super()._sizes(target)  # type: ignore[arg-type]
+
+        assert list(Counting().check(self.context(live_project)))
+        assert asked == ["once"], "the control: a pending migration does ask"
+
+        subprocess.run(
+            [str(live_project / ".venv" / "bin" / "python"), "manage.py", "migrate", "-v0"],
+            cwd=live_project,
+            check=True,
+            timeout=300,
+            capture_output=True,
+        )
+        asked.clear()
+        assert list(Counting().check(self.context(live_project))) == []
+        assert asked == []
+
     def test_without_a_live_context_it_reports_nothing_on_the_same_project(
         self, live_project: Path
     ) -> None:
@@ -428,3 +457,75 @@ class TestEvidenceWhenTheTableCannotBeNamed:
         (finding,) = judged(INDEX)
         (command,) = [e for e in finding.evidence if e.kind is EvidenceKind.COMMAND_OUTPUT]
         assert "table=blog_post" in command.content
+
+
+class TestSeverityFollowsTheData:
+    """A rewrite of fifty rows and a rewrite of ten million are not the same
+    incident, and until 4.4.4 this rule reported them identically. The bands are
+    the measured 16 ms/MB read backwards: 64 MB is about a second, 8 MB is about
+    130 ms.
+    """
+
+    @staticmethod
+    def judged_with(size: Size | None) -> Finding:
+        from djaudit.live.tables import Sizes
+
+        rule = BlockingPendingMigration()
+        sizes = Sizes({"blog_post": size}) if size is not None else Sizes({})
+        ctx = ProjectContext(root=Path("/p"))
+        (finding,) = rule._judge(ctx, emitted(REWRITE), NODE, sizes)
+        return finding
+
+    def test_a_large_table_keeps_the_declared_severity(self) -> None:
+        finding = self.judged_with(Size("blog_post", 100 * MEGABYTE, 1_000_000))
+        assert finding.severity is Severity.HIGH
+
+    def test_a_middling_table_is_medium(self) -> None:
+        finding = self.judged_with(Size("blog_post", 9 * MEGABYTE, 100_000))
+        assert finding.severity is Severity.MEDIUM
+
+    def test_a_small_table_is_low(self) -> None:
+        finding = self.judged_with(Size("blog_post", 96 * 1024, 1_000))
+        assert finding.severity is Severity.LOW
+
+    def test_an_unmeasured_table_keeps_the_declared_severity(self) -> None:
+        """The direction that matters. Absent information must not make a
+        finding quieter -- that is how a real outage gets filtered out by a
+        `--min-severity` flag."""
+        assert self.judged_with(None).severity is Severity.HIGH
+
+    def test_an_unreadable_database_keeps_it_too(self) -> None:
+        from djaudit.live.tables import Unknown as TablesUnknown
+
+        rule = BlockingPendingMigration()
+        ctx = ProjectContext(root=Path("/p"))
+        (finding,) = rule._judge(ctx, emitted(REWRITE), NODE, TablesUnknown("refused"))
+        assert finding.severity is Severity.HIGH
+
+    def test_no_sizes_at_all_keeps_it_too(self) -> None:
+        """The pre-4.4.4 call shape, which the unit tests above still use."""
+        (finding,) = judged(REWRITE)
+        assert finding.severity is Severity.HIGH
+
+    def test_the_size_reaches_the_message(self) -> None:
+        finding = self.judged_with(Size("blog_post", 100 * MEGABYTE, 1_000_000))
+        assert "100.0 MB, 1,000,000 rows" in finding.message
+        assert "roughly 2s" in finding.message
+
+    def test_and_the_evidence(self) -> None:
+        finding = self.judged_with(Size("blog_post", 100 * MEGABYTE, 1_000_000))
+        (command,) = [e for e in finding.evidence if e.kind is EvidenceKind.COMMAND_OUTPUT]
+        assert "size=100.0 MB, 1,000,000 rows" in command.content
+
+    def test_a_table_the_query_did_not_return_is_not_invented(self) -> None:
+        """The statement names `blog_post`; the sizes name something else."""
+        from djaudit.live.tables import Sizes
+
+        rule = BlockingPendingMigration()
+        ctx = ProjectContext(root=Path("/p"))
+        sizes = Sizes({"other_table": Size("other_table", 500 * MEGABYTE, 9)})
+        (finding,) = rule._judge(ctx, emitted(REWRITE), NODE, sizes)
+        assert finding.severity is Severity.HIGH
+        assert "not measured" in str(
+            [e.content for e in finding.evidence if e.kind is EvidenceKind.COMMAND_OUTPUT]
+        )

@@ -50,7 +50,12 @@ def live_project(tmp_path: Path) -> Iterator[Path]:
     parsed = urlparse(DSN)
     dsn = urlunparse(parsed._replace(path=f"/{name}"))
     try:
-        yield build_project(tmp_path, dsn)
+        project = build_project(tmp_path, dsn)
+        # Recorded so a test can reach the same database directly. Rebuilding
+        # it from settings.py would mean parsing our own fixture back out of
+        # the file it wrote, and the two would drift.
+        (project / "dsn.txt").write_text(dsn)
+        yield project
     finally:
         # Django's connection is gone with the subprocess, but a failed test
         # can leave one; the drop is forced so teardown cannot itself fail.
