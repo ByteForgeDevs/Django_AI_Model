@@ -1,25 +1,32 @@
 {
-  "description": "The migration-safety recall fixture, and the only place any `DJM` rule has a known answer. This family cannot be measured the way the others are, and the reason is worth stating because it drove the family's design. Every `DJM` rule reports on something a migration does at the moment it runs -- a lock it takes, a statement that aborts -- and a migration sitting in a shipped project's history demonstrably ran. So NetBox, pretix and Healthchecks cannot supply a true positive for this family even in principle: reporting across their 875 migrations would have produced roughly 1600 findings whose true-positive rate is zero by construction. That is why the static tier reports only the leaf of each app's history, and why recall has to be measured here instead. The structure carries the argument. `billing` holds the defects and `ledger` holds their correctly-written twins, and each pair differs only in the thing the rule is about: for `DJM-001` a `default` on one side, for `DJM-002` the direction of a `max_length` change -- narrowed on the defect, widened on the control, which Postgres has skipped rewriting since 9.2 -- and for `DJM-003` whether the index is built concurrently, the control paying for that with the `atomic = False` the operation requires. This manifest forbids any finding in `ledger` at all rather than at particular lines, because a line-numbered control stops guarding anything the first time someone inserts an operation, and does it silently. Reachability is measured rather than assumed by scripts/fixture_controls_probe.py, which removes the fix from each control and requires the matching rule to then report it -- a control that passes by being unreachable is indistinguishable from a rule that is broken. Both migrations are hand-written, which is not incidental: `makemigrations` prompts for a one-off default and so cannot emit `billing.0002`, and hand-written migrations are precisely what this family targets.",
+  "description": "The migration-safety recall fixture, and the only place any `DJM` rule has a known answer. This family cannot be measured the way the others are, and the reason is worth stating because it drove the family's design. Every `DJM` rule reports on something a migration does at the moment it runs -- a lock it takes, a statement that aborts -- and a migration sitting in a shipped project's history demonstrably ran. So NetBox, pretix and Healthchecks cannot supply a true positive for this family even in principle: reporting across their 875 migrations would have produced roughly 1600 findings whose true-positive rate is zero by construction. That is why the static tier reports only the leaf of each app's history, and why recall has to be measured here instead. The structure carries the argument. `billing` holds the defects and `ledger` holds their correctly-written twins, and each pair differs only in the thing the rule is about: for `DJM-001` a `default` on one side, for `DJM-002` the direction of a `max_length` change -- narrowed on the defect, widened on the control, which Postgres has skipped rewriting since 9.2 -- for `DJM-003` whether the index is built concurrently, the control paying for that with the `atomic = False` the operation requires, and for `DJM-004` whether the column is dropped outright or through the `database_operations` half of a `SeparateDatabaseAndState`. That last pair is the sharpest one here, because the replay flattens the wrapper away and the two sides reach the rule as the same bare `RemoveField` -- a rule matching on the operation name alone would report the control, which is to say it would report the fix its own remediation recommends. This manifest forbids any finding in `ledger` at all rather than at particular lines, because a line-numbered control stops guarding anything the first time someone inserts an operation, and does it silently. Reachability is measured rather than assumed by scripts/fixture_controls_probe.py, which removes the fix from each control and requires the matching rule to then report it -- a control that passes by being unreachable is indistinguishable from a rule that is broken. Both migrations are hand-written, which is not incidental: `makemigrations` prompts for a one-off default and so cannot emit `billing.0002`, and hand-written migrations are precisely what this family targets.",
   "expected": [
     {
       "rule_id": "DJM-001",
       "file": "billing/migrations/0002_invoice_retries.py",
-      "line": 31,
+      "line": 38,
       "severity": "high",
       "confidence": "firm"
     },
     {
       "rule_id": "DJM-002",
       "file": "billing/migrations/0002_invoice_retries.py",
-      "line": 36,
+      "line": 43,
       "severity": "high",
       "confidence": "firm"
     },
     {
       "rule_id": "DJM-003",
       "file": "billing/migrations/0002_invoice_retries.py",
-      "line": 41,
+      "line": 48,
       "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJM-004",
+      "file": "billing/migrations/0002_invoice_retries.py",
+      "line": 52,
+      "severity": "high",
       "confidence": "firm"
     }
   ],
@@ -58,6 +65,18 @@
     },
     {
       "rule_id": "DJM-003",
+      "file": "ledger/migrations/0001_initial.py"
+    },
+    {
+      "rule_id": "DJM-004",
+      "file": "ledger/migrations/0002_entry_attempts.py"
+    },
+    {
+      "rule_id": "DJM-004",
+      "file": "billing/migrations/0001_initial.py"
+    },
+    {
+      "rule_id": "DJM-004",
       "file": "ledger/migrations/0001_initial.py"
     }
   ]

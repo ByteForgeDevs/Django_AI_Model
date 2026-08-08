@@ -263,6 +263,16 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
         "AddIndexConcurrently(",
         "migrations.AddIndex(",
     ),
+    (
+        "DJM-004",
+        "drop the column outright instead of only its database half",
+        MCONTROL,
+        "migrations.SeparateDatabaseAndState(\n"
+        "            database_operations=[migrations.RemoveField("
+        'model_name="entry", name="posted")],\n'
+        "        ),",
+        'migrations.RemoveField(model_name="entry", name="posted"),',
+    ),
 )
 
 FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...], str], ...] = (

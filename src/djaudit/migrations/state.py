@@ -144,6 +144,22 @@ class Applied:
     migration it rewrites an empty table. Same operation, different incident.
     """
 
+    via_separate: bool
+    """Whether this operation is the database half of a ``SeparateDatabaseAndState``.
+
+    Recorded because the replay flattens that wrapper away, which loses the one
+    piece of information distinguishing a careless schema change from a careful
+    one. ``SeparateDatabaseAndState`` is how Django expresses "the state change
+    and the database change ship in different releases": the state half goes out
+    first so the ORM stops naming the column, and the database half drops it in
+    a later deploy once nothing selects it any more.
+
+    Flattened, that second deploy is byte-identical to the reckless single-step
+    version, so a rule reading only ``operation.name`` would report the correct
+    pattern and the dangerous one alike -- and would tell anyone who followed
+    its own remediation that they had made things worse.
+    """
+
     @property
     def model_key(self) -> ModelKey | None:
         if self.operation.model_name is None:
@@ -286,7 +302,13 @@ def _acted_on(operation: Operation) -> str | None:
     return operation.field_name
 
 
-def _capture(state: MigrationState, migration: MigrationNode, operation: Operation) -> Applied:
+def _capture(
+    state: MigrationState,
+    migration: MigrationNode,
+    operation: Operation,
+    *,
+    via_separate: bool,
+) -> Applied:
     """Read the three prior facts out of the state, before the operation edits it."""
     key: ModelKey | None = None
     if operation.model_name is not None:
@@ -310,6 +332,7 @@ def _capture(state: MigrationState, migration: MigrationNode, operation: Operati
         existing_field=existing,
         model_tracked=tracked,
         created_by=created,
+        via_separate=via_separate,
     )
 
 
@@ -329,8 +352,9 @@ def replay(graph: MigrationGraph) -> list[Applied]:
 
     for migration in graph.plan():
         for operation in migration.operations:
+            separate = operation.kind is OperationKind.SEPARATE
             for effective in _effective(operation):
-                applied.append(_capture(state, migration, effective))
+                applied.append(_capture(state, migration, effective, via_separate=separate))
                 _apply(state, migration, effective)
 
     return applied

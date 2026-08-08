@@ -19,6 +19,13 @@ created and filled, so Postgres builds the index under a `SHARE` lock and
 blocks every write until it finishes. Its twin in `ledger` uses
 `AddIndexConcurrently` on a non-atomic migration, which is the same index built
 without blocking anything.
+
+`DJM-004` is the fourth: dropping `settled` in one step. Django names every
+concrete column in its `SELECT`, so for the length of a rolling deploy every
+query the previous release makes against `invoice` fails -- not only those
+reading `settled`. Its twin in `ledger` drops the equivalent column through the
+`SeparateDatabaseAndState` half that says the state change already shipped, and
+the two are otherwise the same operation on the same kind of column.
 """
 
 from django.db import migrations, models
@@ -41,5 +48,9 @@ class Migration(migrations.Migration):
         migrations.AddIndex(
             model_name="invoice",
             index=models.Index(fields=["reference"], name="billing_invoice_ref_idx"),
+        ),
+        migrations.RemoveField(
+            model_name="invoice",
+            name="settled",
         ),
     ]

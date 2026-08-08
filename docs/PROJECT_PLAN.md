@@ -5427,6 +5427,51 @@ rules come first; the live tier is then built for consumers that exist.
   defect/control pair added to `migration_project`, 27/27 controls
   load-bearing.
 - **4.3.4** — `DJM-004` `RemoveField` deployed alongside code still referencing it, breaking rolling deploys.
+  **Done** (`src/djaudit/rules/djm_removefield_rolling_deploy.py`).
+
+  The damage is wider than the column, and the reason is in Django's compiler
+  rather than in the migration. `SQLCompiler.get_default_columns` iterates
+  `opts.concrete_fields` and names every one of them, so `Order.objects.get(pk=1)`
+  emits SQL listing every column on the table. Drop one and the release still
+  running during a rolling deploy does not merely lose that value — **every
+  query it makes against that model fails**, including queries that never
+  mentioned the field. One removed column takes the whole model out.
+
+  **The rule cannot be a match on the operation name, and finding out why was
+  the substep.** Django's prescribed fix is to split the change across two
+  releases with `SeparateDatabaseAndState`: ship `state_operations` first so the
+  ORM stops selecting the column, drop it with `database_operations` later. But
+  `replay()` flattens that wrapper to its database half — correctly, since
+  applying both would double every rename it exists to express — so the second,
+  *careful* release arrives at the rule as a bare `RemoveField`, byte-identical
+  to the reckless one. A name match would have reported the fix its own
+  remediation recommends. Proved by construction before writing the rule, with
+  a three-operation project whose wrapped and unwrapped removals came out of the
+  replay indistinguishable.
+
+  So `Applied` gained `via_separate`, recording that an operation came from the
+  wrapper the replay dissolves. Its `_capture` and dataclass defaults were both
+  removed once mutation testing showed them dead: `replay` is the only caller
+  and always passes the flag, so a default was an invitation to forget it.
+
+  Two cases are quiet and both are measured rather than assumed. Many-to-many
+  fields are not in `concrete_fields`, so dropping one takes out a join table
+  without breaking ordinary queries — reported a rank lower, with a message
+  saying what actually breaks (6 of the corpora's 185 removals). A field removed
+  from a model the same migration deletes is not reported at all, because
+  `makemigrations` emits those ahead of `DeleteModel` to break FK cycles and one
+  deletion would otherwise produce a burst of findings that all describe it and
+  none of which name it (another 6 of 185).
+
+  *Verified:* 22 unit tests, mutation 31/31 — the one survivor was the
+  `unknown` in the evidence's field-kind, which blanked to `kind=` and read as a
+  bug in the tool rather than a limit of what the replay could see. 4 new state
+  tests. Fourth defect/control pair added, 28/28 controls load-bearing; the
+  control is the `database_operations` half, so un-fixing it means unwrapping it.
+  **0 findings on all three corpora**, as the pre-write probe predicted — all
+  185 `RemoveField`s in the three histories are behind a leaf, and none of the
+  three projects uses `SeparateDatabaseAndState` at all, so the guard that
+  matters most rests on fixture evidence alone. Corpus totals unchanged at 257.
 - **4.3.5** — `DJM-005` `RenameField` or `RenameModel`, which cannot be rolled out without downtime.
 - **4.3.6** — `DJM-006` `RunPython` with no reverse, blocking rollback.
 - **4.3.7** — `DJM-007` `RunPython` iterating an unbounded queryset.
@@ -6008,7 +6053,7 @@ remove from them, and `6.5.3` asserts that by trying.
   Answers four questions a non-specialist actually asks — *who this affects*,
   *what it costs*, *how widespread it is*, *how urgent it is* — plus a fifth
   the vendors never print: **when this does not apply to you.** That last one
-  is free, because a measurement showed **all 70 rules carry `limitations`**,
+  is free, because a measurement showed **all 71 rules carry `limitations`**,
   the field recording what the rule cannot see. Those caveats are rendered
   **verbatim from `RuleMeta.limitations`**, never paraphrased; a mutant that
   truncated them to twenty characters was caught.
@@ -6395,10 +6440,10 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **70 rules are
+document specifies, and most of it is still only specified: **71 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-and the first three of Phase 4's migration rules.
+and the first four of Phase 4's migration rules.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

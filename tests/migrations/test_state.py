@@ -498,6 +498,32 @@ class TestSeparateDatabaseAndState:
         applied = replay(replay_of(linear(CREATE_ORDER, self.SEPARATE)))
         assert [a.operation.name for a in applied if a.migration.number == 2] == ["RunSQL"]
 
+    def test_the_database_half_is_marked_as_having_come_from_the_wrapper(self, replay_of):
+        # Flattening loses the one fact that distinguishes a deliberate
+        # two-step schema change from a careless one, and the operation that
+        # comes out the far side is byte-identical either way. `DJM-004` reads
+        # this to avoid reporting the pattern its own remediation recommends.
+        applied = replay(replay_of(linear(CREATE_ORDER, self.SEPARATE)))
+        assert [a.via_separate for a in applied if a.migration.number == 2] == [True]
+
+    def test_an_ordinary_operation_is_not(self, replay_of):
+        # The contrast: a flag hardcoded to True would pass the test above.
+        applied = replay(
+            replay_of(linear(CREATE_ORDER, "[migrations.RemoveField('order', 'total')]"))
+        )
+        assert [a.via_separate for a in applied if a.migration.number == 2] == [False]
+
+    def test_a_state_only_wrapper_contributes_nothing_to_replay(self, replay_of):
+        # There is no database operation to mark, and marking the migration
+        # instead would have made every neighbouring operation look wrapped.
+        state_only = """[
+            migrations.SeparateDatabaseAndState(
+                state_operations=[migrations.RemoveField('order', 'total')],
+            ),
+        ]"""
+        applied = replay(replay_of(linear(CREATE_ORDER, state_only)))
+        assert [a.operation.name for a in applied if a.migration.number == 2] == []
+
 
 class TestTheStateItself:
     def test_a_copy_shares_nothing_with_what_it_copied(self, replay_of):

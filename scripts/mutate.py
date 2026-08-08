@@ -62,6 +62,12 @@ def prose_constants(tree: ast.Module) -> frozenset[int]:
     ``gen_rule_docs.py --check``, ``check_triage.py`` and the written-sentence
     tests in ``tests/test_rule_docs.py`` -- not by behaviour.
 
+    "Docstring" here means any bare string expression standing as a statement,
+    not just the first one in a body. Attribute docstrings -- the string under
+    a dataclass field -- are the common case in this codebase and are prose by
+    exactly the same argument; skipping only ``body[0]`` reported every one of
+    them as a survivor.
+
     Leaving them in would produce a survivor list two dozen entries long that
     all say "the tests do not assert the docstring", burying the handful that
     mean something. Excluding a category owned by a different gate is what
@@ -70,11 +76,12 @@ def prose_constants(tree: ast.Module) -> frozenset[int]:
     """
     skip: set[int] = set()
     for node in ast.walk(tree):
-        body = getattr(node, "body", None)
-        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef) and body:
-            first = body[0]
-            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
-                skip.add(id(first.value))
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            skip.add(id(node.value))
         if (
             isinstance(node, ast.Assign)
             and isinstance(node.value, ast.Call)

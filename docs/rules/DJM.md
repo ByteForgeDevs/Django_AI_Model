@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJM` — migration safety
 
-3 rules on what a migration does to a running database at the moment it
+4 rules on what a migration does to a running database at the moment it
 is applied: a lock it holds, a table it rewrites, a statement that aborts part
 way through. These are the defects that pass every test and fail only on
 production data, because the table is empty in CI and the lock nobody waits on
@@ -56,6 +56,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJM-001`](#djm-001--non-nullable-column-added-with-no-default-aborts-on-a-populated-table) | Non-nullable column added with no default aborts on a populated table | high | firm |
 | [`DJM-002`](#djm-002--alterfield-holds-an-exclusive-lock-for-the-length-of-the-table) | AlterField holds an exclusive lock for the length of the table | high | firm |
 | [`DJM-003`](#djm-003--addindex-blocks-writes-for-the-length-of-the-index-build) | AddIndex blocks writes for the length of the index build | medium | firm |
+| [`DJM-004`](#djm-004--removefield-drops-a-column-the-running-release-still-selects) | RemoveField drops a column the running release still selects | high | firm |
 
 ---
 
@@ -122,3 +123,25 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://www.postgresql.org/docs/current/sql-createindex.html>
 - <https://docs.djangoproject.com/en/stable/ref/contrib/postgres/operations/>
+
+---
+
+### DJM-004 — RemoveField drops a column the running release still selects
+
+**Severity** high · **Confidence** firm · **Tier** static
+
+**What it means.** During a rolling deploy the previous release is still serving when the migration runs. Django's compiler names every concrete column in its `SELECT`, so dropping one does not just break queries that read it -- every query the old release makes against that model fails until the last old instance is gone.
+
+**How to fix it.** Split the change across two releases with `SeparateDatabaseAndState`. Ship `state_operations=[RemoveField(...)]` first, which stops the ORM selecting the column while leaving it in place for the release still running. Drop the column in a later deploy with the matching `database_operations` half, once nothing selects it.
+
+**What this rule cannot see.**
+
+- Static analysis cannot tell which migrations have been applied, so only the leaf of each app's history is reported. The live tier reads `django_migrations` and does not have to guess.
+- Assumes the project deploys by rolling release. A project that takes downtime for migrations, or runs a single instance, has no window in which two releases overlap and nothing here applies.
+- A field removed from a model the same migration deletes is not reported, because the finding worth making there is about the table rather than the column, and no rule makes it yet.
+- When the replay cannot say what kind of field is being removed, it is treated as an ordinary column, which is the more damaging and by far the more common case.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/migration-operations/#separatedatabaseandstate>
+- <https://docs.djangoproject.com/en/stable/topics/migrations/>
