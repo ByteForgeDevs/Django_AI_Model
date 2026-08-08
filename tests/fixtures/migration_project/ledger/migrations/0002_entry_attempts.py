@@ -1,5 +1,13 @@
 """The `DJM-001` control: the same column, added the way that works.
 
+The `DJM-009` control is the `AddConstraintNotValid` at the end. It records the
+same check constraint `billing` adds outright, but with `NOT VALID`, so the
+lock is held only long enough to write the catalogue entry; a later
+`ValidateConstraint` runs the scan under `SHARE UPDATE EXCLUSIVE`. Rows written
+after it exists are checked from that moment, so only the pre-existing rows are
+ever deferred.
+
+
 Identical to `billing.0002_invoice_retries` in every respect the rule does not
 speak about -- same field type, same leaf position, same populated table -- and
 differs only in carrying a `default`. On Postgres 11 and later that is a
@@ -57,7 +65,7 @@ requires the matching rule to then report this file, so every control is known
 to be reachable rather than assumed to be.
 """
 
-from django.contrib.postgres.operations import AddIndexConcurrently
+from django.contrib.postgres.operations import AddConstraintNotValid, AddIndexConcurrently
 from django.db import migrations, models
 
 
@@ -119,5 +127,12 @@ class Migration(migrations.Migration):
         migrations.RunPython(
             code=recount_attempts,
             reverse_code=migrations.RunPython.noop,
+        ),
+        AddConstraintNotValid(
+            model_name="entry",
+            constraint=models.CheckConstraint(
+                condition=models.Q(attempts__gte=0),
+                name="ledger_entry_attempts_nonneg",
+            ),
         ),
     ]

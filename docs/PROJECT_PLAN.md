@@ -5767,6 +5767,50 @@ rules come first; the live tier is then built for consumers that exist.
   **37/37**, `migration_project` 8/8 at 100% precision and recall, controls
   probe 8/8, corpus hc 0 / nb 0 / px 1.
 - **4.3.9** — `DJM-009` `AddConstraint` validated immediately rather than `NOT VALID` then validated.
+  **Done, but not as specified.** The substep's own title describes a
+  remediation that is unavailable for most constraints, and the corpus said so
+  before the rule was written.
+
+  **`AddConstraintNotValid` raises `TypeError` on anything that is not a
+  `CheckConstraint`** — read from Django's source, not assumed. That is a
+  Postgres constraint rather than a Django one: `NOT VALID` exists for `CHECK`
+  and `FOREIGN KEY` and for nothing else. The corpus has exactly one
+  `AddConstraint` at leaf, pretix `pretixmultidomain.0003`, and it is a
+  `UniqueConstraint` — so the rule as specified would have fired on its only
+  real finding and handed the reader a fix that raises on the first attempt.
+
+  **So the rule reads the constraint class and branches.** Three routes, each
+  traced to the statement Django actually emits:
+  `CheckConstraint` → `sql_create_check`, `ACCESS EXCLUSIVE`, HIGH, and the
+  `AddConstraintNotValid` + `ValidateConstraint` pair; plain `UniqueConstraint`
+  → `sql_create_unique`, `ACCESS EXCLUSIVE`, HIGH; `UniqueConstraint` with any
+  of `condition`, `include`, `opclasses` or `expressions` → `_create_unique_sql`
+  switches to `sql_create_unique_index`, so a bare `CREATE UNIQUE INDEX` runs
+  under `SHARE`, which permits reads — ranked MEDIUM for the same reason
+  `DJM-003` sits below `DJM-002`. Per-finding `severity` and `remediation`
+  overrides, which `Rule.finding` already supported.
+
+  **The concurrent route had to be checked too.** The obvious advice —
+  `AddIndexConcurrently` — does not work: it takes an `Index`, and
+  `Index.__init__` accepts `expressions, fields, name, db_tablespace, opclasses,
+  condition, include` with **no** `unique` parameter, and there is no
+  `UniqueIndex` class. Django cannot build a unique index concurrently at all,
+  so the remediation names `RunSQL("CREATE UNIQUE INDEX CONCURRENTLY ...")`
+  inside `SeparateDatabaseAndState`, and says plainly that on a small table
+  declining is reasonable.
+
+  A constraint whose class cannot be read is **not reported**, because every
+  branch turns on the class and a plausible fix that raises costs more than
+  silence. Overlaps `DJM-008` by design on pretix's one migration: different
+  operations, different lines, different fixes, and `DJM-008`'s reordering
+  remedy does nothing here.
+
+  Fixture: a 9th pair — `billing` adds a `CheckConstraint` outright, `ledger`
+  adds the same one with `AddConstraintNotValid`. Two mutation survivors were
+  `frozen=True, slots=True` on a private value holder; rather than test
+  decoration the type became a `NamedTuple`, which is immutable by
+  construction. Mutation **47/47**, `migration_project` 9/9 at 100% precision
+  and recall, controls probe 9/9, corpus hc 0 / nb 0 / px 1.
 
 ### Step 4.4 — Live lock classification
 
@@ -6343,7 +6387,7 @@ remove from them, and `6.5.3` asserts that by trying.
   Answers four questions a non-specialist actually asks — *who this affects*,
   *what it costs*, *how widespread it is*, *how urgent it is* — plus a fifth
   the vendors never print: **when this does not apply to you.** That last one
-  is free, because a measurement showed **all 75 rules carry `limitations`**,
+  is free, because a measurement showed **all 76 rules carry `limitations`**,
   the field recording what the rule cannot see. Those caveats are rendered
   **verbatim from `RuleMeta.limitations`**, never paraphrased; a mutant that
   truncated them to twenty characters was caught.
@@ -6730,10 +6774,10 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **75 rules are
+document specifies, and most of it is still only specified: **76 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-and the first eight of Phase 4's migration rules.
+and the first nine of Phase 4's migration rules.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

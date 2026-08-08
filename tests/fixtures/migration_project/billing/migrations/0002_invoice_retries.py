@@ -1,4 +1,13 @@
-"""Two planted defects, both in the leaf of `billing`'s history.
+"""Nine planted defects, all in the leaf of `billing`'s history.
+
+`DJM-009` is the last: the `AddConstraint` at the end adds a `CheckConstraint`
+to a table `0001_initial` already populated, so Postgres reads every existing
+row to prove it holds, under `ACCESS EXCLUSIVE` for the whole scan. Its twin in
+`ledger` adds the same constraint with `AddConstraintNotValid` and validates it
+in a separate migration, which is the only route Django offers -- and offers
+for check constraints alone, since `AddConstraintNotValid` raises `TypeError`
+on anything else.
+
 
 `retries` is an `IntegerField` with no `default` and `null` left at False, so
 `ADD COLUMN ... NOT NULL` has no value for the rows `0001_initial` created.
@@ -112,5 +121,12 @@ class Migration(migrations.Migration):
         migrations.RunPython(
             code=recount_retries,
             reverse_code=migrations.RunPython.noop,
+        ),
+        migrations.AddConstraint(
+            model_name="invoice",
+            constraint=models.CheckConstraint(
+                condition=models.Q(retries__gte=0),
+                name="billing_invoice_retries_nonneg",
+            ),
         ),
     ]

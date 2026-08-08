@@ -243,6 +243,13 @@ MCONTROL = MIGRATION / "ledger/migrations/0002_entry_attempts.py"
 
 MIGRATION_UNFIXES: tuple[Unfix, ...] = (
     (
+        "DJM-009",
+        "validate the constraint immediately instead of adding it NOT VALID",
+        MCONTROL,
+        'AddConstraintNotValid(\n            model_name="entry",',
+        'migrations.AddConstraint(\n            model_name="entry",',
+    ),
+    (
         "DJM-001",
         "drop the default from the added non-nullable column",
         MCONTROL,

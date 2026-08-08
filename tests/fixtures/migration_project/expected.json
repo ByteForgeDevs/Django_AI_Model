@@ -4,56 +4,63 @@
     {
       "rule_id": "DJM-007",
       "file": "billing/migrations/0002_invoice_retries.py",
-      "line": 76,
+      "line": 85,
       "severity": "medium",
       "confidence": "firm"
     },
     {
       "rule_id": "DJM-001",
       "file": "billing/migrations/0002_invoice_retries.py",
-      "line": 86,
+      "line": 95,
       "severity": "high",
       "confidence": "firm"
     },
     {
       "rule_id": "DJM-002",
       "file": "billing/migrations/0002_invoice_retries.py",
-      "line": 91,
+      "line": 100,
       "severity": "high",
       "confidence": "firm"
     },
     {
       "rule_id": "DJM-003",
       "file": "billing/migrations/0002_invoice_retries.py",
-      "line": 96,
+      "line": 105,
       "severity": "medium",
       "confidence": "firm"
     },
     {
       "rule_id": "DJM-004",
       "file": "billing/migrations/0002_invoice_retries.py",
-      "line": 100,
+      "line": 109,
       "severity": "high",
       "confidence": "firm"
     },
     {
       "rule_id": "DJM-005",
       "file": "billing/migrations/0002_invoice_retries.py",
-      "line": 104,
+      "line": 113,
       "severity": "high",
       "confidence": "firm"
     },
     {
       "rule_id": "DJM-006",
       "file": "billing/migrations/0002_invoice_retries.py",
-      "line": 109,
+      "line": 118,
       "severity": "medium",
       "confidence": "firm"
     },
     {
       "rule_id": "DJM-008",
       "file": "billing/migrations/0002_invoice_retries.py",
-      "line": 109,
+      "line": 118,
+      "severity": "high",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJM-009",
+      "file": "billing/migrations/0002_invoice_retries.py",
+      "line": 125,
       "severity": "high",
       "confidence": "firm"
     }
@@ -153,6 +160,18 @@
     },
     {
       "rule_id": "DJM-008",
+      "file": "ledger/migrations/0001_initial.py"
+    },
+    {
+      "rule_id": "DJM-009",
+      "file": "ledger/migrations/0002_entry_attempts.py"
+    },
+    {
+      "rule_id": "DJM-009",
+      "file": "billing/migrations/0001_initial.py"
+    },
+    {
+      "rule_id": "DJM-009",
       "file": "ledger/migrations/0001_initial.py"
     }
   ]

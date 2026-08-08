@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJM` — migration safety
 
-8 rules on what a migration does to a running database at the moment it
+9 rules on what a migration does to a running database at the moment it
 is applied: a lock it holds, a table it rewrites, a statement that aborts part
 way through. These are the defects that pass every test and fail only on
 production data, because the table is empty in CI and the lock nobody waits on
@@ -61,6 +61,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJM-006`](#djm-006--irreversible-data-operation-blocks-rollback-of-a-schema-change) | Irreversible data operation blocks rollback of a schema change | medium | firm |
 | [`DJM-007`](#djm-007--data-migration-iterates-a-queryset-with-no-bound-on-the-rows-fetched) | Data migration iterates a queryset with no bound on the rows fetched | medium | firm |
 | [`DJM-008`](#djm-008--data-operation-runs-in-the-same-transaction-as-an-earlier-schema-change) | Data operation runs in the same transaction as an earlier schema change | high | firm |
+| [`DJM-009`](#djm-009--addconstraint-scans-the-whole-table-under-a-lock-to-validate-it) | AddConstraint scans the whole table under a lock to validate it | high | firm |
 
 ---
 
@@ -237,3 +238,25 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://www.postgresql.org/docs/current/explicit-locking.html>
 - <https://docs.djangoproject.com/en/stable/howto/writing-migrations/#non-atomic-migrations>
+
+---
+
+### DJM-009 — AddConstraint scans the whole table under a lock to validate it
+
+**Severity** high · **Confidence** firm · **Tier** static
+
+**What it means.** Postgres will not take a constraint's word for it. Adding one to a populated table makes it read every existing row to prove the constraint already holds, and it holds a lock for the whole scan. The migration gives no sign of the cost, because the duration depends on the row count and the table is empty in CI.
+
+**How to fix it.** Depends on the constraint: a `CheckConstraint` can be added `NOT VALID` and validated in a later migration, while a `UniqueConstraint` has to build its index and needs the concurrent route instead. Each finding carries the one that applies to it.
+
+**What this rule cannot see.**
+
+- Static analysis cannot tell which migrations have been applied, so only the leaf of each app's history is reported. The live tier reads `django_migrations` and does not have to guess.
+- Says nothing about how many rows the table holds, which is what decides whether the scan is instant or a deploy-long outage. The live tier's `pg_class.reltuples` sizing answers that.
+- A constraint whose class cannot be read from the migration -- one built by a helper function, or a project-defined subclass -- is not reported at all, because every remediation this rule gives depends on which class it is and the wrong one raises `TypeError`.
+- Deferred validation, concurrent index builds and the lock modes named here are all Postgres behaviour. On SQLite or MySQL the costs and the remedies both differ, and this rule does not detect which backend the project uses.
+
+**References**
+
+- <https://www.postgresql.org/docs/current/sql-altertable.html>
+- <https://docs.djangoproject.com/en/stable/ref/contrib/postgres/operations/>

@@ -1505,6 +1505,16 @@
       "note": "Verified against source. The migration is atomic and runs, in order: `CreateModel` for a new table, `AddField` and `AlterField` on `knowndomain`, then `RunSQL UPDATE pretixmultidomain_knowndomain SET mode = 'event' WHERE event_id IS NOT NULL` over the whole table, then `AddConstraint`. The two operations on `knowndomain` take `ACCESS EXCLUSIVE` and Postgres holds it to commit, so the unindexed full-table UPDATE runs with every reader and writer of that table blocked behind it. The rule correctly names only `knowndomain` and not the `AlternativeDomainAssignment` table this same migration creates -- a lock on a table no other session can see yet blocks nobody. In pretix's favour, `knowndomain` is a small configuration table, so the real hold is short; the shape is what is being reported, and on a large table it is an outage. Reordering the `RunSQL` before the schema operations would fix it without splitting the migration.",
       "reviewed": "2026-08-04",
       "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "ff3a5bdf83e4e69e",
+      "rule_id": "DJM-009",
+      "verdict": "true_positive",
+      "file": "src/pretix/multidomain/migrations/0003_alternativedomainassignment_knowndomain_mode_and_more.py",
+      "line": 45,
+      "note": "Verified against source and against Django's schema editor. The constraint is `UniqueConstraint(condition=Q(mode='organizer'), fields=('organizer',), name='unique_organizer_domain')`, and because a condition is given, `_create_unique_sql` takes the `sql_create_unique_index` branch -- so what runs is `CREATE UNIQUE INDEX`, not `ALTER TABLE ... ADD CONSTRAINT`. The rule classifies it accordingly: MEDIUM and `SHARE` rather than HIGH and `ACCESS EXCLUSIVE`, and the concurrent-route remediation rather than `NOT VALID`. That distinction is the reason this finding is a true positive rather than misleading advice: `AddConstraintNotValid` raises `TypeError` on anything that is not a `CheckConstraint`, so the obvious remediation would not have run here. Reported alongside `DJM-008` on the same migration, which is correct -- they name different operations (line 41 vs 45) with different fixes, and `DJM-008`'s reordering remedy does nothing for this constraint's validation scan. As with the `DJM-008` entry, `knowndomain` is a small configuration table in practice, so the real hold is short; the shape is what is reported.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
     }
   ]
 }
