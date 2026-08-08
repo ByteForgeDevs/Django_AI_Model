@@ -6534,7 +6534,7 @@ rules come first; the live tier is then built for consumers that exist.
   chooses to do at import time happens with the file system and network access
   of whoever typed the command. The note states why that is worth doing at all
   — only Django can say what SQL a migration emits, and only Django can give a
-  second opinion on its own deployment checks, which is 2 of 80 rules — and
+  second opinion on its own deployment checks, which is 2 of 81 rules — and
   then states exactly what the subprocess is allowed: 10 environment variables
   in, 4 refused outright, a 30-second timeout enforced by killing the process
   group, 1 MiB captured per stream, stdin closed. It records the `PASSTHROUGH`
@@ -6729,7 +6729,43 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
 
 ### Step 5.2 — Divergence rules
 
-- **5.2.1** — `DJX-002` `JSONField` querying with semantics that differ between backends.
+- **5.2.1** — `DJX-002` `JSONField` querying with semantics that differ between
+  backends. **Done.** `src/djaudit/rules/portability.py`,
+  `tests/rules/test_djx_002.py`.
+
+  "Semantics that differ" turned out to be too generous. Measured against a
+  real SQLite and the live Postgres before the rule was written: `contains` and
+  `contained_by` do not differ, they are *absent* -- Django gates both on
+  `supports_json_field_contains` and raises `NotSupportedError` on SQLite,
+  including when the lookup is written against a key inside the field
+  (`data__tags__contains`) and including under `exclude()` and inside `Q()`.
+  Everything else measured is portable: `filter(data={'n': 1})`,
+  `filter(data__n=1)` and `has_key` all return the row on both engines. That is
+  what makes the remediation real -- there is a portable way to ask the
+  question, so the rule is not telling anyone to give up.
+
+  This is the rule the family needed a model for. `name__contains` and
+  `data__contains` are the same nine characters and two different questions:
+  one is a substring match every database performs, the other is a containment
+  test SQLite has no operator for. Nothing in the keyword distinguishes them,
+  so `QueryRule.report` is now handed the model the tracker resolved for the
+  chain, and answers `None` when the column turns out not to be JSON. Getting
+  the model that far required `Frame.queryset_models`, a sibling of the
+  existing `queryset_calls` that keeps the resolved label instead of discarding
+  it -- the tracker keys a chain only at its outermost expression, so a
+  `filter()` written before an `order_by()` has to be recovered by peeling the
+  spine either way.
+
+  Two things the mutation run corrected rather than confirmed. The lookup
+  suffix was originally matched in `wanted` and then matched *again* where the
+  path was stripped, with the strip length spelled as a separate literal; the
+  suffix is now found once and returned, because two independent spellings of
+  the same constant is how a rule reports the right lookup and strips the wrong
+  number of characters off it. And the guards around `**kwargs` -- a keyword
+  whose `arg` is `None` -- were unreachable from any test, because the textual
+  prefilter means a file containing only `filter(**criteria)` is never parsed.
+  The shape that actually exercises them is a keyword expansion sitting in the
+  same file as a real containment lookup, which is now what the test writes.
 - **5.2.2** — `DJX-003` `distinct('field')`, which is Postgres-only. **Done.**
   `src/djaudit/rules/portability.py`, `tests/rules/test_djx_003.py`.
 
@@ -7698,7 +7734,7 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **80 rules are
+document specifies, and most of it is still only specified: **81 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
 all ten of Phase 4's migration rules, its deployment-check gap rule, and the

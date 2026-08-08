@@ -316,6 +316,13 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
 
 PORTABILITY_UNFIXES: tuple[Unfix, ...] = (
     (
+        "DJX-002",
+        "ask JSON containment instead of asking whether the key is there",
+        PQUERIES,
+        "return Item.objects.filter(attributes__has_key=key)",
+        "return Item.objects.filter(attributes__contains={key: True})",
+    ),
+    (
         "DJX-003",
         "ask the per-group-latest question with DISTINCT ON instead of a subquery",
         PQUERIES,

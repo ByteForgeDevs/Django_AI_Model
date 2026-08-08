@@ -132,12 +132,27 @@ class Frame:
         each tracked expression back down its own spine restores the inner
         calls, and cannot admit anything the tracker had not already accepted.
         """
+        return set(self.queryset_models)
+
+    @property
+    def queryset_models(self) -> dict[int, str | None]:
+        """The model behind every call on a queryset chain, keyed by call identity.
+
+        The same peeling as :attr:`queryset_calls`, keeping the answer the
+        tracker resolved for the chain as a whole. A rule asking about one
+        ``filter()`` deep inside a chain needs to know what it is filtering:
+        ``data__contains`` is a portability defect on a ``JSONField`` and an
+        ordinary substring match on a ``CharField``, and the difference is not
+        visible in the keyword.
+        """
         querysets = self.querysets
-        inside: set[int] = set()
+        behind: dict[int, str | None] = {}
         for node in own_nodes(self.scope):
             if isinstance(node, ast.expr) and id(node) in querysets:
-                inside.update(id(call) for call in spine(node))
-        return inside
+                label = querysets[id(node)].model
+                for call in spine(node):
+                    behind.setdefault(id(call), label)
+        return behind
 
 
 def describe(part: ast.expr) -> str:

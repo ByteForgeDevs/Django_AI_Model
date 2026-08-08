@@ -9,6 +9,13 @@
       "confidence": "certain"
     },
     {
+      "rule_id": "DJX-002",
+      "file": "catalog/queries.py",
+      "line": 21,
+      "severity": "high",
+      "confidence": "certain"
+    },
+    {
       "rule_id": "DJX-003",
       "file": "catalog/queries.py",
       "line": 10,
@@ -18,12 +25,20 @@
   ],
   "must_not_report": [
     {
-      "rule_id": "DJX-003",
+      "rule_id": "DJX-002",
+      "file": "warehouse/models.py"
+    },
+    {
+      "rule_id": "DJX-002",
       "file": "warehouse/queries.py"
     },
     {
       "rule_id": "DJX-003",
       "file": "warehouse/models.py"
+    },
+    {
+      "rule_id": "DJX-003",
+      "file": "warehouse/queries.py"
     }
   ]
 }

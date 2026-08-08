@@ -48,12 +48,16 @@ def _describe(default: EngineChoice, choice: EngineChoice) -> str:
     return f"{choice.engine} {choice.selected_by()}"
 
 
+def _series(parts: list[str], conjunction: str) -> str:
+    """`a`, `b` and `c` -- a list said the way a sentence says one."""
+    if len(parts) == 1:
+        return parts[0]
+    return f"{', '.join(parts[:-1])} {conjunction} {parts[-1]}"
+
+
 def _joined(default: EngineChoice, choices: tuple[EngineChoice, ...]) -> str:
     """`a`, `b` or `c` -- the alternatives, as prose."""
-    described = [_describe(default, c) for c in choices]
-    if len(described) == 1:
-        return described[0]
-    return f"{', '.join(described[:-1])} or {described[-1]}"
+    return _series([_describe(default, c) for c in choices], "or")
 
 
 class DivergenceRule(Rule):
@@ -203,7 +207,15 @@ class QueryRule(DivergenceRule):
         """Whether this call is the shape the rule reports, ignoring context."""
         raise NotImplementedError
 
-    def report(self, ctx: ProjectContext, path: Path, call: ast.Call) -> Finding:
+    def report(
+        self, ctx: ProjectContext, path: Path, call: ast.Call, model: str | None
+    ) -> Finding | None:
+        """The finding, or ``None`` once the model says there is not one.
+
+        ``wanted`` is syntax and runs on every call; this runs only on calls
+        the tracker agreed are querysets, and is where a rule that needs to
+        know *what* is being queried gets to change its mind.
+        """
         raise NotImplementedError
 
     def diverging(self, ctx: ProjectContext, found: Divergence) -> Iterator[Finding]:
@@ -227,10 +239,12 @@ class QueryRule(DivergenceRule):
         here = [call for call in own_calls(scope) if self.wanted(call)]
         if here:
             frame = Frame(ctx=ctx, path=path, scope=scope, chains=ctx.def_use(scope))
-            on_a_queryset = frame.queryset_calls
+            behind = frame.queryset_models
             for call in here:
-                if id(call) in on_a_queryset:
-                    yield self.report(ctx, path, call)
+                if id(call) in behind:
+                    finding = self.report(ctx, path, call, behind[id(call)])
+                    if finding is not None:
+                        yield finding
         for child in scope.children:
             yield from self.inspect(ctx, path, child)
 
@@ -288,7 +302,7 @@ class DistinctOnFields(QueryRule):
         # field form compiles to DISTINCT ON.
         return any(isinstance(a, ast.Constant) and isinstance(a.value, str) for a in node.args)
 
-    def report(self, ctx: ProjectContext, path: Path, call: ast.Call) -> Finding:
+    def report(self, ctx: ProjectContext, path: Path, call: ast.Call, model: str | None) -> Finding:
         fields = [
             a.value for a in call.args if isinstance(a, ast.Constant) and isinstance(a.value, str)
         ]
@@ -313,4 +327,150 @@ class DistinctOnFields(QueryRule):
                 ),
             ),
             properties={"fields": " ".join(fields)},
+        )
+
+
+LOOKUP_METHODS = frozenset({"filter", "exclude", "get", "get_or_create", "update_or_create"})
+"""Queryset methods whose keyword arguments are field lookups.
+
+`annotate` and `alias` are deliberately absent: their keywords name the
+annotation, not a field, so `contains=...` there is a variable name.
+"""
+
+CONTAINMENT = ("__contains", "__contained_by")
+"""The two JSON lookups SQLite has no operator for.
+
+`has_key`, `has_keys` and `has_any_keys` are *not* here, and that is the whole
+point of the pair: they are supported on both backends, so the portable way to
+ask a containment question exists and the remediation is not "give up".
+"""
+
+
+def containment(keyword: str) -> str | None:
+    """The containment suffix `keyword` ends in, or None.
+
+    Matched once and returned, rather than tested here and re-tested where the
+    path is stripped. Two independent spellings of the same suffix is how a
+    rule ends up reporting `data__contains` and stripping the wrong number of
+    characters off it.
+    """
+    for suffix in CONTAINMENT:
+        if keyword.endswith(suffix):
+            return suffix
+    return None
+
+
+def json_field(ctx: ProjectContext, model: str | None, path: str) -> str | None:
+    """The lookup path `path` reduced to a JSONField on `model`, or None.
+
+    A JSON lookup can be written against the field itself (`data__contains`) or
+    against a key inside it (`data__tags__contains`), and both raise on SQLite.
+    Key transforms are not fields, so the path is shortened one segment at a
+    time until it lands on something the model graph knows -- and because the
+    answer only counts when that something is a JSONField, a shortened path can
+    never wander onto an unrelated column.
+    """
+    if model is None:
+        return None
+    fields = ctx.model_graph.reachable_fields(model)
+    parts = path.split("__")
+    while parts:
+        found = fields.get("__".join(parts))
+        if found is not None:
+            return "__".join(parts) if found.kind == "JSONField" else None
+        parts.pop()
+    return None
+
+
+@register
+class JsonContainment(QueryRule):
+    """`__contains` on a JSONField is Postgres-only, and SQLite raises.
+
+    The same shape as `DJX-003` and a different failure to explain: this one is
+    invisible in the keyword. `name__contains` on a `CharField` is an ordinary
+    substring match that works everywhere; `data__contains` on a `JSONField` is
+    a containment test SQLite has no operator for, and Django raises rather
+    than approximating it. Telling them apart needs the model, which is why
+    this rule is the reason `QueryRule.report` is given one.
+    """
+
+    meta = RuleMeta(
+        id="DJX-002",
+        title="a JSONField containment lookup is used in a project that also runs SQLite",
+        family=Family.DJX,
+        severity=Severity.HIGH,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "Django gates the JSONField `contains` and `contained_by` lookups on the "
+            "`supports_json_field_contains` feature flag, which SQLite sets to False. "
+            "Evaluating such a queryset raises `NotSupportedError` on SQLite and "
+            "returns rows on Postgres, so the same code path is a working feature in "
+            "production and a crash in development. Unlike the case-insensitivity "
+            "differences in this family it cannot be missed once reached -- but it is "
+            "only reached when the code path runs, which a test suite may never do."
+        ),
+        remediation=(
+            "Ask the question with `has_key`, `has_keys` or `has_any_keys`, which both "
+            "backends support, or filter on the key directly with "
+            "`data__key=value`. Where genuine containment is required, accept the "
+            "dependency deliberately and run Postgres in development too."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/topics/db/queries/#containment-and-key-lookups",
+            "https://docs.djangoproject.com/en/stable/ref/databases/",
+        ),
+        limitations=(
+            "The field has to be resolvable: a lookup on a queryset whose model we "
+            "could not name, or on a field reached through more relations than the "
+            "model graph walks, is not reported. `__contains` on a "
+            "`django.contrib.postgres` ArrayField is also Postgres-only and is not "
+            "reported here -- DJX-005 reports the field itself, which covers every "
+            "query written against it rather than one lookup at a time.",
+        ),
+    )
+
+    WORDS = CONTAINMENT
+
+    def wanted(self, node: ast.Call) -> bool:
+        if not isinstance(node.func, ast.Attribute) or node.func.attr not in LOOKUP_METHODS:
+            return False
+        # `kw.arg` is None for `**kwargs`, which has no keyword to read.
+        return any(kw.arg is not None and containment(kw.arg) is not None for kw in node.keywords)
+
+    def report(
+        self, ctx: ProjectContext, path: Path, call: ast.Call, model: str | None
+    ) -> Finding | None:
+        hits: list[tuple[str, str]] = []
+        for kw in call.keywords:
+            suffix = containment(kw.arg) if kw.arg is not None else None
+            if kw.arg is None or suffix is None:
+                continue
+            field = json_field(ctx, model, kw.arg[: -len(suffix)])
+            if field is not None:
+                hits.append((kw.arg, field))
+        if not hits:
+            return None
+        named = _series([repr(kw) for kw, _ in hits], "and")
+        columns = sorted({field for _, field in hits})
+        return self.finding(
+            location=ctx.location(path, call),
+            message=(
+                f"{named} asks Postgres for JSON containment, which SQLite has no "
+                f"operator for -- this query raises NotSupportedError on the engine "
+                f"this project runs in development"
+            ),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.SOURCE,
+                    content=ctx.snippet(path, call.lineno, call.end_lineno),
+                    source=ctx.rel(path),
+                ),
+                Evidence(
+                    kind=EvidenceKind.CONFIG,
+                    content="django.db.backends.sqlite3: supports_json_field_contains = False",
+                    source="django feature flags",
+                ),
+            ),
+            properties={"lookups": " ".join(kw for kw, _ in hits), "fields": " ".join(columns)},
         )

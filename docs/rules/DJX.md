@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJX` — cross-database portability
 
-2 rules on the gap between the database a developer runs and the one
+3 rules on the gap between the database a developer runs and the one
 that serves requests. Nothing here is a vulnerability and nothing here fails
 at import time. These are the defects that pass the whole test suite and then
 fail on production data, because the test suite ran against the other engine.
@@ -51,6 +51,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | Rule | Title | Severity | Confidence |
 |---|---|---|---|
 | [`DJX-001`](#djx-001--development-and-production-run-different-database-engines) | development and production run different database engines | medium | certain |
+| [`DJX-002`](#djx-002--a-jsonfield-containment-lookup-is-used-in-a-project-that-also-runs-sqlite) | a JSONField containment lookup is used in a project that also runs SQLite | high | certain |
 | [`DJX-003`](#djx-003--distinct-on-is-used-in-a-project-that-also-runs-sqlite) | DISTINCT ON is used in a project that also runs SQLite | high | certain |
 
 ---
@@ -70,6 +71,25 @@ $ djaudit run . --min-severity info --min-confidence tentative
 **References**
 
 - <https://docs.djangoproject.com/en/stable/ref/settings/#databases>
+- <https://docs.djangoproject.com/en/stable/ref/databases/>
+
+---
+
+### DJX-002 — a JSONField containment lookup is used in a project that also runs SQLite
+
+**Severity** high · **Confidence** certain · **Tier** static
+
+**What it means.** Django gates the JSONField `contains` and `contained_by` lookups on the `supports_json_field_contains` feature flag, which SQLite sets to False. Evaluating such a queryset raises `NotSupportedError` on SQLite and returns rows on Postgres, so the same code path is a working feature in production and a crash in development. Unlike the case-insensitivity differences in this family it cannot be missed once reached -- but it is only reached when the code path runs, which a test suite may never do.
+
+**How to fix it.** Ask the question with `has_key`, `has_keys` or `has_any_keys`, which both backends support, or filter on the key directly with `data__key=value`. Where genuine containment is required, accept the dependency deliberately and run Postgres in development too.
+
+**What this rule cannot see.**
+
+- The field has to be resolvable: a lookup on a queryset whose model we could not name, or on a field reached through more relations than the model graph walks, is not reported. `__contains` on a `django.contrib.postgres` ArrayField is also Postgres-only and is not reported here -- DJX-005 reports the field itself, which covers every query written against it rather than one lookup at a time.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/topics/db/queries/#containment-and-key-lookups>
 - <https://docs.djangoproject.com/en/stable/ref/databases/>
 
 ---
