@@ -5278,6 +5278,51 @@ rules come first; the live tier is then built for consumers that exist.
   creates it rewrites nothing. **85 of the corpus's 1,286 `AddField`s** are the
   free kind.
 
+  **Follow-up: 34/34 was flattery, and the real score was 72/85.** That figure
+  came from a mutation list written by hand alongside the module, which is a
+  measurement of what its author thought to break. Re-running `state.py` under
+  the generic harness promoted in Step 4.3 surfaced **13 survivors nobody had
+  chosen to write down**, and reading them found one dead field and six untested
+  behaviours, several of which the next rules in the family depend on:
+
+  - `ModelState.deleted` was **never read** — set by its default, copied by
+    `copy()`, and that is all. `DeleteModel` removes the model from the state
+    outright, so the flag was a design that had been replaced and left behind.
+    Deleted rather than tested: dead code is not a coverage gap.
+  - **`field_of` had never been called on a model the state has no entry for.**
+    Both existing callers went through the `unknown` path, so the branch that
+    answers for a model that was simply never seen was carrying no test at all.
+  - **The `DeleteModel`/`RenameModel` exemption was untested in both halves.**
+    `DeleteModel`'s is straightforward. `RenameModel`'s took a specific shape to
+    reach: an ordinary rename ends in the same state whether or not the
+    exemption fires, so only a rename that *stops early* — one whose new name
+    djaudit cannot read — can tell the two apart.
+  - **`_rename_model`'s guard was untested**, and without it a rename whose new
+    name is unreadable pops its source out of the state and then fails to put
+    anything back — a migration djaudit could not fully read taking a model it
+    *had* read down with it. Only `not new` is reachable there: `RenameModel`'s
+    model parameter *is* `old_name`, so an unreadable one returns earlier. The
+    `not old` half is type narrowing and is now commented as such.
+  - **An operation that names no model was not proven to be `model_tracked`.**
+    That distinction is the whole basis of the `RunPython` rules queued in Step
+    4.3: they read no model, and reporting them as untracked would have them
+    withhold every finding they have.
+  - **`slots` and `frozen` were assumed.** The replay mutates its state in place
+    across 875 migrations, where a misspelled attribute that merely stuck is a
+    silent no-op in the middle of that; and every rule in the family is handed
+    the same `Applied` objects in turn, where one that wrote to one would change
+    what the next one reads.
+  - **`assume_field=True` was untested under `CreateModel`.** It was measured and
+    documented for `AddField` — the `*Field` naming convention drops mptt's
+    `TreeForeignKey` and taggit's `TaggableManager`, 55 of NetBox's 681
+    `AddField`s — but the identical call inside `_read_declared_fields` had no
+    test, and there a refusal to read one entry does not lose one column, it
+    marks the whole model unknown and silences every rule against it.
+
+  Now **84/84**. The lesson generalises past this module: a hand-written mutation
+  list cannot find the mutants its author did not think of, which is exactly the
+  set worth finding.
+
 ### Step 4.3 — Static migration rules
 
 - **4.3.1** — `DJM-001` `AddField` non-nullable with nothing to fill it. **Done.**

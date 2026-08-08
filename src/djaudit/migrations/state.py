@@ -45,7 +45,6 @@ class ModelState:
     name: str
     fields: dict[str, FieldNode] = field(default_factory=dict)
     created_by: MigrationNode | None = None
-    deleted: bool = False
 
     @property
     def key(self) -> ModelKey:
@@ -96,7 +95,6 @@ class MigrationState:
                     name=model.name,
                     fields=dict(model.fields),
                     created_by=model.created_by,
-                    deleted=model.deleted,
                 )
                 for key, model in self.models.items()
             },
@@ -270,6 +268,10 @@ def _apply(state: MigrationState, migration: MigrationNode, operation: Operation
 def _rename_model(state: MigrationState, app: str, operation: Operation) -> None:
     """Move a model's columns to its new name."""
     old, new = operation.old_name, operation.new_name
+    # Only `not new` is reachable: `RenameModel`'s model parameter *is*
+    # `old_name`, so an unreadable one leaves `model_name` empty and `_apply`
+    # returns before getting here. `not old` is what lets the type checker
+    # narrow `old` for the `.lower()` below, and is kept for that alone.
     if not old or not new:
         return
     source = state.models.pop((app, old.lower()), None)

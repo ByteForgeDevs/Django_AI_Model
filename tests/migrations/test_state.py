@@ -16,6 +16,7 @@ than an empty table.
 
 from __future__ import annotations
 
+import dataclasses
 import textwrap
 
 import pytest
@@ -201,6 +202,40 @@ class TestCreateModel:
         state = final_state(replay_of(linear(CREATE_ORDER)))
         assert state.unknown == set()
 
+    def test_a_model_whose_name_cannot_be_read_is_not_recorded_at_all(self, replay_of):
+        # A migration built by a factory names its model with a variable. The
+        # alternative to skipping it is a model filed under the key
+        # ``('shop', None)``, which no later operation can ever match and which
+        # every consumer that iterates the state has to be ready for.
+        state = final_state(
+            replay_of(
+                linear(
+                    "[migrations.CreateModel("
+                    "name=MODEL_NAME, fields=[('id', models.AutoField(primary_key=True))])]"
+                )
+            )
+        )
+        assert state.models == {}
+
+    def test_a_field_class_not_named_field_is_still_read_as_one(self, replay_of):
+        # Under ``fields=[...]`` Django accepts nothing but field instances, so
+        # the ``*Field`` naming convention that a class body needs is not merely
+        # unnecessary here, it is wrong: it drops mptt's TreeForeignKey and
+        # taggit's TaggableManager. Refusing to read one entry does not lose one
+        # column, it marks the whole model unknown and silences every rule
+        # against it.
+        state = final_state(
+            replay_of(
+                linear(
+                    "[migrations.CreateModel(name='Post', fields=["
+                    "('id', models.AutoField(primary_key=True)), "
+                    "('tags', taggit.managers.TaggableManager())])]"
+                )
+            )
+        )
+        assert ("shop", "post") not in state.unknown
+        assert state.field_of(("shop", "post"), "tags") is not None
+
 
 class TestColumnOperations:
     def test_add_field_adds_the_column(self, replay_of):
@@ -255,6 +290,15 @@ class TestColumnOperations:
         )
         assert ("shop", "order") not in state.models
         assert set(state.models[("shop", "purchase")].fields) == {"id", "total"}
+
+    def test_a_rename_that_cannot_read_its_new_name_leaves_the_model_alone(self, replay_of):
+        # Without the guard the rename pops the source out of the state and then
+        # fails building a target it has no name for, so a migration djaudit
+        # could not fully read would take a model it *had* read down with it.
+        state = final_state(
+            replay_of(linear(CREATE_ORDER, "[migrations.RenameModel('Order', NEW_NAME)]"))
+        )
+        assert set(state.models[("shop", "order")].fields) == {"id", "total"}
 
     def test_an_unreadable_field_makes_the_model_unknown(self, replay_of):
         # AddField whose field= is a name rather than a call: the column exists
@@ -434,6 +478,26 @@ class TestModelsNobodyCreated:
         state = final_state(replay_of(linear(CREATE_ORDER, "[hierarkey.CleanDuplicates('order')]")))
         assert ("shop", "order") in state.unknown
 
+    def test_deleting_a_model_nobody_created_leaves_nothing_behind(self, replay_of):
+        # DeleteModel is exempt from the rule above because it does not read the
+        # column set, it ends it. Marking the table untrustworthy on the way out
+        # records a doubt about something that no longer exists, and squashes --
+        # which routinely delete models whose CreateModel they dropped -- would
+        # leave the state full of them.
+        state = final_state(replay_of(linear("[migrations.DeleteModel('ghost')]")))
+        assert state.models == {}
+        assert state.unknown == set()
+
+    def test_renaming_a_model_nobody_created_leaves_nothing_behind_either(self, replay_of):
+        # RenameModel is exempt for the same reason, and needs its own proof:
+        # the ordinary rename path reaches the same end state whether or not the
+        # exemption fires, so only a rename that stops early can tell them
+        # apart. Here the new name is a variable, so nothing is renamed and
+        # whatever the exemption did or did not add is what remains.
+        state = final_state(replay_of(linear("[migrations.RenameModel('Ghost', NEW_NAME)]")))
+        assert state.models == {}
+        assert state.unknown == set()
+
 
 class TestOperationsWithNoModel:
     def test_run_sql_does_not_name_a_model(self, replay_of):
@@ -456,6 +520,16 @@ class TestOperationsWithNoModel:
         graph = replay_of(linear(CREATE_ORDER, "[migrations.RunPython(forwards)]"))
         ran = next(a for a in replay(graph) if a.operation.name == "RunPython")
         assert ran.operation.model_name is None
+
+    def test_and_naming_no_model_is_not_the_same_as_naming_an_untracked_one(self, replay_of):
+        # `model_tracked` answers "can the state speak about this operation's
+        # model", and an operation with no model has nothing to be silent
+        # about. Reporting it as untracked would have the RunPython rules --
+        # which read no model at all -- withhold every finding they have.
+        graph = replay_of(linear(CREATE_ORDER, "[migrations.RunPython(forwards)]"))
+        ran = next(a for a in replay(graph) if a.operation.name == "RunPython")
+        assert ran.model_key is None
+        assert ran.model_tracked is True
 
     def test_an_extension_name_is_not_a_model(self, replay_of):
         state = final_state(replay_of(linear("[HStoreExtension()]", CREATE_ORDER)))
@@ -548,6 +622,38 @@ class TestTheStateItself:
         assert ("shop", "order") in state.unknown
         assert state.models[("shop", "order")].fields["total"] is not None
         assert state.field_of(("shop", "order"), "total") is None
+
+    def test_a_column_of_a_tracked_model_is_handed_straight_back(self, replay_of):
+        # The contrast to both withholding tests above: field_of must be
+        # withholding an answer it has, not failing to have one.
+        state = final_state(replay_of(linear(CREATE_ORDER)))
+        assert state.field_of(("shop", "order"), "total") is not None
+
+    def test_a_column_of_a_model_the_state_never_saw_is_withheld_too(self, replay_of):
+        # Not the same path as an unknown model: this key is in neither
+        # collection, so the answer comes from the absence of the model rather
+        # than from a recorded doubt about it.
+        state = final_state(replay_of(linear(CREATE_ORDER)))
+        assert ("shop", "ghost") not in state.unknown
+        assert state.field_of(("shop", "ghost"), "total") is None
+
+    def test_a_state_rejects_an_attribute_nobody_declared(self, replay_of):
+        # The replay mutates ModelState and MigrationState in place, all the way
+        # through 875 migrations, so a misspelled attribute name that merely
+        # stuck would be a silent no-op somewhere in the middle of that.
+        state = final_state(replay_of(linear(CREATE_ORDER)))
+        with pytest.raises(AttributeError):
+            state.unknwon = set()  # type: ignore[attr-defined]
+        with pytest.raises(AttributeError):
+            state.models[("shop", "order")].feilds = {}  # type: ignore[attr-defined]
+
+    def test_an_applied_operation_cannot_be_edited_by_the_rule_reading_it(self, replay_of):
+        # Every rule in the family is handed the same Applied objects in turn,
+        # so one that wrote to one would be changing what the next one reads.
+        applied = replay(replay_of(linear(CREATE_ORDER)))[0]
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            applied.model_tracked = False  # type: ignore[misc]
+        assert not hasattr(applied, "__dict__")
 
     def test_replay_visits_migrations_in_dependency_order(self, replay_of):
         applied = replay(
