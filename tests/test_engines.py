@@ -26,9 +26,12 @@ import pytest
 
 from djaudit.discovery import build_context
 from djaudit.engines import (
+    Divergence,
     EngineChoice,
+    Portability,
     Vendor,
     classify,
+    divergence,
     module_engines,
     project_engines,
 )
@@ -260,3 +263,240 @@ def module_engines_for(tmp_path: pathlib.Path, body: str) -> tuple[EngineChoice,
     views = resolve_all(ctx)
     module = next(m for m in ctx.settings_modules if m.dotted == "config.settings")
     return module_engines(module, views[module.dotted])
+
+
+class TestGuardRecovery:
+    """The `if` test that selects a branch, recovered for evidence."""
+
+    def test_an_unconditional_assignment_has_no_guard(self, tmp_path: pathlib.Path) -> None:
+        found = choices(build(tmp_path, one_db(PG)))[0]
+        assert found.guard is None
+        assert found.selected_by() == "with nothing set"
+
+    def test_the_env_test_is_recovered_verbatim(self, tmp_path: pathlib.Path) -> None:
+        # The Healthchecks lever. Without this a finding can only say "it is
+        # conditional", which tells a reader to go and look rather than what
+        # to set.
+        body = one_db(LITE) + "import os\nif os.getenv('DB') == 'postgres':\n    " + one_db(PG)
+        found = choices(build(tmp_path, body))[1]
+        assert found.guard == "os.getenv('DB') == 'postgres'"
+        assert found.selected_by() == "when os.getenv('DB') == 'postgres'"
+
+    def test_nested_guards_are_joined_because_both_must_hold(self, tmp_path: pathlib.Path) -> None:
+        body = (
+            one_db(LITE)
+            + "import os\nif os.getenv('DB'):\n    if os.getenv('DB') == 'postgres':\n        "
+            + one_db(PG)
+        )
+        assert choices(build(tmp_path, body))[1].guard == (
+            "os.getenv('DB') and os.getenv('DB') == 'postgres'"
+        )
+
+    def test_an_else_branch_is_recorded_negated(self, tmp_path: pathlib.Path) -> None:
+        body = (
+            "import os\nif os.getenv('DB') == 'postgres':\n    "
+            + one_db(PG)
+            + "else:\n    "
+            + one_db(LITE)
+        )
+        found = choices(build(tmp_path, body))
+        assert found[1].guard == "not (os.getenv('DB') == 'postgres')"
+
+    def test_a_conditional_without_a_recoverable_guard_still_says_so(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # A guard we cannot name must not read as "with nothing set", which is
+        # the opposite claim.
+        root = build(tmp_path, one_db(PG))
+        ctx = build_context(root)
+        views = resolve_all(ctx)
+        module = ctx.settings_modules[0]
+        bare = module_engines(module, views[module.dotted], tree=None)[0]
+        assert dataclasses.replace(bare, conditional=True).selected_by() == (
+            "on a branch we could not name"
+        )
+
+
+class TestDecidingDivergence:
+    """`divergence` over a set of choices."""
+
+    def verdict(self, tmp_path: pathlib.Path, body: str, **extra: str) -> Divergence:
+        return divergence(choices(build(tmp_path, body, **extra)))
+
+    def test_one_engine_is_not_divergence(self, tmp_path: pathlib.Path) -> None:
+        found = self.verdict(tmp_path, one_db(PG))
+        assert found.verdict is Portability.SINGLE
+        assert not found.diverges
+        assert found.vendors == frozenset({Vendor.POSTGRESQL})
+
+    def test_the_same_engine_twice_is_not_divergence(self, tmp_path: pathlib.Path) -> None:
+        # Two branches that agree are a deployment detail, not a portability
+        # problem, and reporting them would fire on every project that
+        # overrides NAME per environment.
+        body = one_db(PG) + "import os\nif os.getenv('X'):\n    " + one_db(PG)
+        assert self.verdict(tmp_path, body).verdict is Portability.SINGLE
+
+    def test_sqlite_by_default_and_postgres_on_demand_diverges(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        body = one_db(LITE) + "import os\nif os.getenv('DB') == 'postgres':\n    " + one_db(PG)
+        found = self.verdict(tmp_path, body)
+        assert found.verdict is Portability.DIVERGENT
+        assert found.alias == "default"
+        assert found.default is not None
+        assert found.default.vendor is Vendor.SQLITE
+        assert [a.vendor for a in found.alternatives] == [Vendor.POSTGRESQL]
+
+    def test_engines_split_across_modules_diverge_too(self, tmp_path: pathlib.Path) -> None:
+        # The shape the plan assumed. Rarer than the one above, still real.
+        found = self.verdict(tmp_path, one_db(PG), dev=one_db(LITE))
+        assert found.verdict is Portability.DIVERGENT
+        assert found.vendors == frozenset({Vendor.POSTGRESQL, Vendor.SQLITE})
+
+    def test_an_unreadable_engine_is_uncertain_not_single(self, tmp_path: pathlib.Path) -> None:
+        body = (
+            "import os\n"
+            "DATABASES = {'default': {'ENGINE': 'django.db.backends.' + os.environ['B']}}\n"
+        )
+        found = self.verdict(tmp_path, body)
+        assert found.verdict is Portability.UNCERTAIN
+        assert not found.conclusive
+
+    def test_no_engine_at_all_is_unreadable_not_single(self, tmp_path: pathlib.Path) -> None:
+        found = self.verdict(tmp_path, "")
+        assert found.verdict is Portability.UNREADABLE
+        assert not found.conclusive
+        assert found.vendors == frozenset()
+
+    def test_a_readable_divergence_beats_an_unreadable_sibling(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # Proven divergence is not weakened by a third branch we cannot read:
+        # the two we can read already answer the question.
+        body = (
+            one_db(LITE)
+            + "import os\nif os.getenv('DB') == 'postgres':\n    "
+            + one_db(PG)
+            + "if os.getenv('DB') == 'other':\n    "
+            + "DATABASES = {'default': {'ENGINE': 'django.db.backends.' + os.environ['B']}}\n"
+        )
+        assert self.verdict(tmp_path, body).verdict is Portability.DIVERGENT
+
+    def test_two_aliases_with_different_engines_are_not_this_defect(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # A Postgres default beside a SQLite replica is a real problem and a
+        # different one. Folding it in here would report each as the other.
+        body = (
+            f"DATABASES = {{'default': {{'ENGINE': '{PG}'}}, 'replica': {{'ENGINE': '{LITE}'}}}}\n"
+        )
+        found = self.verdict(tmp_path, body)
+        assert found.verdict is Portability.SINGLE
+        assert found.vendors == frozenset({Vendor.POSTGRESQL, Vendor.SQLITE})
+
+
+class TestAskingWhichVendorRuns:
+    """`reaches` is evidence; `could_reach` is possibility."""
+
+    def verdict(self, tmp_path: pathlib.Path, body: str) -> Divergence:
+        return divergence(choices(build(tmp_path, body)))
+
+    def test_a_readable_engine_is_reached(self, tmp_path: pathlib.Path) -> None:
+        found = self.verdict(tmp_path, one_db(PG))
+        assert found.reaches(Vendor.POSTGRESQL)
+        assert not found.reaches(Vendor.SQLITE)
+
+    def test_an_unreadable_engine_is_not_reached_but_is_not_excluded(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # The distinction that keeps this family off NetBox and pretix, whose
+        # engines cannot be read. A rule firing on `could_reach` would report
+        # every SQLite divergence against two Postgres-only projects.
+        body = (
+            "import os\n"
+            "DATABASES = {'default': {'ENGINE': 'django.db.backends.' + os.environ['B']}}\n"
+        )
+        found = self.verdict(tmp_path, body)
+        assert not found.reaches(Vendor.SQLITE)
+        assert found.could_reach(Vendor.SQLITE)
+
+    def test_a_conclusive_single_engine_excludes_the_others(self, tmp_path: pathlib.Path) -> None:
+        # The presence control for the test above: when everything was
+        # readable, `could_reach` must stop saying yes to everything.
+        found = self.verdict(tmp_path, one_db(PG))
+        assert found.conclusive
+        assert not found.could_reach(Vendor.SQLITE)
+        assert found.could_reach(Vendor.POSTGRESQL)
+
+
+class TestNarrowingToTheDivergingAlias:
+    """`relevant`, `default` and `alternatives` on a `Divergence`."""
+
+    def verdict(self, tmp_path: pathlib.Path, body: str) -> Divergence:
+        return divergence(choices(build(tmp_path, body)))
+
+    def test_only_the_diverging_alias_is_described(self, tmp_path: pathlib.Path) -> None:
+        # A second alias must not turn up in the finding about the first, or a
+        # reader is sent to a line that is not the problem.
+        body = (
+            f"DATABASES = {{'default': {{'ENGINE': '{LITE}'}}, "
+            f"'other': {{'ENGINE': '{MY}'}}}}\n"
+            "import os\nif os.getenv('DB') == 'postgres':\n    "
+            f"DATABASES = {{'default': {{'ENGINE': '{PG}'}}}}\n"
+        )
+        found = self.verdict(tmp_path, body)
+        assert found.alias == "default"
+        assert {c.alias for c in found.relevant} == {"default"}
+        assert {c.alias for c in found.choices} == {"default", "other"}
+
+    def test_without_a_diverging_alias_everything_is_relevant(self, tmp_path: pathlib.Path) -> None:
+        # The contrast: when nothing diverges there is no alias to narrow to,
+        # so narrowing must not silently drop the choices.
+        found = self.verdict(tmp_path, one_db(PG))
+        assert found.alias is None
+        assert found.relevant == found.choices
+
+    def test_a_branch_agreeing_with_the_default_is_not_an_alternative(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # Healthchecks' Postgres branch is an alternative to its SQLite
+        # default; a second SQLite branch is the same database again.
+        body = (
+            one_db(LITE)
+            + "import os\nif os.getenv('X'):\n    "
+            + one_db(LITE)
+            + "if os.getenv('DB') == 'postgres':\n    "
+            + one_db(PG)
+        )
+        found = self.verdict(tmp_path, body)
+        assert found.diverges
+        assert [a.vendor for a in found.alternatives] == [Vendor.POSTGRESQL]
+
+    def test_with_no_unconditional_assignment_there_is_no_default(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # Every branch is opt-in, so there is nothing to call the developer's
+        # database and nothing to compare the others against.
+        body = (
+            "import os\nif os.getenv('DB') == 'postgres':\n    "
+            + one_db(PG)
+            + "if os.getenv('DB') == 'mysql':\n    "
+            + one_db(MY)
+        )
+        found = self.verdict(tmp_path, body)
+        assert found.diverges
+        assert found.default is None
+        assert found.alternatives == ()
+
+    def test_the_verdict_names_are_the_ones_findings_will_print(self) -> None:
+        assert [str(v) for v in Portability] == [
+            "single",
+            "divergent",
+            "uncertain",
+            "unreadable",
+        ]
+
+    def test_a_verdict_cannot_be_edited_after_it_is_built(self, tmp_path: pathlib.Path) -> None:
+        found = self.verdict(tmp_path, one_db(PG))
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            found.verdict = Portability.DIVERGENT  # type: ignore[misc]

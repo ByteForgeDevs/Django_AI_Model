@@ -245,6 +245,15 @@ class EngineChoice:
     definition: Definition
     node: ast.expr | None
 
+    guard: str | None = None
+    """The `if` test that selects this branch, as written.
+
+    A finding saying "line 221 is conditional" tells a reader to go and look;
+    one saying `os.getenv('DB') == 'postgres'` tells them which lever moves the
+    project between the two databases, which is the actionable half. `None`
+    when the assignment is unconditional or the guard could not be recovered.
+    """
+
     @property
     def default(self) -> bool:
         """Whether this is what runs when no environment variable is set."""
@@ -260,8 +269,51 @@ class EngineChoice:
         engine = self.engine if self.engine is not None else "an engine we cannot read"
         return f"{engine} at {where}:{self.line}"
 
+    def selected_by(self) -> str:
+        """How a deployment ends up on this database."""
+        if self.guard is not None:
+            return f"when {self.guard}"
+        if self.conditional:
+            return "on a branch we could not name"
+        return "with nothing set"
 
-def config_choice(module: SettingsModule, alias: str, config: DatabaseConfig) -> EngineChoice:
+
+def guards(tree: ast.Module | None) -> dict[int, str]:
+    """Every statement's enclosing `if` tests, keyed by node identity.
+
+    The resolver knows an assignment is conditional but discards the test that
+    guards it, and the test is the useful part -- it names the environment
+    variable a reader has to set to move between the two databases. Recovering
+    it here rather than threading it through the resolver keeps a change to
+    every settings rule out of a question only this family asks.
+
+    Nested guards are joined because both must hold, and an `else` is recorded
+    negated for the same reason: a branch is reached on the whole chain, not on
+    the innermost test.
+    """
+    found: dict[int, str] = {}
+    if tree is None:
+        return found
+
+    def walk(body: list[ast.stmt], chain: tuple[str, ...]) -> None:
+        for stmt in body:
+            if chain:
+                found[id(stmt)] = " and ".join(chain)
+            if isinstance(stmt, ast.If):
+                test = ast.unparse(stmt.test)
+                walk(stmt.body, (*chain, test))
+                walk(stmt.orelse, (*chain, f"not ({test})"))
+
+    walk(tree.body, ())
+    return found
+
+
+def config_choice(
+    module: SettingsModule,
+    alias: str,
+    config: DatabaseConfig,
+    found: dict[int, str] | None = None,
+) -> EngineChoice:
     """Lift one alias configuration into a vendor decision."""
     engine = config.engine
     return EngineChoice(
@@ -272,10 +324,13 @@ def config_choice(module: SettingsModule, alias: str, config: DatabaseConfig) ->
         conditional=config.conditional,
         definition=config.definition,
         node=config.at(),
+        guard=(found or {}).get(id(config.definition.node)),
     )
 
 
-def module_engines(module: SettingsModule, view: SettingsView) -> tuple[EngineChoice, ...]:
+def module_engines(
+    module: SettingsModule, view: SettingsView, tree: ast.Module | None = None
+) -> tuple[EngineChoice, ...]:
     """Every database one settings module could reach, in source order.
 
     Includes conditional branches and every alias, because a project with a
@@ -283,9 +338,10 @@ def module_engines(module: SettingsModule, view: SettingsView) -> tuple[EngineCh
     reading only `default` would miss.
     """
     resolved = view.get("DATABASES")
+    found = guards(tree)
     choices: list[EngineChoice] = []
     for alias, configs in database_configs(view, resolved).items():
-        choices.extend(config_choice(module, alias, config) for config in configs)
+        choices.extend(config_choice(module, alias, config, found) for config in configs)
     return tuple(sorted(choices, key=lambda choice: (choice.line, choice.alias)))
 
 
@@ -304,5 +360,134 @@ def project_engines(
         view = views.get(module.dotted)
         if view is None:
             continue
-        choices.extend(module_engines(module, view))
+        choices.extend(module_engines(module, view, ctx.parse(module.path)))
     return tuple(choices)
+
+
+class Portability(StrEnum):
+    """What the set of reachable engines says about a project.
+
+    Four states rather than a boolean because "we could not tell" has to be
+    distinguishable from "we checked and it is fine". A `DJX` rule that treats
+    :attr:`UNCERTAIN` or :attr:`UNREADABLE` as :attr:`SINGLE` stops firing on
+    the projects whose settings are hardest to read, which are not the projects
+    least likely to have the bug.
+    """
+
+    SINGLE = "single"
+    """Every readable engine names the same vendor, and all of them were read."""
+
+    DIVERGENT = "divergent"
+    """One alias can be two different databases, so the family below applies."""
+
+    UNCERTAIN = "uncertain"
+    """An engine could not be read, so a second vendor cannot be ruled out."""
+
+    UNREADABLE = "unreadable"
+    """No engine was found at all. Not evidence of anything."""
+
+
+@dataclass(frozen=True)
+class Divergence:
+    """Whether this project can run on more than one database.
+
+    Computed per alias and then aggregated, because an alias is one connection
+    and it is one connection changing vendor that makes SQL portability a
+    question. A Postgres `default` beside a SQLite `replica` is a different
+    defect, and folding the two together would report each as the other.
+    """
+
+    verdict: Portability
+    choices: tuple[EngineChoice, ...]
+    alias: str | None = None
+    """The alias that diverges, when one does."""
+
+    @property
+    def diverges(self) -> bool:
+        return self.verdict is Portability.DIVERGENT
+
+    @property
+    def vendors(self) -> frozenset[Vendor]:
+        """Every vendor this project could reach, ignoring the unreadable ones."""
+        return frozenset(c.vendor for c in self.choices if c.vendor.known)
+
+    def reaches(self, vendor: Vendor) -> bool:
+        """Whether `vendor` is evidenced as a database this project uses.
+
+        Project-wide on purpose: a query cannot say statically which alias it
+        will run against, so a rule about SQL that only one backend accepts has
+        to ask the question of the whole project.
+
+        Evidence, not possibility. Answering "maybe" here would make every
+        `DJX` rule fire on NetBox and pretix -- whose engines are genuinely
+        unreadable -- and the family's whole claim is that a divergence is a
+        thing you can point at. :meth:`could_reach` is the other question.
+        """
+        return vendor in self.vendors
+
+    def could_reach(self, vendor: Vendor) -> bool:
+        """Whether `vendor` cannot be ruled out.
+
+        True wherever :meth:`reaches` is, plus the cases where we failed to
+        read an engine. A rule using this instead of :meth:`reaches` is
+        choosing recall over precision and owes its finding a `tentative`
+        confidence.
+        """
+        return self.reaches(vendor) or not self.conclusive
+
+    @property
+    def conclusive(self) -> bool:
+        """Whether every engine was readable, so the vendor set is complete."""
+        return self.verdict not in _NOT_EXCLUDED
+
+    @property
+    def default(self) -> EngineChoice | None:
+        """What runs when nothing is set -- the developer's database."""
+        return next((c for c in self.relevant if c.default), None)
+
+    @property
+    def alternatives(self) -> tuple[EngineChoice, ...]:
+        """The opt-in databases whose vendor differs from the default's."""
+        default = self.default
+        if default is None:
+            return ()
+        return tuple(c for c in self.relevant if not c.default and c.vendor is not default.vendor)
+
+    @property
+    def relevant(self) -> tuple[EngineChoice, ...]:
+        """The choices for the diverging alias, or all of them."""
+        if self.alias is None:
+            return self.choices
+        return tuple(c for c in self.choices if c.alias == self.alias)
+
+
+_NOT_EXCLUDED = frozenset({Portability.UNCERTAIN, Portability.UNREADABLE})
+"""Verdicts under which no vendor can be ruled out.
+
+Named rather than inlined so the claim is stated once: an engine we could not
+read might be any of them, and a project with no readable engine at all might
+be any of them too.
+"""
+
+
+def divergence(choices: tuple[EngineChoice, ...]) -> Divergence:
+    """Decide whether more than one database is reachable."""
+    if not choices:
+        return Divergence(Portability.UNREADABLE, choices)
+
+    by_alias: dict[str, set[Vendor]] = {}
+    for choice in choices:
+        if choice.vendor.known:
+            by_alias.setdefault(choice.alias, set()).add(choice.vendor)
+
+    diverging = sorted(alias for alias, vendors in by_alias.items() if len(vendors) > 1)
+    if diverging:
+        return Divergence(Portability.DIVERGENT, choices, diverging[0])
+    if any(not choice.vendor.known for choice in choices):
+        return Divergence(Portability.UNCERTAIN, choices)
+    return Divergence(Portability.SINGLE, choices)
+
+
+def portability(ctx: ProjectContext, views: dict[str, SettingsView]) -> Divergence:
+    """The whole question, from a context: what can this project connect to?"""
+    return divergence(project_engines(ctx, views))

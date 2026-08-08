@@ -6628,6 +6628,51 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   narrowing, and `frozen=True`, which the tests now assert directly.
 
 - **5.1.2** — Divergence detection across roles — SQLite in development, Postgres in production.
+
+  **Done, with the premise corrected.** The step name says "across roles" and
+  no corpus project puts its engines in role-differentiated modules, so
+  `divergence()` compares the reachable engines **per alias, across the whole
+  project**. That subsumes the shape the plan described — two modules each
+  naming one engine still land in the same alias's vendor set — while catching
+  the one Healthchecks actually uses, which the role comparison would have
+  missed entirely.
+
+  `Portability` has four states, not a boolean: `SINGLE`, `DIVERGENT`,
+  `UNCERTAIN` (an engine we could not read, so a second vendor is not excluded)
+  and `UNREADABLE` (no engine found at all). Measured, the corpus needs all
+  four — Healthchecks is `DIVERGENT`, pretix `UNCERTAIN`, NetBox `UNREADABLE`.
+
+  **The decision that matters most here is what `reaches()` means.** Written
+  as "could this project be on SQLite?", it answers yes under both uncertain
+  states, and every `DJX` rule below would then fire on NetBox and pretix —
+  two projects at 100% precision whose engines simply cannot be read. So
+  `reaches()` is evidence and `could_reach()` is possibility, and a rule using
+  the latter owes its finding a `tentative` confidence. This is the difference
+  between the family being useful and it being the reason someone uninstalls.
+
+  Divergence is computed per alias, so a Postgres `default` beside a SQLite
+  `replica` is **not** reported as this defect. It is a real problem and a
+  different one; folding them together would report each as the other.
+
+  The finding also needed to be actionable, and "line 221 is conditional" is
+  not — it tells a reader to go and look. `guards()` recovers the `if` test
+  that selects each branch by walking the module once, so a finding can name
+  the lever: on Healthchecks it recovers `os.getenv('DB') == 'postgres'` and
+  `os.getenv('DB') in ['mysql', 'mariadb']` verbatim. Nested guards are joined
+  and an `else` is recorded negated, because a branch is reached on the whole
+  chain rather than the innermost test. Doing this in `engines.py` rather than
+  threading the guard through `_visit_if` keeps a change to every settings rule
+  out of a question only this family asks.
+
+  Mutation testing found five real gaps and they are now tested: `alternatives`
+  when no unconditional assignment exists (there is no default to compare
+  against), a conditional branch whose vendor *matches* the default's (the same
+  database again, not an alternative), `relevant`'s narrowing when a second
+  alias is present, and the `Portability` wire values. 82 mutants, 76 killed;
+  the six survivors are all in the moved `DatabaseConfig` code, killed by
+  `test_djs_021.py` under the other pairing, plus `frozen=True` and the
+  `AnnAssign` guard mypy requires for narrowing.
+
 - **5.1.3** — `DJX-001` the meta-finding: development and production use different engines, which makes every rule below relevant.
 
 ### Step 5.2 — Divergence rules
