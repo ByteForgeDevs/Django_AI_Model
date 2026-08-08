@@ -6052,8 +6052,77 @@ rules come first; the live tier is then built for consumers that exist.
 ### Step 4.4 — Live lock classification
 
 - **4.4.1** — `sqlmigrate` adapter capturing real emitted SQL per migration.
+
+  **Done.** `src/djaudit/live/sqlmigrate.py`, 45 tests, mutation 40/40.
+
+  Three things had to be measured before the adapter could be written, and each
+  changed its shape.
+
+  *It needs a live server, not just a driver.* `sqlmigrate` builds a
+  `MigrationLoader` around a real connection and reads `django_migrations`
+  before rendering anything, so a Postgres-configured target with nothing
+  listening fails outright. That is reported as a `Refused` carrying the
+  target's own last line, because a laptop with no database running genuinely
+  cannot be told what its migration will lock.
+
+  *The same migration is not the same SQL twice.* One `AddField` plus
+  `AddIndex` plus `AlterField` renders as **4 statements on Postgres and 10 on
+  SQLite**, measured on the same project. So `Emitted.backend` records the
+  engine that produced the statements and `Emitted.for_postgres` gates every
+  Postgres claim. The test that justifies this does not assert the principle,
+  it measures the damage: read through the Postgres classifier, the SQLite
+  rendering **hides the only dangerous operation** — `ALTER COLUMN TYPE`, a
+  2870ms rewrite — inside a table rebuild that classifies as harmless, invents
+  a table called `new__blog_post` that never exists in production, and reports
+  `DROP TABLE "blog_post"` as routine catalogue work.
+
+  *Django's operation banner is three lines, not one.* The first parser used a
+  boolean and could not tell the closing rule from the next opening one, so the
+  first comment after a banner was read as a new heading. Django emits one
+  routinely — `-- (no-op)` after `AlterModelOptions`, and the author's own
+  leading comment after `RunSQL`. Measured against real output, it attributed
+  `SELECT 1;` to `a leading comment` instead of to `Raw SQL operation`. Replaced
+  with a three-state machine. This was found by a surviving mutant, not by a
+  failing test.
+
 - **4.4.2** — SQL lock classifier: map each DDL statement to its Postgres lock mode.
-- **4.4.3** — `DJM-010` migration acquiring `ACCESS EXCLUSIVE` on a table, with the emitted SQL as evidence. Upgrades the static rules above from `tentative` to `certain`.
+
+  **Done.** `src/djaudit/live/locks.py`, 60 tests, mutation 73/73. Built against
+  a real PostgreSQL 18.1 cluster; 18 lock modes read from `pg_locks` and
+  durations timed on a 2,000,000-row / 142 MB table.
+
+  **The measurements refute this step's own premise, and 4.4.3 is respecified
+  below because of it.** Lock mode alone does not predict an outage:
+
+  | statement | lock | 2M rows |
+  |---|---|---|
+  | `ADD COLUMN c integer` | AccessExclusive | 55ms |
+  | `ADD COLUMN c text NOT NULL DEFAULT 'x'` | AccessExclusive | **60ms** |
+  | `ALTER COLUMN TYPE varchar(50)` | AccessExclusive | **2870ms** |
+  | `CREATE INDEX` | **Share** | **1031ms** |
+  | `VALIDATE CONSTRAINT` | ShareUpdateExclusive | — |
+  | `ADD CONSTRAINT CHECK ... NOT VALID` | AccessExclusive | 59ms |
+
+  Flagging `ACCESS EXCLUSIVE` would report `ADD COLUMN NOT NULL DEFAULT` — which
+  is harmless since Postgres 11 stores a constant default once — and would miss
+  `CREATE INDEX`, which is the outage people actually have, under a *weaker*
+  lock. Two statements taking the identical lock differ by **48×**.
+
+  So the classifier has two axes: **Lock** (what is blocked) × **Work**
+  (catalogue / scan / rewrite), and `dangerous = blocking and work is not
+  catalogue`.
+
+  *Intuition was wrong about volatility too.* An early rule listed `now()` among
+  the defaults that force a rewrite. `pg_proc.provolatile` says `now()` is
+  **STABLE** — it returns the transaction's start time — and it measured 56ms
+  with no `relfilenode` change, against 3216ms and a rewrite for
+  `clock_timestamp()`. The rule now derives from Postgres's own volatility
+  class, and a test reads `pg_proc` so the table cannot go stale silently.
+
+  `classify()` never guesses: an unrecognised statement is `NONE` / `catalogue`
+  with a stated reason, because this module escalates findings to `certain`.
+
+- **4.4.3** — `DJM-010` migration whose emitted SQL is **blocking and scaling**: it holds a lock that stops reads or writes *and* does work proportional to table size. Specified from the 4.4.2 measurements rather than from lock mode, which 4.4.2 showed to be wrong in both directions. Emitted SQL as evidence. Upgrades the static rules above from `tentative` to `certain`.
 - **4.4.4** — Table size estimation from `pg_class.reltuples` when a database connection is available, so severity scales with actual row count.
 
 ### Step 4.5 — Deployment check adapter
