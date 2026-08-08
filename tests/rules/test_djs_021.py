@@ -6,8 +6,8 @@ import pathlib
 
 from djaudit import engine
 from djaudit.discovery import build_context
+from djaudit.engines import database_configs, live_definitions
 from djaudit.models import Finding
-from djaudit.rules.database import database_configs, live_definitions
 from djaudit.settings import resolve_all
 
 MARKERS = "INSTALLED_APPS = []\nSECRET_KEY = 'x'\nDEBUG = False\n"

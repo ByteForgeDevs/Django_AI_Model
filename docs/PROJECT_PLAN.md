@@ -6575,6 +6575,58 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
 ### Step 5.1 — Database configuration model
 
 - **5.1.1** — Per-settings-module engine detection, using the settings resolver.
+
+  **Done, and it moved the ground under 5.1.2.** Built `src/djaudit/engines.py`:
+  a `Vendor` enum, `classify()`, `EngineChoice`, `module_engines()` and
+  `project_engines()`. Two premises in this step turned out to be wrong, both
+  found by measuring the corpus before writing.
+
+  **The engine is not one value per module — it is a set.** Healthchecks,
+  named below as the ideal target for this family, assigns `DATABASES` three
+  times in a single module: SQLite unconditionally at `hc/settings.py:207`,
+  Postgres inside `if os.getenv("DB") == "postgres":` at 221, MySQL inside
+  another `if` at 242. One module, one `SettingsRole`, three engines. pretix
+  computes its engine as `'django.db.backends.' + db_backend` from a config
+  file. NetBox builds `DATABASES` with `getattr` on an imported module and
+  sets `ENGINE` through a later `.update()`. **None of the three splits
+  engines across settings modules the way 5.1.2 assumed** — see that entry.
+  `rules/database.py` had already met this and solved it: `live_definitions()`
+  and `database_configs()` return every branch that can still decide the
+  value. Measured on the corpus, they recover Healthchecks' three engines
+  exactly, so `engines.py` builds on them rather than re-walking.
+
+  Those three helpers moved from `rules/database.py` into `engines.py`,
+  because a core module importing from a rules module had the dependency
+  backwards and every `DJX` rule needs them. Four importers, one of them a
+  test; `rules/database.py` now imports them back.
+
+  **`"sqlite" in engine` is wrong, and it was in the tree.** Django's GIS
+  backend for SQLite is `spatialite`, which contains no `sqlite` substring, so
+  `DatabaseConfig.is_sqlite` classified it as not-SQLite and `DJS-021` would
+  have reported a pointless `CONN_MAX_AGE` against it. Its mirror image is
+  `postgis`, which contains no `postgres`. Wrappers move the vendor out of the
+  leaf entirely — NetBox ships `django_prometheus.db.backends.postgresql`.
+  `classify()` is therefore a table keyed on the last dotted segment (after a
+  `_backend` suffix is stripped) plus a short whole-path table for backends
+  whose leaf names no vendor, and `is_sqlite` now delegates to it.
+
+  Anything unrecognised is `Vendor.UNKNOWN`, which is a real answer and not a
+  lookup failure: pretix's concatenated engine lands there, and a rule that
+  read it as "not SQLite, therefore fine" would go quiet on exactly the
+  projects that are hardest to analyse. NetBox produces no choices at all,
+  which is the honest result — its engine is genuinely unreadable statically —
+  and means an empty set must never be treated as "no divergence".
+
+  Mutation testing paid for itself three times. It found `removesuffix(
+  "backend")` was dead (the one package needing it is matched whole-path), the
+  `leaf in _LEAF` guard was redundant with the lookup two lines below it, and
+  the `is_assigned` guard in `module_engines` was unreachable — `database_configs`
+  already returns `{}` with no definitions, measured rather than assumed. All
+  three removed. It also showed the `Vendor` wire values were untested, which
+  matters because it is a `StrEnum` so a finding can interpolate it. 26 tests;
+  the survivors that remain are the `AnnAssign` value guard mypy requires for
+  narrowing, and `frozen=True`, which the tests now assert directly.
+
 - **5.1.2** — Divergence detection across roles — SQLite in development, Postgres in production.
 - **5.1.3** — `DJX-001` the meta-finding: development and production use different engines, which makes every rule below relevant.
 
@@ -7492,9 +7544,9 @@ conversation.
 | 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | **Complete** (PR #3) — `DJA-001`…`DJA-015`, `DJD-001`…`DJD-003`, 100% precision on three real targets |
 | 3 | Performance and injection | 6 | 36 | **Complete** (PR #5) — `DJP-001`…`DJP-010`, `DJI-001`…`DJI-012`, 100% precision on three real targets |
-| 4 | Migration safety and live tier | 6 | 28 | In progress — steps 4.2 and 4.3 under way, **runs after Phase 6**, see the amendment there |
-| 5 | Portability and external adapters | 4 | 20 | Not started — **runs after Phase 6** |
-| 6 | LLM layer | 5 | 19 | In progress — **pulled forward, runs after Phase 3** |
+| 4 | Migration safety and live tier | 6 | 28 | **Complete** (PR #7) — `DJM-001`…`DJM-010`, the live tier, and lock classification measured against a real `pg_locks` |
+| 5 | Portability and external adapters | 4 | 20 | In progress — step 5.1 under way |
+| 6 | LLM layer | 5 | 19 | **Complete** (PR #6) — **pulled forward, ran after Phase 3** |
 | 7 | Distribution | 3 | 10 | Not started |
 | | **Total** | **52** | **235** | |
 
