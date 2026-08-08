@@ -5296,6 +5296,56 @@ cost is real, so it stays opt-in, sandboxed, and time-limited.
   `run_command` callers, which pass no flags. Each flag was verified by
   removing it and watching the behaviour it protects fail. Mutation **74/74**.
 - **4.1.3** — `LiveContext`: Django version, resolved settings, database engine, migration state.
+
+  **Done.** `src/djaudit/live/context.py` asks the target's own Django what it
+  is, over a `manage.py` bootstrap, and returns `LiveContext | Unavailable`.
+  59 tests, mutation 76/76.
+
+  The mechanism changed once, on evidence. The obvious route is
+  `manage.py shell -v 0 -c`, and it worked on a scratch project — then failed
+  on the first test project with a Postgres `ENGINE`, because `shell` loads the
+  app registry *and* opens the database backend, so a project whose driver is
+  absent cannot report its own Django version. That is the CI state of all
+  three benchmark corpora, and not one of the ten questions needs a database.
+  So the script `runpy`s the project's own `manage.py` with
+  `execute_from_command_line` monkeypatched to raise: everything before that
+  call happens — `.env` reads, `os.environ.setdefault` — and nothing after it
+  does. Verified against both `manage.py` shapes and against Postgres settings
+  with no `psycopg` installed. A counterfactual confirms the interception is
+  load-bearing: removing it fails nine tests.
+
+  **`manage.py diffsettings` would have answered almost every question in one
+  call, and is never used.** Its output carries `SECRET_KEY`, database
+  passwords, hosts and users; answers become evidence, evidence is written into
+  SARIF, and SARIF is uploaded to code scanning and retained. `QUESTIONS` is
+  therefore an allowlist of ten named facts, mirroring `PASSTHROUGH` in the
+  runner, and `DATABASES` is reduced to `ENGINE` *on the target's side* so no
+  password ever crosses the pipe. A rule that must judge a secret asks for a
+  predicate, not the value.
+
+  Three defects the tests found, each worth recording:
+
+  - Django settings are lazy, so a broken settings module produced ten
+    per-question problems instead of one traceback. `settings.SETTINGS_MODULE`
+    is now touched once before the loop.
+  - A `print()` in `settings.py` lands on stdout in front of any payload even at
+    `-v 0`, so the sentinel frame is required rather than defensive. The
+    corollary is that the target can *forge* the frame, since its code runs
+    first; a forged reply of the wrong shape is now declined instead of
+    crashing on the first attribute access.
+  - `test_a_reply_of_the_wrong_shape_is_declined` called `inspect_target` on a
+    path that did not exist, so it took the missing-file branch and never
+    reached the guard it was named for — it passed with the guard deleted.
+    Replaced by tests that reach the branch through a real target, with a
+    control proving the forged frame is what got parsed.
+
+  Frame integrity is now asserted in both directions, because dropping the
+  `start < 0 or end < 0` guard is survivable in the general case and fatal in a
+  specific one: with `OPEN` present, `CLOSE` missing and a trailing newline, the
+  unguarded slice trims to valid JSON and a **truncated** reply reads as a whole
+  one. The runner truncates at `OUTPUT_LIMIT`, so that is an arrival, not a
+  hypothesis.
+
 - **4.1.4** — Graceful degradation — every live rule declares a static fallback, and absence of the live tier is reported, never silently ignored.
 - **4.1.5** — `--live` / `--no-live` CLI flags, defaulting to off, with a clear consent message explaining that target code will be executed.
 

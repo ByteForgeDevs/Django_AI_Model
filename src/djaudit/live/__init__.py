@@ -6,16 +6,20 @@ it, we run the target's interpreter on purpose, and every module here is
 written as though the target were hostile.
 """
 
+from djaudit.live.context import LiveContext, Unavailable, inspect_target
 from djaudit.live.interpreter import Creator, Interpreter, Rejection, Search, find_interpreter
 from djaudit.live.runner import Outcome, probe, run_command, run_python
 
 __all__ = [
     "Creator",
     "Interpreter",
+    "LiveContext",
     "Outcome",
     "Rejection",
     "Search",
+    "Unavailable",
     "find_interpreter",
+    "inspect_target",
     "probe",
     "run_command",
     "run_python",
