@@ -6261,7 +6261,48 @@ rules come first; the live tier is then built for consumers that exist.
 
 ### Step 4.5 — Deployment check adapter
 
-- **4.5.1** — `manage.py check --deploy` adapter, normalising Django's own warnings into our schema.
+- **4.5.1** — `manage.py check --deploy` adapter, normalising Django's own
+  warnings into our schema. **Done.**
+
+  Django's deployment check knows one thing our static tier structurally
+  cannot: it reads settings after every import, override and environment
+  variable has resolved, so a `SECURE_SSL_REDIRECT` assembled at runtime is
+  just a value to it. Running it is cheap and declining to would be pride.
+
+  **Its output is designed for a terminal, and every convenient assumption
+  about it is false.** Measured against Django 6.0: the report goes to
+  **stderr** when there are issues and to **stdout** when there are none, so a
+  reader watching one stream gets either the findings or the all-clear but
+  never both. The exit code is **0 for a project full of security warnings**
+  and non-zero only at `--fail-level` or above. And a project that cannot be
+  imported dies with a traceback -- no sections, no summary, nothing that
+  parses -- which a careless reader scores as a clean bill of health for a
+  project it never loaded.
+
+  So the **summary line is what is trusted**, not the exit code and not the
+  stream. It is written by the same code path that writes the body, and its
+  absence means no report was produced. Both streams are joined and parsed;
+  the exit code is deliberately never consulted, because a model error exits 1
+  while printing the most useful report of all, and that run is tested against
+  real Django rather than argued about.
+
+  The format was taken from `django/core/checks/messages.py` and
+  `django/core/management/base.py` rather than inferred: five fixed sections,
+  a `(id) ` that is **omitted entirely** when a check has none, and a hint that
+  is a tab-indented continuation of the previous line rather than a message of
+  its own. `--no-color` was measured to beat both `--force-color` and
+  `DJANGO_COLORS`.
+
+  **`SILENCED_SYSTEM_CHECKS` is the limitation, and it is the argument for our
+  static tier.** A silenced check leaves the body entirely; only the footer's
+  count moves. Django will not say which id was silenced, so a project can
+  quiet its deployment check without quieting the risk -- and our `DJS` rules,
+  which read the settings source instead of asking Django, still see it.
+
+  Mutation testing finished at 45/45, and its first run caught a parametrized
+  test that iterated `SECTIONS.items()` to prove `SECTIONS` was right: it built
+  its input from the constant it was checking, so a section named `GRUMBLES`
+  would have satisfied it.
 - **4.5.2** — Deduplication against our static `DJS` findings — when Django and djaudit agree, report once with both as evidence.
 - **4.5.3** — `DJS-028` gap report: settings Django flags that our static tier missed. A self-auditing rule that measures our own recall.
 
