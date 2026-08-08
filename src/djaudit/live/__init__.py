@@ -7,5 +7,16 @@ written as though the target were hostile.
 """
 
 from djaudit.live.interpreter import Creator, Interpreter, Rejection, Search, find_interpreter
+from djaudit.live.runner import Outcome, probe, run_command, run_python
 
-__all__ = ["Creator", "Interpreter", "Rejection", "Search", "find_interpreter"]
+__all__ = [
+    "Creator",
+    "Interpreter",
+    "Outcome",
+    "Rejection",
+    "Search",
+    "find_interpreter",
+    "probe",
+    "run_command",
+    "run_python",
+]

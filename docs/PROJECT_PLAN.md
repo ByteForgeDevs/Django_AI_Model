@@ -5223,6 +5223,56 @@ cost is real, so it stays opt-in, sandboxed, and time-limited.
   `NamedTuple`s so immutability is a property of the type rather than two
   keyword arguments a reader has to trust were passed.
 - **4.1.2** — Subprocess runner with hard timeout, output capture, and no inherited secrets.
+  **Done** — `src/djaudit/live/runner.py`, 55 tests, mutation **71/71**.
+  Every test runs a real process: this module exists for what happens when a
+  subprocess misbehaves, and a mocked `Popen` would only prove we can mock
+  `Popen`. It is exercised against `self_check()`, djaudit's own interpreter
+  shaped as an `Interpreter`, because 4.1.1 refuses ours as a *target* by
+  design and yet the runner has to be pointed at something that really exists.
+
+  **The hard timeout is enforced on the process group, not the process.**
+  `subprocess.run`'s `timeout` kills only what it started. `manage.py` spawns
+  children, and a child that outlives its parent keeps our pipes open, so the
+  read after the kill blocks on a pipe nobody will ever close — a timeout that
+  hangs. Measured rather than argued: a target whose grandchild sleeps for 120
+  seconds returns in 3.0s under a 3s budget, and the grandchild is confirmed
+  dead afterwards.
+
+  **A guard was added after the mutation harness killed itself, its parent and
+  the shell that started it.** The mutant blanked `"posix"` in
+  `start_new_session=os.name == "posix"`, which puts the child in *our* process
+  group; `_terminate` then sent `SIGKILL` to that group. The run died with no
+  output, leaving a mutant in the working tree, and a second run mutated the
+  mutant. The fix is `_in_its_own_group`, which asks the kernel whether the
+  child's group is ours rather than re-deriving `os.name` a second time in a
+  second function. The two expressions agreed only by coincidence, and the cost
+  of them ever disagreeing is a developer's terminal.
+
+  **A test that asserted an absence was passing against a broken runner.** The
+  orphan check scanned `ps -eo args` for a marker planted in the grandchild's
+  command line, and `ps` truncates that column to the terminal width, so the
+  marker sat past the cut and was never found — the assertion held whether or
+  not anything had been killed. It now has the grandchild record its own pid
+  and asks the kernel with signal 0, and there is a control test proving the
+  liveness check can see a live process. Verified by running the corrected test
+  against a deliberately broken runner and watching it fail.
+
+  **The environment is built from nothing rather than copied and filtered.** A
+  CI job's environment holds deployment tokens and cloud keys, and handing them
+  to a subprocess that runs arbitrary code out of the repository under audit
+  would make djaudit a credential exfiltration path — a supply-chain
+  vulnerability introduced by a security tool. Only `PASSTHROUGH` crosses, a
+  caller may not set `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP` or
+  `DJANGO_SETTINGS_MODULE`, and `-I` means the interpreter would disregard them
+  even if one arrived by a route this module did not anticipate.
+
+  Two rounds of survivors were tests that built their expectation from the
+  constant they were checking and so could not notice the constant being wrong;
+  `PASSTHROUGH` and `REFUSED` are now asserted literally. One was `{timeout:g}`
+  tested with `timeout=1`, which formats identically with and without the `g` —
+  it takes `1.0` to tell them apart. The last two were the `os.name != "posix"`
+  guard, unreachable on this platform and reached deliberately by a test that
+  fakes `nt`, because on Windows `os.getpgid` does not exist at all.
 - **4.1.3** — `LiveContext`: Django version, resolved settings, database engine, migration state.
 - **4.1.4** — Graceful degradation — every live rule declares a static fallback, and absence of the live tier is reported, never silently ignored.
 - **4.1.5** — `--live` / `--no-live` CLI flags, defaulting to off, with a clear consent message explaining that target code will be executed.
