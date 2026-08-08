@@ -205,6 +205,100 @@ def _read_choices(node: ast.expr) -> tuple[Any, bool]:
     return value, True
 
 
+def field_from_call(
+    name: str,
+    call: ast.Call,
+    bindings: dict[str, str],
+    *,
+    span: tuple[int, int] | None = None,
+    assume_field: bool = False,
+) -> FieldNode | None:
+    """One field from the call that declares it, or ``None`` if it is not one.
+
+    Split out of :func:`extract_fields` because a migration declares fields the
+    same way a model does but nowhere near a class body -- ``AddField(...,
+    field=models.CharField(max_length=10))`` is the identical expression under a
+    keyword. Reading it through a second, migration-shaped parser would give two
+    answers to "is this column nullable", and the two would drift on the first
+    field class that sets a non-obvious default.
+
+    ``assume_field`` skips the name test. In a class body the name is all we
+    have, so ``field_kind``'s ``*Field`` convention is the only thing standing
+    between a field and ``objects = Manager()``. Under a migration's ``field=``
+    keyword there is no ambiguity at all -- Django accepts nothing but a field
+    instance there -- and the convention is merely wrong: it drops
+    ``mptt.fields.TreeForeignKey`` and ``taggit.managers.TaggableManager``,
+    which between them are 55 of NetBox's 681 ``AddField`` operations.
+
+    ``span`` defaults to the call's own; a class body passes the whole
+    statement's, so a multi-line assignment still reports from ``x =``.
+    """
+    kind = field_kind(call, bindings)
+    if kind is None:
+        if not assume_field:
+            return None
+        dotted = dotted_name(call.func)
+        if dotted is None:
+            return None
+        kind = dotted.rpartition(".")[2] or dotted
+
+    start, end = span or (call.lineno, call.end_lineno or call.lineno)
+
+    keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg is not None}
+    field = FieldNode(
+        name=name,
+        kind=kind,
+        dotted=resolve_dotted(bindings, dotted_name(call.func) or kind),
+        lineno=start,
+        end_lineno=end,
+        is_django=kind in DJANGO_FIELDS or kind in CONTRIB_FIELDS,
+        is_relation=kind in RELATION_FIELDS,
+        args=tuple(call.args),
+        kwargs=keywords,
+        node=call,
+    )
+
+    unreadable: list[str] = []
+    for kwarg, default in _defaults(kind).items():
+        if kwarg not in keywords:
+            setattr(field, kwarg, default)
+            continue
+        resolved = literal(keywords[kwarg])
+        if isinstance(resolved, bool):
+            setattr(field, kwarg, resolved)
+        else:
+            # A flag computed at import time -- from a setting, a feature
+            # check -- is not a flag we can report on. Django's default is
+            # recorded so the field is still usable, and the name is listed
+            # so a rule can decline to speak about it.
+            setattr(field, kwarg, default)
+            unreadable.append(kwarg)
+
+    if "max_length" in keywords:
+        resolved = literal(keywords["max_length"])
+        if isinstance(resolved, int):
+            field.max_length = resolved
+        else:
+            unreadable.append("max_length")
+
+    if "default" in keywords:
+        field.has_default = True
+        field.default = literal(keywords["default"])
+        if field.default is UNKNOWN:
+            # A callable default is the normal case, not a failure:
+            # ``default=timezone.now`` is exactly right and unreadable.
+            unreadable.append("default")
+
+    if "choices" in keywords:
+        field.has_choices = True
+        field.choices, readable = _read_choices(keywords["choices"])
+        if not readable:
+            unreadable.append("choices")
+
+    field.unreadable = tuple(unreadable)
+    return field
+
+
 def extract_fields(class_node: ast.ClassDef, bindings: dict[str, str]) -> dict[str, FieldNode]:
     """Every field declared directly in this class body, in declaration order.
 
@@ -217,62 +311,14 @@ def extract_fields(class_node: ast.ClassDef, bindings: dict[str, str]) -> dict[s
         value = stmt.value
         if not isinstance(value, ast.Call):
             continue
-        kind = field_kind(value, bindings)
-        if kind is None:
-            continue
-
-        keywords = {kw.arg: kw.value for kw in value.keywords if kw.arg is not None}
-        field = FieldNode(
-            name=name,
-            kind=kind,
-            dotted=resolve_dotted(bindings, dotted_name(value.func) or kind),
-            lineno=stmt.lineno,
-            end_lineno=stmt.end_lineno or stmt.lineno,
-            is_django=kind in DJANGO_FIELDS or kind in CONTRIB_FIELDS,
-            is_relation=kind in RELATION_FIELDS,
-            args=tuple(value.args),
-            kwargs=keywords,
-            node=value,
+        field = field_from_call(
+            name,
+            value,
+            bindings,
+            span=(stmt.lineno, stmt.end_lineno or stmt.lineno),
         )
-
-        unreadable: list[str] = []
-        for kwarg, default in _defaults(kind).items():
-            if kwarg not in keywords:
-                setattr(field, kwarg, default)
-                continue
-            resolved = literal(keywords[kwarg])
-            if isinstance(resolved, bool):
-                setattr(field, kwarg, resolved)
-            else:
-                # A flag computed at import time -- from a setting, a feature
-                # check -- is not a flag we can report on. Django's default is
-                # recorded so the field is still usable, and the name is listed
-                # so a rule can decline to speak about it.
-                setattr(field, kwarg, default)
-                unreadable.append(kwarg)
-
-        if "max_length" in keywords:
-            resolved = literal(keywords["max_length"])
-            if isinstance(resolved, int):
-                field.max_length = resolved
-            else:
-                unreadable.append("max_length")
-
-        if "default" in keywords:
-            field.has_default = True
-            field.default = literal(keywords["default"])
-            if field.default is UNKNOWN:
-                # A callable default is the normal case, not a failure:
-                # ``default=timezone.now`` is exactly right and unreadable.
-                unreadable.append("default")
-
-        if "choices" in keywords:
-            field.has_choices = True
-            field.choices, readable = _read_choices(keywords["choices"])
-            if not readable:
-                unreadable.append("choices")
-
-        field.unreadable = tuple(unreadable)
+        if field is None:
+            continue
         fields[name] = field
 
     return fields

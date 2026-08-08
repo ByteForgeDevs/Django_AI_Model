@@ -5190,7 +5190,26 @@ cost is real, so it stays opt-in, sandboxed, and time-limited.
 
 ### Step 4.2 — Migration graph
 
-- **4.2.1** — Parse migration files: `dependencies`, `operations`, `atomic`, `initial`.
+**Ordering note.** Step 4.2 and Step 4.3 are taken before Step 4.1. The live
+tier exists in this phase to answer one question — what SQL does this migration
+emit — and 4.1.4 requires that *every live rule declares a static fallback*. A
+runner built first would have no caller, no fallback to declare, and its tests
+would be written against a hypothetical. The migration graph and the static
+rules come first; the live tier is then built for consumers that exist.
+
+- **4.2.1** — Parse migration files: `dependencies`, `operations`, `atomic`, `initial`. **Done** —
+  `src/djaudit/migrations/{nodes,parse}.py`, 44 tests, mutation **29/29**.
+  Parses **875 of 875** migrations across the three corpora with zero unreadable
+  attributes and zero unclassified Django operations; the single remaining
+  `UNKNOWN` is pretix's own `CleanHierarkeyDuplicates`, which is the correct
+  answer. `extract_fields` was split so migrations read `field=` through the
+  model graph's own field reader rather than a second, drifting copy — under
+  `field=` the name convention is dropped as unnecessary and wrong, recovering
+  55 of NetBox's 681 `AddField` operations (`TreeForeignKey`, `TaggableManager`).
+  Two real defects found by their own tests: a dataclass attribute named `field`
+  shadowed `dataclasses.field` so the module did not import at all, and
+  `_migration_class` preferred the resolved base over the name, handing back an
+  empty `ProjectMigration` helper instead of the class Django actually loads.
 - **4.2.2** — Build the dependency graph; detect multiple leaf nodes and conflicts.
 - **4.2.3** — Classify operations: schema, data, index, constraint, `RunPython`, `RunSQL`, `SeparateDatabaseAndState`.
 
