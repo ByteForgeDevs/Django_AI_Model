@@ -6342,7 +6342,41 @@ rules come first; the live tier is then built for consumers that exist.
   parameter to `Report` now enforces at type-check time what a runtime guard
   had been asserting. 47/48, the one survivor documented as equivalent because
   `Unknown` answers nothing to every question by design.
-- **4.5.3** — `DJS-028` gap report: settings Django flags that our static tier missed. A self-auditing rule that measures our own recall.
+- **4.5.3** — `DJS-028` gap report: settings Django flags that our static tier
+  missed. A self-auditing rule that measures our own recall. **Done.**
+
+  Every other rule reports a defect in the project. This one reports a defect
+  in *us*, in the only place it can be measured honestly: against a second
+  opinion, on the reader's own settings, produced by the framework itself.
+
+  **A gap is a check that landed on nothing of ours, not a check we have no
+  rule for** -- the wider definition, and the more interesting half is the one
+  the narrow definition would hide. `DJS-006` reads `SECURE_SSL_REDIRECT` out
+  of the settings module and emits nothing when the value is assembled from the
+  environment; Django, which sees what the environment produced, says it is
+  off. That is not a missing rule, it is our rule missing, and from the
+  reader's side both are one sentence: Django found something here and we did
+  not.
+
+  This forced a real change to the engine. The rule's subject *is* the outcome
+  of every other rule, so running it in the main pass would read an empty gap
+  set every time. It runs in a **second pass after corroboration**, for the
+  same reason the engine assigns fingerprints rather than the rules doing it:
+  the answer requires seeing the whole set. `AFTER_CORROBORATION` is an
+  explicit set of one rather than a general mechanism, because a general
+  mechanism for one rule is a general mechanism for nothing.
+
+  Its `fallback` is unusually blunt and deliberately so: without the live tier
+  the gap is not smaller, it is **unmeasured**. A static run reports zero
+  gaps, and zero there means nobody was asked.
+
+  Two properties the rule refuses. A check whose message it cannot quote is not
+  reported at all, because a finding with no evidence is the one thing this
+  tool must not emit. And the location is the settings module, never a line
+  number -- Django reports none, and inventing one would be exactly the
+  fabrication this family exists to prevent.
+
+  16/16 mutants killed. `DJS` is now 28 rules and the catalogue 78.
 
 ### Step 4.6 — Benchmark and document
 
@@ -7293,12 +7327,13 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **77 rules are
+document specifies, and most of it is still only specified: **78 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-and all ten of Phase 4's migration rules. `DJM-010` is the first **live**
-rule: the first that reads the SQL a migration emits rather than predicting it
-from the operation.
+all ten of Phase 4's migration rules, and its deployment-check gap rule.
+`DJM-010` is the first **live** rule: the first that reads the SQL a migration
+emits rather than predicting it from the operation. `DJS-028` is the first rule
+whose subject is this tool rather than the project it is auditing.
 
 The step and substep counts are verified against the document itself. The
 implemented count, and each phase's status, are verified against

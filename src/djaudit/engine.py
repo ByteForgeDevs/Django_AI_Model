@@ -17,6 +17,14 @@ from djaudit.models import Confidence, Family, Finding, Severity, Tier
 from djaudit.registry import Rule, select
 from djaudit.suppression import is_suppressed
 
+AFTER_CORROBORATION = frozenset({"DJS-028"})
+"""Rules whose input is the other rules' output, so they run in a second pass.
+
+Kept as an explicit set rather than a flag on `RuleMeta` because there is one
+of them and a general mechanism would be a general mechanism for nothing. If a
+second one appears, that is the moment to build one.
+"""
+
 
 @dataclass
 class RunResult:
@@ -155,7 +163,21 @@ def _audit(
     )
     collected: list[Finding] = []
 
-    for rule_cls in selected:
+    # `DJS-028` reports the deployment checks that landed on nothing of ours,
+    # so its subject is the outcome of every other rule. It runs in a second
+    # pass for the same reason the engine assigns fingerprints rather than the
+    # rules doing it: the answer requires seeing the whole set.
+    deferred = [r for r in selected if r.meta.id in AFTER_CORROBORATION]
+    for rule_cls in [r for r in selected if r not in deferred]:
+        result.rules_run += 1
+        try:
+            collected.extend(_run_rule(rule_cls, ctx))
+        except Exception as exc:  # deliberate: rule isolation is the point
+            result.rule_errors[rule_cls.meta.id] = f"{type(exc).__name__}: {exc}"
+
+    collected, result.corroborated = _corroborate(ctx, collected)
+
+    for rule_cls in deferred:
         result.rules_run += 1
         try:
             collected.extend(_run_rule(rule_cls, ctx))
@@ -163,7 +185,6 @@ def _audit(
             result.rule_errors[rule_cls.meta.id] = f"{type(exc).__name__}: {exc}"
 
     result.total_raw = len(collected)
-    collected, result.corroborated = _corroborate(ctx, collected)
 
     kept: list[Finding] = []
     for finding in collected:
@@ -224,6 +245,7 @@ def _corroborate(ctx: ProjectContext, findings: list[Finding]) -> tuple[list[Fin
         return findings, 0
 
     result = corroborate(findings, report)
+    ctx.deployment_report = report
     ctx.deployment_gaps = result.unclaimed
     return list(result.findings), result.merged
 

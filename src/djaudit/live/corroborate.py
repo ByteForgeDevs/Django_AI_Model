@@ -79,8 +79,12 @@ class Corroboration(NamedTuple):
     """Django check ids that landed on a finding of ours."""
 
     unclaimed: frozenset[str]
-    """Django check ids with no rule of ours to land on. `DJS-028` reports
-    these as our own recall gap; nothing else consumes them."""
+    """Security checks Django reported that landed on no finding of ours.
+
+    Either we have no rule for it, or we have one and it did not fire on this
+    project. `DJS-028` reports both, because from the reader's side they are
+    the same sentence: Django found something here and we did not.
+    """
 
     @property
     def merged(self) -> int:
@@ -123,10 +127,14 @@ def corroborate(
         confirmed.update(ids)
         merged.append(_confirm(finding, report, ids))
 
+    # A gap is a check that landed on nothing of ours, which is a wider and
+    # more useful set than "a check we have no rule for". A rule can exist and
+    # still miss: `DJS-006` reads `SECURE_SSL_REDIRECT` out of the source and
+    # cannot settle it when it is assembled from the environment, and Django,
+    # which sees the resolved value, can. That is a recall gap too, and it is
+    # the more interesting one because the fix is ours rather than unwritten.
     unclaimed = frozenset(
-        check
-        for check in report.ids()
-        if check.startswith("security.") and check not in CORROBORATES
+        check for check in report.ids() if check.startswith("security.") and check not in confirmed
     )
     return Corroboration(tuple(merged), frozenset(confirmed), unclaimed)
 

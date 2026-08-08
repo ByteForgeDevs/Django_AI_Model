@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from djaudit.dataflow.querysets import QuerysetValue
     from djaudit.dataflow.scopes import Scope
     from djaudit.graph.nodes import ModelGraph
+    from djaudit.live.checks import Report
+    from djaudit.live.checks import Unknown as ChecksUnknown
     from djaudit.live.context import LiveContext
     from djaudit.migrations.graph import MigrationGraph
     from djaudit.migrations.state import Applied
@@ -110,6 +112,13 @@ class ProjectContext:
     needs the *interpreter* to run anything, and re-deriving it would let a
     rule execute an environment other than the one that was disclosed and
     consented to.
+    """
+
+    deployment_report: Report | ChecksUnknown | None = None
+    """What `manage.py check --deploy` said, when the live tier ran it.
+
+    Imported only under `TYPE_CHECKING`: a static audit must not load
+    `djaudit.live`, and `tests/test_import_cost.py` fails if it starts to.
     """
 
     deployment_gaps: frozenset[str] = frozenset()

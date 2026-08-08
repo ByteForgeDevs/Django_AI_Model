@@ -183,8 +183,15 @@ class TestWhatWeDoNotCover:
         result = corroborate([], report_of("?: (security.W022) You have not set it."))
         assert result.unclaimed == {"security.W022"}
 
-    def test_a_check_we_do_cover_is_not_a_gap(self) -> None:
-        assert corroborate([], report_of(DEBUG_CHECK)).unclaimed == frozenset()
+    def test_a_check_that_landed_on_a_finding_is_not_a_gap(self) -> None:
+        assert corroborate([finding("DJS-001")], report_of(DEBUG_CHECK)).unclaimed == frozenset()
+
+    def test_a_rule_that_exists_and_did_not_fire_is_still_a_gap(self) -> None:
+        """The wider definition, and the more interesting half of it. We have
+        `DJS-001` for `DEBUG`; if it did not fire on this project and Django
+        says `DEBUG` is on, the rule missed rather than the rule being
+        unwritten. From the reader's side those are the same sentence."""
+        assert corroborate([], report_of(DEBUG_CHECK)).unclaimed == {"security.W018"}
 
     def test_a_gap_is_reported_even_with_no_finding_to_merge(self) -> None:
         """The whole point: we found nothing, Django found something."""
