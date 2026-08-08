@@ -6381,6 +6381,46 @@ rules come first; the live tier is then built for consumers that exist.
 ### Step 4.6 — Benchmark and document
 
 - **4.6.1** — Migration fixture project with unsafe and safe migration pairs.
+  **Done.**
+
+  The substep's premise turned out to be wrong, and finding that out was the
+  substep. It was written expecting to expose cases the static tier judges
+  badly, so the live tier would have something to correct. There are none among
+  Django's built-in fields. Narrowing a `CharField` is reported, widening is
+  not, `CharField` to `TextField` is not, `IntegerField` to `BigIntegerField`
+  is — and PostgreSQL agrees with every one of those verdicts.
+
+  So the fixture became a cross-check instead of a counterexample. `VARIANTS`
+  in `tests/live/pairs.py` is a table of claims about PostgreSQL, and each is
+  now checked twice by different means: once against our rule, once against a
+  server. **Whether a statement rewrote the table is read from
+  `pg_class.relfilenode`, not from a stopwatch** — a duration threshold would
+  have made it a benchmark of the test runner, and would have passed on an
+  empty table for both halves of every pair. Flipping one entry in the table
+  fails both tests, for two independent reasons.
+
+  Measured on 2,000,000 rows, a 161 MB table: `ADD COLUMN ... NOT NULL DEFAULT`
+  3.2 ms, widening 3.1 ms, `TYPE text` 3.9 ms — none rewriting; `TYPE bigint`
+  3,287 ms and narrowing 4,447 ms, both rewriting. **All five take an
+  AccessExclusive lock**, which is the entire argument for classifying on two
+  axes: a rule reporting on lock mode alone would report all five identically,
+  and a reader told that widening a `CharField` will take their site down
+  learns to ignore the tool.
+
+  One thing the static tier cannot know, and the fixture pins it: a migration
+  that has already run. After `migrate`, the live rule goes silent and the
+  static rule goes on reporting the leaf. That is the tiers disagreeing by
+  design rather than by error.
+
+  A separate measurement worth keeping: **Django resolves a callable default
+  before it writes SQL.** `default=uuid.uuid4` is emitted as a literal, so an
+  `AddField` never emits a volatile default however the model is written — the
+  volatility patterns in `live/locks.py` are aimed at hand-written `RunSQL`,
+  and would be dead code if they were aimed here.
+
+  The static half of the module carries no `postgres` marker, so the claims
+  about our own rules are checked on every machine; only the claims about
+  PostgreSQL need a server. 26 tests.
 - **4.6.2** — Live tier integration test using a real Postgres service container in CI.
 - **4.6.3** — Verify lock classification against actual Postgres `pg_locks` output.
 - **4.6.4** — `docs/rules/DJM.md` and `docs/live-tier.md`, including the security model for executing target code.

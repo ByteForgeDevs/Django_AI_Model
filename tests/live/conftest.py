@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import subprocess
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -38,11 +38,8 @@ def _admin(sql: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.fixture
-def live_project(tmp_path: Path) -> Iterator[Path]:
-    """A Django project wired to a database nothing else touches."""
-    from .test_sqlmigrate import build_project
-
+def _isolated(tmp_path: Path, build: Callable[[Path, str], Path]) -> Iterator[Path]:
+    """Build a project against a database nothing else touches."""
     name = f"djaudit_{uuid.uuid4().hex[:12]}"
     created = _admin(f'CREATE DATABASE "{name}"')
     assert created.returncode == 0, created.stderr
@@ -50,7 +47,7 @@ def live_project(tmp_path: Path) -> Iterator[Path]:
     parsed = urlparse(DSN)
     dsn = urlunparse(parsed._replace(path=f"/{name}"))
     try:
-        project = build_project(tmp_path, dsn)
+        project = build(tmp_path, dsn)
         # Recorded so a test can reach the same database directly. Rebuilding
         # it from settings.py would mean parsing our own fixture back out of
         # the file it wrote, and the two would drift.
@@ -60,3 +57,19 @@ def live_project(tmp_path: Path) -> Iterator[Path]:
         # Django's connection is gone with the subprocess, but a failed test
         # can leave one; the drop is forced so teardown cannot itself fail.
         _admin(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+@pytest.fixture
+def live_project(tmp_path: Path) -> Iterator[Path]:
+    """A Django project wired to a database nothing else touches."""
+    from .test_sqlmigrate import build_project
+
+    yield from _isolated(tmp_path, build_project)
+
+
+@pytest.fixture
+def live_pairs(tmp_path: Path) -> Iterator[Path]:
+    """A project whose pending migrations differ only in what they cost."""
+    from .pairs import build_pairs
+
+    yield from _isolated(tmp_path, build_pairs)
