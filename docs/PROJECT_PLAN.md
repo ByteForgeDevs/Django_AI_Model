@@ -6520,7 +6520,43 @@ rules come first; the live tier is then built for consumers that exist.
   Five defects were injected to show each new gate failing: `SHARE` not
   blocking writes, an unmeasured rule, an exemption naming no rule,
   `CONCURRENTLY` back to `Lock.NONE`, and a probe that swallows its timeout.
-- **4.6.4** — `docs/rules/DJM.md` and `docs/live-tier.md`, including the security model for executing target code.
+- **4.6.4** — `docs/rules/DJM.md` and `docs/architecture/live-tier.md`, including the security model for executing target code. **Done.**
+
+  `docs/rules/DJM.md` is generated from the registry by `gen_rule_docs.py` and
+  was already current; `--check` fails the build if it drifts. The new writing
+  is the architecture note, which lands in `docs/architecture/` beside
+  `llm-layer.md` and `dataflow.md` rather than at the top level the plan
+  originally guessed.
+
+  Its subject is the thing that makes this tier different in kind rather than
+  in degree: **the audited project's code executes on the auditing machine.**
+  `settings.py` runs, every module it imports runs, and anything a repository
+  chooses to do at import time happens with the file system and network access
+  of whoever typed the command. The note states why that is worth doing at all
+  — only Django can say what SQL a migration emits, and only Django can give a
+  second opinion on its own deployment checks, which is 2 of 78 rules — and
+  then states exactly what the subprocess is allowed: 10 environment variables
+  in, 4 refused outright, a 30-second timeout enforced by killing the process
+  group, 1 MiB captured per stream, stdin closed. It records the `PASSTHROUGH`
+  decision settled in 4.6.2, including why no `PG*` variable may ever join it.
+
+  A security note that has gone stale is worse than no note, because a reader
+  who would otherwise go and look instead believes it. So every checkable
+  claim in it is checked by `scripts/check_live_doc.py`, which runs in CI: the
+  cited paths, both variable sets member by member, the timeout, the output
+  ceiling, the number of lock classification rules, and which rules declare
+  `Tier.LIVE`.
+
+  Writing that gate produced the substep's own lesson. Its first draft read
+  constants with `ast.literal_eval`, which cannot evaluate `frozenset({...})`
+  or `1 << 20` — the two shapes `runner.py` actually uses — and returned
+  `None` for both. It reported three problems and would have reported success
+  on a tree where `PASSTHROUGH` had been emptied, because a reader that
+  returns nothing checks nothing. `tests/test_live_doc.py` now pins each
+  reader against the real shape and gives the gate eight defects it must
+  catch, including a `PG*` variable added to the passthrough and a refusal
+  quietly lifted, plus two harmless edits it must tolerate — a gate that fails
+  on reflowed prose gets switched off, and then it is not a gate.
 
 ---
 
