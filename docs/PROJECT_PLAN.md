@@ -6422,6 +6422,55 @@ rules come first; the live tier is then built for consumers that exist.
   about our own rules are checked on every machine; only the claims about
   PostgreSQL need a server. 26 tests.
 - **4.6.2** — Live tier integration test using a real Postgres service container in CI.
+  **Done.**
+
+  The substep began by resolving the open question about `PASSTHROUGH`, and the
+  answer was that it should not change. An audit tool that copied `PGHOST` and
+  `PGPASSWORD` out of its own environment into a subprocess would be handing
+  the target credentials it was never given; the target reads its connection
+  from its own settings, as a real project does. So the fixture writes the DSN
+  into `settings.py` and `PASSTHROUGH` stays as it was.
+
+  **Then CI was checked, and it had been red for five commits.** Every one of
+  those substeps was verified locally against a real database and pushed
+  without looking at the runner, which has none. Three separate defects, all of
+  the same kind — a test that depends on the machine it was written on:
+
+  1. `TestTheDatabaseAliasReachesTheCommand` used the `live_project` fixture
+     with no `postgres` marker, so it errored rather than skipped.
+  2. The consent fixture inherited Django through `system_site_packages`. This
+     machine's system Python has Django 4.2.26 and a runner's has none, so the
+     target could not start Django at all. It installs its own now, which also
+     pins the version instead of inheriting whatever is lying around.
+  3. `interpreter()` defaulted to `/usr/bin/python3`, which needs Django for
+     the handful of tests that actually execute it. It now defaults to the
+     interpreter running the suite, which has Django by dependency.
+
+  Fixing (3) surfaced a fourth: the alias tests then read a *Postgres* project
+  through *our* interpreter, which has no psycopg. They use the target's own
+  virtualenv now — which is what the live tier is for, and reading a target
+  through our environment is the confusion it exists to prevent.
+
+  **The service container found a real bug that a local cluster cannot.**
+  GitHub's `postgres` service requires a password, and `urlparse` does not
+  percent-decode while libpq does. A password containing `@` or a space
+  reached Django as the literal `p%40ss%20word` while `psql` connected with it
+  happily. On a trust-auth cluster nothing notices. To find it, this machine's
+  `pg_hba.conf` was switched to `scram-sha-256` and the suite run against an
+  encoded DSN. The CI password now deliberately contains both characters, so
+  the decoding path is exercised on every push rather than asserted once.
+
+  `scripts/live_gate.py` is what stops the job being decoration. Every live
+  test skips itself without `DJAUDIT_TEST_POSTGRES`, so a typo in the env
+  block would produce a green job that ran nothing — and pytest reports that
+  as `0 failed` in the same words as a full run. The gate reads the JUnit XML
+  and fails on skips, on an empty collection, and on a collection too small to
+  be the suite, because **zero skipped is also true of a suite that never
+  ran**. Demonstrated failing on each: 68 skips with no DSN, and its own tests
+  cover the collapsed and missing-report cases.
+
+  Also fixed here: `migration_project` was missing from the recall gate, so the
+  only fixture with a known answer for `DJM` was scored on no machine but mine.
 - **4.6.3** — Verify lock classification against actual Postgres `pg_locks` output.
 - **4.6.4** — `docs/rules/DJM.md` and `docs/live-tier.md`, including the security model for executing target code.
 

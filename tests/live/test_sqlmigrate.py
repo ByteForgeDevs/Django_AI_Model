@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -105,7 +106,16 @@ RUN_PYTHON = """--
 """
 
 
-def interpreter(executable: Path = Path("/usr/bin/python3")) -> Interpreter:
+def interpreter(executable: Path | None = None) -> Interpreter:
+    """A stand-in for the target's interpreter.
+
+    Defaults to the one running the suite rather than `/usr/bin/python3`.
+    Most callers never execute it, but the handful that do need Django
+    importable, and the system interpreter happens to have it on a development
+    machine and does not on a CI runner. That difference kept the live tests
+    green locally and red on every push for five commits.
+    """
+    executable = executable or Path(sys.executable)
     return Interpreter(
         executable=executable,
         prefix=executable.parent.parent,
@@ -472,7 +482,7 @@ class TestAgainstARealProject:
 def build_project(root: Path, dsn: str) -> Path:
     """A minimal Django project with its own virtualenv, wired to `dsn`."""
     import shutil
-    from urllib.parse import urlparse
+    from urllib.parse import unquote, urlparse
 
     parsed = urlparse(dsn)
     (root / "proj").mkdir(parents=True)
@@ -482,8 +492,10 @@ def build_project(root: Path, dsn: str) -> Path:
         "SECRET_KEY = 'x'\n"
         "INSTALLED_APPS = ['blog']\n"
         "_PG = {'ENGINE': 'django.db.backends.postgresql',\n"
-        f"    'NAME': {(parsed.path or '/postgres')[1:]!r},\n"
-        f"    'USER': {(parsed.username or '')!r},\n"
+        # libpq percent-decodes a URI and `urlparse` does not. See `pairs.py`.
+        f"    'NAME': {unquote((parsed.path or '/postgres')[1:])!r},\n"
+        f"    'USER': {unquote(parsed.username or '')!r},\n"
+        f"    'PASSWORD': {unquote(parsed.password or '')!r},\n"
         f"    'HOST': {(parsed.hostname or '')!r},\n"
         f"    'PORT': {str(parsed.port or '')!r}}}\n"
         "DATABASES = {'default': _PG, 'replica': dict(_PG)}\n"

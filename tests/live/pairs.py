@@ -42,7 +42,7 @@ and why they would be dead code if they were aimed here.
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 SETTINGS = """\
 SECRET_KEY = 'x'
@@ -51,6 +51,7 @@ DATABASES = {{'default': {{
     'ENGINE': 'django.db.backends.postgresql',
     'NAME': {name!r},
     'USER': {user!r},
+    'PASSWORD': {password!r},
     'HOST': {host!r},
     'PORT': {port!r},
 }}}}
@@ -160,8 +161,14 @@ def build_pairs(root: Path, dsn: str, variant: str = REWRITE, *, venv: bool = Tr
     (root / "proj" / "__init__.py").write_text("")
     (root / "proj" / "settings.py").write_text(
         SETTINGS.format(
-            name=(parsed.path or "/postgres")[1:],
-            user=parsed.username or "",
+            # libpq percent-decodes a URI and `urlparse` does not, so a
+            # password containing `@` or a space reaches Django as the literal
+            # `p%40ss%20word` while `psql` connects with it happily. On a
+            # trust-auth cluster nothing notices; against a CI service
+            # container every live test fails as though the server were down.
+            name=unquote((parsed.path or "/postgres")[1:]),
+            user=unquote(parsed.username or ""),
+            password=unquote(parsed.password or ""),
             host=parsed.hostname or "",
             port=str(parsed.port or ""),
         )

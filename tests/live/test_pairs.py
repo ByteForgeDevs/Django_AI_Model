@@ -81,6 +81,52 @@ class TestThePairIsAPair:
         assert "default='web'" in text
 
 
+class TestTheGeneratedSettingsCanReachTheDatabase:
+    """A local cluster on trust auth cannot notice a dropped password.
+
+    CI is where it would be noticed, and the failure there is a connection
+    refused with no hint that the fixture -- not the container -- was wrong.
+    """
+
+    def settings(self, tmp_path: Path, dsn: str) -> str:
+        root = build_pairs(tmp_path, dsn, venv=False)
+        return (root / "proj" / "settings.py").read_text()
+
+    def test_it_carries_every_part_of_the_dsn(self, tmp_path: Path) -> None:
+        written = self.settings(tmp_path, "postgresql://bob:s3cret@db.example:6543/shopdb")
+        assert "'USER': 'bob'" in written
+        assert "'PASSWORD': 's3cret'" in written
+        assert "'HOST': 'db.example'" in written
+        assert "'PORT': '6543'" in written
+        assert "'NAME': 'shopdb'" in written
+
+    def test_a_dsn_without_a_password_writes_an_empty_one(self, tmp_path: Path) -> None:
+        """The local shape. It has to stay working, so the assertion above
+        cannot be satisfied by making a password mandatory."""
+        written = self.settings(tmp_path, "postgresql://djaudit@127.0.0.1:55432/app")
+        assert "'PASSWORD': ''" in written
+
+    def test_it_percent_decodes_the_way_libpq_does(self, tmp_path: Path) -> None:
+        """`urlparse` does not decode and libpq does, so `psql` connects with a
+        password Django is handed as a literal. Measured: it fails
+        authentication against a scram-sha-256 cluster and nothing on a
+        trust-auth one, which is why this went unnoticed until CI was built.
+        """
+        written = self.settings(tmp_path, "postgresql://c%20i:p%40ss%20word@h:1/my%20db")
+        assert "'PASSWORD': 'p@ss word'" in written
+        assert "'USER': 'c i'" in written
+        assert "'NAME': 'my db'" in written
+        assert "%40" not in written
+
+    def test_the_settings_module_is_valid_python(self, tmp_path: Path) -> None:
+        """A quoting mistake in a password would produce a file that imports
+        nowhere, and every live test would fail as though the server were down.
+        """
+        import ast
+
+        ast.parse(self.settings(tmp_path, "postgresql://u:it's@h:1/d"))
+
+
 class TestTheStaticTierSeparatesThem:
     def test_the_rewriting_leaf_is_reported(self, built: Path) -> None:
         found = migration_findings(built)

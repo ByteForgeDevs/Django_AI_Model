@@ -9,6 +9,8 @@ and not getting it leave the audit in a state that pretends otherwise.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -28,16 +30,29 @@ def project(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     A genuine `pyvenv.cfg` under the target, because `find_interpreter` reads
     one and a directory merely shaped like a virtualenv would not exercise it.
-    Django is inherited rather than installed: `pip install django` per module
-    costs seconds, and naming its runtime dependencies by hand is a list that
-    goes stale. The interpreter is still the target's own, which is the property
-    the live tier turns on.
+    The interpreter is still the target's own, which is the property the live
+    tier turns on.
+
+    Django is installed rather than inherited. It used to be inherited through
+    `system_site_packages`, which is free and works on a machine whose system
+    Python happens to have Django -- and silently produces a target that cannot
+    start Django at all on one that does not. Every failure it caused named a
+    missing module rather than the missing install, and CI stayed red for five
+    commits while the same tests passed locally.
     """
     import venv
 
     root = tmp_path_factory.mktemp("consent")
     make_project(root, settings=SETTINGS + f"\nMARKER = {SENTINEL!r}\n", manage=MANAGE)
     venv.EnvBuilder(with_pip=False, symlinks=True, system_site_packages=True).create(root / ".venv")
+
+    uv = shutil.which("uv")
+    assert uv is not None, "uv is required to give the target its Django"
+    subprocess.run(
+        [uv, "pip", "install", "-q", "--python", str(root / ".venv" / "bin" / "python"), "django"],
+        check=True,
+        timeout=900,
+    )
     return root / "manage.py"
 
 
@@ -202,6 +217,26 @@ class TestItAsksTheTargetAndUsesTheAnswer:
         interpreter: Interpreter = outcome.context.interpreter
         assert interpreter.executable != Path(sys.executable)
         assert str(interpreter.executable).startswith(str(project.parent))
+
+    def test_its_django_comes_from_its_own_virtualenv(self, project: Path) -> None:
+        """The fixture inherits system site-packages, so on a machine whose
+        system Python has Django this passes without anything being installed
+        -- and the same fixture cannot start Django at all on a runner that
+        does not. Asserting the *path* is what tells those two apart; asserting
+        that Django merely imports cannot.
+        """
+        found = subprocess.run(
+            [
+                str(project.parent / ".venv" / "bin" / "python"),
+                "-c",
+                "import django; print(django.__file__)",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=True,
+        )
+        assert found.stdout.strip().startswith(str(project.parent))
 
 
 class TestTheAuditDoesNotPretend:

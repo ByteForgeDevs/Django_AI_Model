@@ -152,12 +152,79 @@ jobs:
             --summary "$GITHUB_STEP_SUMMARY"
           uv run djaudit eval tests/fixtures/injection_project \
             --summary "$GITHUB_STEP_SUMMARY"
+          uv run djaudit eval tests/fixtures/migration_project \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       # The manifest above proves the controls are silent. It cannot prove they
       # are reachable, and a control the rule never looks at is silent for the
       # wrong reason -- which is how a fixture comes to certify a broken rule.
       - name: prove the recall fixtures' controls are load-bearing
         run: uv run python scripts/fixture_controls_probe.py
+
+  live:
+    name: live tier (real PostgreSQL)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          # Deliberately contains an `@` and a space, both percent-encoded in
+          # the DSN below. `urlparse` does not percent-decode and libpq does,
+          # so a fixture that passes the raw value to Django authenticates
+          # `psql` fine and fails every live test with what looks like a
+          # server that is down. A plain password would never exercise it.
+          POSTGRES_PASSWORD: "p@ss word"
+          POSTGRES_USER: djaudit
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        # Without this the job races the container: the first connection
+        # arrives before initdb has finished and the failure looks like ours.
+        options: >-
+          --health-cmd "pg_isready -U djaudit -d app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DJAUDIT_TEST_POSTGRES: "postgresql://djaudit:p%40ss%20word@127.0.0.1:5432/app"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - run: uv sync
+
+      # The suite drives `psql` directly to create and drop a database per
+      # test. The runner image ships a client, but its version is not ours to
+      # pin, so this fails loudly here rather than inside a fixture.
+      - name: psql is available
+        run: psql --version
+
+      # Proves the container is reachable *as configured* before any test
+      # runs. A wrong password here is a one-line error; discovered thirty
+      # tests later it is thirty confusing ones.
+      - name: the service container answers on the DSN we will use
+        run: psql "$DJAUDIT_TEST_POSTGRES" -tAc "SELECT version()"
+
+      # Machine-readable rather than grepped: the summary line is prose and
+      # has changed shape between pytest releases.
+      - name: live tier tests
+        run: uv run pytest tests/live --junitxml=/tmp/live.xml
+
+      # The whole job is decoration without this. Every test in `tests/live`
+      # skips itself when `DJAUDIT_TEST_POSTGRES` is unset, so a typo in the
+      # env block above turns this job green while running nothing at all --
+      # and "0 failed" reads identically either way.
+      - name: no live test was skipped
+        if: always()
+        run: uv run python scripts/live_gate.py /tmp/live.xml
 
   false_positives:
     name: precision gate (${{ matrix.target.name }})

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from djaudit.live.interpreter import Interpreter
 from djaudit.live.migrations import EMPTY, Plan, Unknown, parse_plan, read_plan
 from djaudit.live.runner import Outcome
 from djaudit.live.sqlmigrate import Target
@@ -273,14 +274,30 @@ class TestNothingToReport:
         assert result.why == "`showmigrations --plan` named no migrations"
 
 
+@postgres
 class TestTheDatabaseAliasReachesTheCommand:
     """`--database` was blanked by mutation and nothing failed, because every
     test used the default alias. A rule that reads the wrong connection reports
     the wrong migration state, so the flag has to be shown arriving."""
 
+    @staticmethod
+    def theirs(project: Path) -> Interpreter:
+        """The target's own interpreter, which is the only one with psycopg.
+
+        Reading a Postgres project through ours would be the exact confusion
+        the live tier exists to avoid, and it fails as an unreadable migration
+        state rather than as a wrong interpreter.
+        """
+        return interpreter(project / ".venv" / "bin" / "python")
+
     def test_an_unknown_alias_is_rejected_by_name(self, live_project: Path) -> None:
         result = read_plan(
-            Target(interpreter(), live_project / "manage.py", SQLITE, database="warehouse")
+            Target(
+                self.theirs(live_project),
+                live_project / "manage.py",
+                SQLITE,
+                database="warehouse",
+            )
         )
         assert not result.available
         # Django resolves the alias, so its complaint names it. Dropping the
@@ -292,6 +309,11 @@ class TestTheDatabaseAliasReachesTheCommand:
     def test_the_default_alias_is_accepted(self, live_project: Path) -> None:
         """The control: the same project answers when the alias is real."""
         result = read_plan(
-            Target(interpreter(), live_project / "manage.py", SQLITE, database="default")
+            Target(
+                self.theirs(live_project),
+                live_project / "manage.py",
+                SQLITE,
+                database="default",
+            )
         )
         assert result.available, result.explain()
