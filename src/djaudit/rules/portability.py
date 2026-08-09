@@ -903,3 +903,98 @@ class UnenforcedConstraint(DivergenceRule):
                 "kind": constraint.kind,
             },
         )
+
+
+LOCK_ARGUMENTS = ("nowait", "skip_locked", "of", "no_key")
+"""`select_for_update()` keywords, all equally discarded, kept for the message.
+
+A developer who asked for `skip_locked` has a more specific expectation than
+one who asked for a plain lock, and naming what they asked for is the quickest
+way to make the finding land.
+"""
+
+
+@register
+class DiscardedRowLock(QueryRule):
+    """`select_for_update()` compiles to nothing at all on SQLite.
+
+    The quietest defect in the family. There is no error, no warning and no
+    difference in the rows returned -- only the `FOR UPDATE` clause missing
+    from the emitted SQL, so the lock a developer wrote is a no-op and the
+    test they wrote for it passes vacuously. Whatever contention it was meant
+    to prevent appears for the first time in production.
+    """
+
+    meta = RuleMeta(
+        id="DJX-007",
+        title="select_for_update() takes no lock in a project that also runs SQLite",
+        family=Family.DJX,
+        severity=Severity.HIGH,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "Measured on a real SQLite: `Item.objects.select_for_update()` compiles to "
+            "`SELECT ... FROM t_item` with no `FOR UPDATE`, and the same query on "
+            "Postgres compiles to `... FOR UPDATE`. Django gates the clause on the "
+            "`has_select_for_update` feature flag, which SQLite sets to False, and "
+            "emits nothing rather than refusing -- so no exception, no warning, and "
+            "the same rows come back. `nowait`, `skip_locked` and `of` are discarded "
+            "the same way. The second divergence is worse: because the whole block is "
+            "gated on that flag, `select_for_update()` outside `atomic()` returns rows "
+            "on SQLite and raises `TransactionManagementError` on Postgres, so the "
+            "engine that never complains in development is the one that cannot crash."
+        ),
+        remediation=(
+            "Run Postgres in development. A row lock is a concurrency control, and a "
+            "concurrency control that is only present in production has never been "
+            "exercised before the day it matters. If that is not possible, the lock "
+            "cannot be relied on and the invariant it protects needs a second "
+            "mechanism that both engines honour -- a unique constraint, or an "
+            "optimistic-concurrency version column checked on update."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/models/querysets/#select-for-update",
+            "https://docs.djangoproject.com/en/stable/ref/databases/#sqlite-notes",
+        ),
+        limitations=(
+            "Only reported when the project is evidenced to reach both SQLite and "
+            "Postgres, so a Postgres-only project is silent. Whether the call sits "
+            "inside `transaction.atomic()` is not read, so the message names the "
+            "second divergence as a possibility rather than asserting it -- and the "
+            "first divergence, the missing lock, holds either way.",
+        ),
+    )
+
+    WORDS = (".select_for_update(",)
+
+    def wanted(self, node: ast.Call) -> bool:
+        return isinstance(node.func, ast.Attribute) and node.func.attr == "select_for_update"
+
+    def report(self, ctx: ProjectContext, path: Path, call: ast.Call, model: str | None) -> Finding:
+        asked = [kw.arg for kw in call.keywords if kw.arg in LOCK_ARGUMENTS]
+        detail = f" -- including {_series(sorted(asked), 'and')}" if asked else ""
+        subject = f"{model}'s rows" if model else "these rows"
+        return self.finding(
+            location=ctx.location(path, call),
+            message=(
+                f"select_for_update() emits no FOR UPDATE on SQLite{detail}, so nothing "
+                f"locks {subject} on the engine this project runs in development and "
+                f"the lock is only real in production"
+            ),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.SOURCE,
+                    content=ctx.snippet(path, call.lineno, call.end_lineno),
+                    source=ctx.rel(path),
+                ),
+                Evidence(
+                    kind=EvidenceKind.SQL,
+                    content=(
+                        "sqlite:   SELECT ... FROM t_item\n"
+                        "postgres: SELECT ... FROM t_item FOR UPDATE"
+                    ),
+                    source="measured against django 6.0",
+                ),
+            ),
+            properties={"arguments": " ".join(sorted(asked))},
+        )

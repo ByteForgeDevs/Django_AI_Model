@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJX` — cross-database portability
 
-6 rules on the gap between the database a developer runs and the one
+7 rules on the gap between the database a developer runs and the one
 that serves requests. Nothing here is a vulnerability and nothing here fails
 at import time. These are the defects that pass the whole test suite and then
 fail on production data, because the test suite ran against the other engine.
@@ -56,6 +56,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJX-004`](#djx-004--a-case-sensitive-text-lookup-is-used-in-a-project-that-also-runs-sqlite) | a case-sensitive text lookup is used in a project that also runs SQLite | medium | firm |
 | [`DJX-005`](#djx-005--a-postgres-only-field-type-is-declared-in-a-project-that-also-runs-sqlite) | a Postgres-only field type is declared in a project that also runs SQLite | high | certain |
 | [`DJX-006`](#djx-006--a-constraint-is-declared-that-sqlite-does-not-enforce) | a constraint is declared that SQLite does not enforce | high | certain |
+| [`DJX-007`](#djx-007--select_for_update-takes-no-lock-in-a-project-that-also-runs-sqlite) | select_for_update() takes no lock in a project that also runs SQLite | high | certain |
 
 ---
 
@@ -170,3 +171,22 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/models/constraints/#deferrable>
 - <https://docs.djangoproject.com/en/stable/ref/contrib/postgres/constraints/>
+
+---
+
+### DJX-007 — select_for_update() takes no lock in a project that also runs SQLite
+
+**Severity** high · **Confidence** certain · **Tier** static
+
+**What it means.** Measured on a real SQLite: `Item.objects.select_for_update()` compiles to `SELECT ... FROM t_item` with no `FOR UPDATE`, and the same query on Postgres compiles to `... FOR UPDATE`. Django gates the clause on the `has_select_for_update` feature flag, which SQLite sets to False, and emits nothing rather than refusing -- so no exception, no warning, and the same rows come back. `nowait`, `skip_locked` and `of` are discarded the same way. The second divergence is worse: because the whole block is gated on that flag, `select_for_update()` outside `atomic()` returns rows on SQLite and raises `TransactionManagementError` on Postgres, so the engine that never complains in development is the one that cannot crash.
+
+**How to fix it.** Run Postgres in development. A row lock is a concurrency control, and a concurrency control that is only present in production has never been exercised before the day it matters. If that is not possible, the lock cannot be relied on and the invariant it protects needs a second mechanism that both engines honour -- a unique constraint, or an optimistic-concurrency version column checked on update.
+
+**What this rule cannot see.**
+
+- Only reported when the project is evidenced to reach both SQLite and Postgres, so a Postgres-only project is silent. Whether the call sits inside `transaction.atomic()` is not read, so the message names the second divergence as a possibility rather than asserting it -- and the first divergence, the missing lock, holds either way.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#select-for-update>
+- <https://docs.djangoproject.com/en/stable/ref/databases/#sqlite-notes>

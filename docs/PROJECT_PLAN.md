@@ -6534,7 +6534,7 @@ rules come first; the live tier is then built for consumers that exist.
   chooses to do at import time happens with the file system and network access
   of whoever typed the command. The note states why that is worth doing at all
   — only Django can say what SQL a migration emits, and only Django can give a
-  second opinion on its own deployment checks, which is 2 of 84 rules — and
+  second opinion on its own deployment checks, which is 2 of 85 rules — and
   then states exactly what the subprocess is allowed: 10 environment variables
   in, 4 refused outright, a 30-second timeout enforced by killing the process
   group, 1 MiB captured per stream, stdin closed. It records the `PASSTHROUGH`
@@ -7037,6 +7037,54 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   **nothing is raised**. Row locking a developer wrote and tested under SQLite
   is a no-op, their tests for it pass vacuously, and the contention it was
   written to prevent appears only in production.
+
+  **Done, and the measurement went further than the premise.** The compiled
+  SQL, same model, same call:
+
+  ```
+  sqlite    SELECT "t_item"."id", "t_item"."sku" FROM "t_item"
+  postgres  SELECT "t_item"."id", "t_item"."sku" FROM "t_item" FOR UPDATE
+  ```
+
+  `nowait`, `skip_locked` and `of=("self",)` are discarded identically — all
+  four spellings produce that same bare SELECT on SQLite and four different
+  clauses on Postgres (`FOR UPDATE`, `... NOWAIT`, `... SKIP LOCKED`,
+  `... OF "t_item"`). The message names whichever was asked for, because a
+  developer who wrote `skip_locked` has a more specific expectation than one
+  who wrote a plain lock.
+
+  **A second divergence turned up while measuring the first, and it is the
+  worse one.** Django's whole select-for-update block is gated on
+  `has_select_for_update`, and that block contains the guard that rejects the
+  call outside a transaction. So `select_for_update()` outside `atomic()`
+  returns rows on SQLite and raises `TransactionManagementError` on Postgres:
+  the engine that never complains in development is the one that cannot crash.
+  The rule states it in the rationale and, because it does not read whether the
+  call sits inside `atomic()`, states it as a possibility rather than a fact —
+  the first divergence, the missing lock, holds either way.
+
+  **Healthchecks supplied the recall evidence the last two substeps could not.**
+  Two findings, both true positives, and both projects' own comments make the
+  argument better than the rule does. At `hc/api/models.py:510` the line above
+  the call reads *"Acquire a lock. Without locking, on MariaDB, concurrent
+  pings can lead to a deadlock"*, with a block comment above the `atomic()`
+  naming the exact race being closed. At `hc/api/views.py:515` it reads *"in
+  case another concurrent request has \*just\* deleted this check"*. These are
+  not incidental locks; they are locks added to fix concurrency bugs the
+  authors had already hit, and on the engine `manage.py runserver` gives you by
+  default they are not there. Corpus 38 → 40 on Healthchecks at 100% precision.
+
+  **Mutation: 191/195.** Four survivors, one real. The unnamed-model fallback
+  (`"these rows"`) had no test, and finding a shape to exercise it took a probe
+  rather than a guess: an unresolvable import, a loop rebinding, a double
+  rebinding and a bare parameter all produce *no finding at all* rather than a
+  finding without a model. The shape that reaches it is `self.get_queryset()`
+  — `Origin.UNKNOWN` carries the chain but no model — which is also the
+  commonest spelling in any CBV or DRF codebase, so the branch that cannot name
+  a model is not a corner case. The mutant was then applied by hand to watch
+  the new test fail. The other three survivors are the two documented textual
+  cost prefilters and `DJX-007`'s own, which is the same guard for the same
+  reason: blanking it leaves every finding identical and moves only the clock.
 - **5.2.7** — `DJX-008` date and time truncation with timezone handling that differs by backend.
 - **5.2.8** — `DJX-009` `max_length` enforced by Postgres but not SQLite.
 
@@ -7951,7 +7999,7 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **84 rules are
+document specifies, and most of it is still only specified: **85 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
 all ten of Phase 4's migration rules, its deployment-check gap rule, and the

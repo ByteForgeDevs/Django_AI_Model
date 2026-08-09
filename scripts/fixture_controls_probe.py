@@ -317,6 +317,16 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
 
 PORTABILITY_UNFIXES: tuple[Unfix, ...] = (
     (
+        "DJX-007",
+        "take the lock the defect takes instead of one atomic UPDATE",
+        PQUERIES,
+        'return Item.objects.filter(sku=sku).update(name=Trim("name"))',
+        "item = Item.objects.select_for_update().get(sku=sku)\n"
+        "        item.name = item.name.strip()\n"
+        "        item.save()\n"
+        "        return item",
+    ),
+    (
         "DJX-006",
         "ask for a deferrable unique constraint instead of a plain one",
         PMODELS,

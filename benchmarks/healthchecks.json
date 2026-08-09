@@ -385,6 +385,26 @@
       "note": "Verified against source. `Check.tags` is a CharField (api/models.py:194) holding space-separated tags, and the comment two frames up in the sibling call site calls this 'approximate filtering by tags' -- the code already knows the substring match is a prefilter. It is still a divergence: a badge for tag `prod` matches a check tagged `PROD` on SQLite and not on Postgres, so the badge is populated in development and empty in production. Note the near-identical call at hc/api/views.py:423 is NOT reported, and that is a known tracker limitation rather than a judgement about the code: `q = q.filter(...)` inside a `for` loop leaves the name with two live definitions and the queryset tracker declines to pick one. Recorded in DJX-004's limitations and tested in tests/rules/test_djx_004.py.",
       "reviewed": "2026-08-09",
       "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "dcb831ab0ef5e623",
+      "rule_id": "DJX-007",
+      "verdict": "true_positive",
+      "file": "hc/api/models.py",
+      "line": 510,
+      "note": "Verified against source, and Healthchecks states the intent itself. The comment directly above the call reads \"Acquire a lock. Without locking, on MariaDB, concurrent pings can lead to a deadlock\", and the block comment above the `atomic()` describes the exact race it is closing: sendalerts seeing the updated Check before the Ping exists. So this is not an incidental `select_for_update()` -- it is a lock a developer deliberately added to fix a concurrency bug they had hit. Measured, SQLite emits no FOR UPDATE at all, so on the engine `manage.py runserver` gives you by default the lock is absent and the race it closes is open again. Healthchecks does run both engines (DJX-001 fires on hc/settings.py:208, and settings.py names sqlite3 as the default and postgresql under DB=postgres), so the divergence gate is satisfied by evidence rather than assumption. The call is inside `transaction.atomic()`, so only the first of the rule's two divergences applies here.",
+      "reviewed": "2026-08-09",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "17f3a192fced44f1",
+      "rule_id": "DJX-007",
+      "verdict": "true_positive",
+      "file": "hc/api/views.py",
+      "line": 515,
+      "note": "Verified against source. The comment above reads \"Start a transaction, select for update, update. Use get_object_or_404 here again, in case another concurrent request has *just* deleted this check\" -- the author is explicitly reasoning about a concurrent request racing this one, and the lock is the mechanism chosen to serialise them. `_update()` then writes the check inside the same block. Under SQLite no FOR UPDATE is emitted, so two concurrent update_check requests are not serialised at the row and the last writer wins silently. Same divergence evidence as hc/api/models.py:510; also inside `atomic()`, so the TransactionManagementError half of the rule does not apply.",
+      "reviewed": "2026-08-09",
+      "reviewer": "Zambagarrah"
     }
   ]
 }
