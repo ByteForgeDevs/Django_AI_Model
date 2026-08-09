@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJX` — cross-database portability
 
-3 rules on the gap between the database a developer runs and the one
+4 rules on the gap between the database a developer runs and the one
 that serves requests. Nothing here is a vulnerability and nothing here fails
 at import time. These are the defects that pass the whole test suite and then
 fail on production data, because the test suite ran against the other engine.
@@ -53,6 +53,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJX-001`](#djx-001--development-and-production-run-different-database-engines) | development and production run different database engines | medium | certain |
 | [`DJX-002`](#djx-002--a-jsonfield-containment-lookup-is-used-in-a-project-that-also-runs-sqlite) | a JSONField containment lookup is used in a project that also runs SQLite | high | certain |
 | [`DJX-003`](#djx-003--distinct-on-is-used-in-a-project-that-also-runs-sqlite) | DISTINCT ON is used in a project that also runs SQLite | high | certain |
+| [`DJX-004`](#djx-004--a-case-sensitive-text-lookup-is-used-in-a-project-that-also-runs-sqlite) | a case-sensitive text lookup is used in a project that also runs SQLite | medium | firm |
 
 ---
 
@@ -110,3 +111,22 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#distinct>
 - <https://docs.djangoproject.com/en/stable/ref/databases/>
+
+---
+
+### DJX-004 — a case-sensitive text lookup is used in a project that also runs SQLite
+
+**Severity** medium · **Confidence** firm · **Tier** static
+
+**What it means.** SQLite's LIKE folds case for ASCII characters and Postgres' does not, which Django records as `has_case_insensitive_like`. `contains`, `startswith` and `endswith` all compile to LIKE, so each of them is case-insensitive in development and case-sensitive in production. Measured on both engines: a row holding 'Hello' is returned by `text__contains='hello'` on SQLite and not on Postgres. Nothing raises and nothing is logged -- the query simply answers a different question on each backend, which is why it survives a test suite that only ever runs one of them.
+
+**How to fix it.** Decide which behaviour was meant and write it down. `icontains`, `istartswith` and `iendswith` are case-insensitive on both backends; for a genuinely case-sensitive match, normalise the column and the term instead of relying on the operator, or run Postgres in development so the two agree.
+
+**What this rule cannot see.**
+
+- Reported as firm rather than certain because whether the difference is observable depends on the data: a column that only ever holds one case answers identically on both engines. The folding is also ASCII-only -- measured, SQLite does not match 'ecole' against 'ECOLE' when the E carries an accent -- so a column holding non-ASCII text diverges less than this finding implies. Only Django's own string fields are recognised; a lookup on a custom field that subclasses CharField is not reported, because we cannot know what the subclass changed.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#contains>
+- <https://docs.djangoproject.com/en/stable/ref/databases/#substring-matching-and-case-sensitivity>

@@ -316,6 +316,13 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
 
 PORTABILITY_UNFIXES: tuple[Unfix, ...] = (
     (
+        "DJX-004",
+        "match a substring case-sensitively instead of asking for either case",
+        PQUERIES,
+        "return Item.objects.filter(name__icontains=term)",
+        "return Item.objects.filter(name__contains=term)",
+    ),
+    (
         "DJX-002",
         "ask JSON containment instead of asking whether the key is there",
         PQUERIES,

@@ -6534,7 +6534,7 @@ rules come first; the live tier is then built for consumers that exist.
   chooses to do at import time happens with the file system and network access
   of whoever typed the command. The note states why that is worth doing at all
   — only Django can say what SQL a migration emits, and only Django can give a
-  second opinion on its own deployment checks, which is 2 of 81 rules — and
+  second opinion on its own deployment checks, which is 2 of 82 rules — and
   then states exactly what the subprocess is allowed: 10 environment variables
   in, 4 refused outright, a 30-second timeout enforced by killing the process
   group, 1 MiB captured per stream, stdin closed. It records the `PASSTHROUGH`
@@ -6801,7 +6801,67 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   same project-wide question independently would resolve every settings module
   eight times: 89ms on Healthchecks and 147ms on pretix, measured, for eight
   identical answers.
-- **5.2.3** — `DJX-004` case-sensitivity and collation divergence in `iexact`, `icontains`, and ordering.
+- **5.2.3** — `DJX-004` case-sensitivity divergence in text lookups. **Done.**
+
+  The plan named `iexact`, `icontains` and ordering. Two of those three turned
+  out to be wrong, and the third was out of reach, so the substep was built
+  against a measurement instead of against the sentence. Against a row holding
+  `'Hello'` on a real SQLite and the live Postgres:
+
+  | lookup | sqlite | postgres |
+  |---|---|---|
+  | `contains='hello'` | 1 | 0 |
+  | `startswith='hello'` | 1 | 0 |
+  | `endswith='LLO'` | 1 | 0 |
+  | `exact='hello'` | 0 | 0 |
+  | `regex='hello'` | 0 | 0 |
+
+  `iexact` and `icontains` ask for case-insensitivity out loud and get it on
+  both backends — they are the *remediation*, and a rule reporting them would
+  be complaining about the fix. The three that diverge are the case-*sensitive*
+  spellings, because SQLite's `LIKE` folds ASCII case and Postgres' does not
+  (`has_case_insensitive_like`). `exact` and `regex` were candidates until the
+  measurement removed them: `=` is not `LIKE`, and Django implements `REGEXP`
+  for SQLite in Python without folding. Ordering was dropped for a different
+  reason — collation is a per-column property we cannot read from source, and a
+  rule that reported every `order_by` on a text column would report almost
+  every queryset in the corpus.
+
+  The same probe recorded the limitation the rule now ships with: against
+  `'ÉCOLE'`, `contains='école'` matched on *neither* engine. The folding is
+  ASCII-only, so a column of non-ASCII text diverges less than the finding
+  implies. That is in `limitations`, not in a comment.
+
+  Only Django's own string fields are recognised — `CharField`, `TextField`,
+  `EmailField`, `SlugField`, `URLField`, `FilePathField`. A lookup on a
+  subclass is not reported, because a subclass may have changed `db_type` or
+  the lookup itself. `JSONField` is deliberately excluded: `data__contains` on
+  one is containment rather than a substring match, and SQLite raises instead
+  of answering differently. That is `DJX-002`, and giving one query two
+  findings that contradict each other helps nobody.
+
+  `field_at()` was extracted from `json_field()` here, because the two callers
+  need opposite things from the same walk. `DJX-002` shortens the lookup path a
+  segment at a time until the model graph recognises something, since
+  `data__tags__contains` names a key inside a column; `DJX-004` must *not*,
+  since shortening without an exact match is a licence to attribute a lookup to
+  whatever column happens to share its first segment. Mutation testing found
+  that distinction unguarded — flipping the default to shorten survived — and
+  it is now pinned by `sku__lower__contains` staying silent with `sku__contains`
+  beside it as the presence control.
+
+  On Healthchecks the rule finds three sites, all read and all true positives:
+  two API-key prefix lookups (`Project.api_key`, `api_key_readonly`) and the
+  tag filter behind the status badge. The badge one is the family's thesis in
+  one line — a badge for tag `prod` matches a check tagged `PROD` in
+  development and not in production, and nothing anywhere reports it. A fourth,
+  near-identical site at `hc/api/views.py:423` is *not* reported: it rebinds
+  the queryset inside a `for` loop, which leaves the name two live definitions
+  and makes the tracker decline to resolve a model. Five probes confirmed the
+  shape, it is shared with `DJP` and `DJI`, and it was left alone — guessing
+  there would cost precision across every rule built on the tracker, not just
+  this one. It is recorded in the triage note and pinned by two tests with a
+  single-rebinding presence control.
 - **5.2.4** — `DJX-005` Postgres-only fields (`ArrayField`, `HStoreField`, `JSONField` operators, ranges) in a project that runs SQLite in development.
 - **5.2.5** — `DJX-006` deferred constraint and transaction semantics differences.
 - **5.2.6** — ~~`DJX-007` foreign keys unenforced by default under SQLite.~~
@@ -7734,7 +7794,7 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **81 rules are
+document specifies, and most of it is still only specified: **82 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
 all ten of Phase 4's migration rules, its deployment-check gap rule, and the

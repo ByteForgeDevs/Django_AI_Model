@@ -97,7 +97,7 @@ class TestTheGroundTruth:
         true_positives = sum(1 for f in truth if f.is_true_positive)
         accepted = sum(1 for f in truth if not f.is_true_positive)
 
-        assert true_positives == 199
+        assert true_positives == 202
         assert accepted == 63
 
     def test_every_finding_carries_its_target(self, truth: list[ReviewedFinding]) -> None:
@@ -126,7 +126,7 @@ class TestTheMajorityBaseline:
 
         assert result.recall(Verdict.TRUE_POSITIVE) == 1.0
         assert result.recall(Verdict.ACCEPTED_RISK) == 0.0
-        assert result.matrix[Verdict.TRUE_POSITIVE][Verdict.TRUE_POSITIVE] == 199
+        assert result.matrix[Verdict.TRUE_POSITIVE][Verdict.TRUE_POSITIVE] == 202
 
     def test_the_majority_baseline_makes_every_possible_upgrade_error(
         self, truth: list[ReviewedFinding]
@@ -150,7 +150,7 @@ class TestTheMajorityBaseline:
         """And it is the dangerous mirror: every real defect dismissed."""
         result = score(AlwaysSays(Verdict.ACCEPTED_RISK), truth, name="lenient")
 
-        assert result.downgrades == 199
+        assert result.downgrades == 202
         assert result.upgrades == 0
 
     def test_the_by_rule_baseline_beats_the_majority_one(
@@ -410,7 +410,7 @@ class TestTheContestedSet:
         rules = {f.rule_id for f in truth}
 
         assert len(contested) == 7
-        assert len(rules) == 35
+        assert len(rules) == 36
 
     def test_the_contested_rules_are_the_ones_with_both_verdicts(
         self, truth: list[ReviewedFinding]

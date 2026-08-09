@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from djaudit.dataflow.scopes import Scope
+    from djaudit.graph.nodes import FieldNode
 
 _DATABASES_DOCS = "https://docs.djangoproject.com/en/stable/ref/settings/#databases"
 _BACKENDS_DOCS = "https://docs.djangoproject.com/en/stable/ref/databases/"
@@ -360,26 +361,40 @@ def containment(keyword: str) -> str | None:
     return None
 
 
-def json_field(ctx: ProjectContext, model: str | None, path: str) -> str | None:
-    """The lookup path `path` reduced to a JSONField on `model`, or None.
+def field_at(
+    ctx: ProjectContext, model: str | None, path: str, *, shorten: bool = False
+) -> tuple[str, FieldNode] | None:
+    """The field a lookup path lands on, with the path that reached it.
 
-    A JSON lookup can be written against the field itself (`data__contains`) or
-    against a key inside it (`data__tags__contains`), and both raise on SQLite.
-    Key transforms are not fields, so the path is shortened one segment at a
-    time until it lands on something the model graph knows -- and because the
-    answer only counts when that something is a JSONField, a shortened path can
-    never wander onto an unrelated column.
+    `shorten` is for lookups written against something *inside* a column.
+    `data__tags__contains` names a key, not a field, so the path has to be cut
+    back a segment at a time before the model graph recognises anything. Only a
+    caller that then checks the field's type should ask for it: without that
+    check, shortening is a licence to attribute a lookup to whatever column
+    happens to share its first segment.
     """
     if model is None:
         return None
     fields = ctx.model_graph.reachable_fields(model)
     parts = path.split("__")
     while parts:
-        found = fields.get("__".join(parts))
+        reached = "__".join(parts)
+        found = fields.get(reached)
         if found is not None:
-            return "__".join(parts) if found.kind == "JSONField" else None
+            return reached, found
+        if not shorten:
+            return None
         parts.pop()
     return None
+
+
+def json_field(ctx: ProjectContext, model: str | None, path: str) -> str | None:
+    """The lookup path `path` reduced to a JSONField on `model`, or None."""
+    found = field_at(ctx, model, path, shorten=True)
+    if found is None:
+        return None
+    reached, node = found
+    return reached if node.kind == "JSONField" else None
 
 
 @register
@@ -469,6 +484,122 @@ class JsonContainment(QueryRule):
                 Evidence(
                     kind=EvidenceKind.CONFIG,
                     content="django.db.backends.sqlite3: supports_json_field_contains = False",
+                    source="django feature flags",
+                ),
+            ),
+            properties={"lookups": " ".join(kw for kw, _ in hits), "fields": " ".join(columns)},
+        )
+
+
+CASE_SENSITIVE = ("__contains", "__startswith", "__endswith")
+"""The three lookups that compile to LIKE and mean to be case-sensitive.
+
+The `i` prefixed spellings are absent on purpose, and not by oversight: they
+ask for case-insensitivity explicitly and get it on both backends, so they are
+the remediation rather than the defect. `exact` and `regex` are absent because
+they were measured not to differ.
+"""
+
+TEXT_FIELDS = frozenset(
+    {"CharField", "TextField", "EmailField", "SlugField", "URLField", "FilePathField"}
+)
+"""Django's string columns, where LIKE is what these lookups compile to.
+
+`JSONField` is deliberately not here: `__contains` on one is containment, not a
+substring match, and it does not merely differ between the backends -- SQLite
+raises. That is `DJX-002`.
+"""
+
+
+@register
+class CaseSensitiveTextLookup(QueryRule):
+    """`__contains` on text quietly matches more rows on SQLite than on Postgres.
+
+    The quietest divergence in the family, and the reason the family exists.
+    Nothing raises, nothing is logged, and the query returns rows on both
+    backends -- just not the same rows. A developer whose local search finds
+    the record they were looking for has no way to know production will not.
+    """
+
+    meta = RuleMeta(
+        id="DJX-004",
+        title="a case-sensitive text lookup is used in a project that also runs SQLite",
+        family=Family.DJX,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.FIRM,
+        tier=Tier.STATIC,
+        rationale=(
+            "SQLite's LIKE folds case for ASCII characters and Postgres' does not, "
+            "which Django records as `has_case_insensitive_like`. `contains`, "
+            "`startswith` and `endswith` all compile to LIKE, so each of them is "
+            "case-insensitive in development and case-sensitive in production. "
+            "Measured on both engines: a row holding 'Hello' is returned by "
+            "`text__contains='hello'` on SQLite and not on Postgres. Nothing raises "
+            "and nothing is logged -- the query simply answers a different question "
+            "on each backend, which is why it survives a test suite that only ever "
+            "runs one of them."
+        ),
+        remediation=(
+            "Decide which behaviour was meant and write it down. `icontains`, "
+            "`istartswith` and `iendswith` are case-insensitive on both backends; "
+            "for a genuinely case-sensitive match, normalise the column and the "
+            "term instead of relying on the operator, or run Postgres in "
+            "development so the two agree."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/models/querysets/#contains",
+            "https://docs.djangoproject.com/en/stable/ref/databases/#substring-matching-and-case-sensitivity",
+        ),
+        limitations=(
+            "Reported as firm rather than certain because whether the difference is "
+            "observable depends on the data: a column that only ever holds one case "
+            "answers identically on both engines. The folding is also ASCII-only -- "
+            "measured, SQLite does not match 'ecole' against 'ECOLE' when the E "
+            "carries an accent -- so a column holding non-ASCII text diverges less "
+            "than this finding implies. Only Django's own string fields are "
+            "recognised; a lookup on a custom field that subclasses CharField is "
+            "not reported, because we cannot know what the subclass changed.",
+        ),
+    )
+
+    WORDS = CASE_SENSITIVE
+
+    def wanted(self, node: ast.Call) -> bool:
+        if not isinstance(node.func, ast.Attribute) or node.func.attr not in LOOKUP_METHODS:
+            return False
+        return any(kw.arg is not None and kw.arg.endswith(CASE_SENSITIVE) for kw in node.keywords)
+
+    def report(
+        self, ctx: ProjectContext, path: Path, call: ast.Call, model: str | None
+    ) -> Finding | None:
+        hits: list[tuple[str, str]] = []
+        for kw in call.keywords:
+            if kw.arg is None or not kw.arg.endswith(CASE_SENSITIVE):
+                continue
+            suffix = next(s for s in CASE_SENSITIVE if kw.arg.endswith(s))
+            found = field_at(ctx, model, kw.arg[: -len(suffix)])
+            if found is not None and found[1].kind in TEXT_FIELDS:
+                hits.append((kw.arg, found[0]))
+        if not hits:
+            return None
+        named = _series([repr(kw) for kw, _ in hits], "and")
+        columns = sorted({column for _, column in hits})
+        return self.finding(
+            location=ctx.location(path, call),
+            message=(
+                f"{named} compiles to LIKE, which folds case on SQLite and not on "
+                f"Postgres -- this query matches more rows in development than it "
+                f"does in production, and nothing reports the difference"
+            ),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.SOURCE,
+                    content=ctx.snippet(path, call.lineno, call.end_lineno),
+                    source=ctx.rel(path),
+                ),
+                Evidence(
+                    kind=EvidenceKind.CONFIG,
+                    content="django.db.backends.sqlite3: has_case_insensitive_like = True",
                     source="django feature flags",
                 ),
             ),
