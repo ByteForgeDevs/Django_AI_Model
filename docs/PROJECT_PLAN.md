@@ -6534,7 +6534,7 @@ rules come first; the live tier is then built for consumers that exist.
   chooses to do at import time happens with the file system and network access
   of whoever typed the command. The note states why that is worth doing at all
   — only Django can say what SQL a migration emits, and only Django can give a
-  second opinion on its own deployment checks, which is 2 of 83 rules — and
+  second opinion on its own deployment checks, which is 2 of 84 rules — and
   then states exactly what the subprocess is allowed: 10 environment variables
   in, 4 refused outright, a 30-second timeout enforced by killing the process
   group, 1 MiB captured per stream, stdin closed. It records the `PASSTHROUGH`
@@ -6918,7 +6918,109 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   that flagged every `order_by` on a text column would flag almost every
   queryset in the corpus. A false claim inside a rationale is worse than a
   missing rule: it is the tool teaching a developer something untrue.
-- **5.2.5** — `DJX-006` deferred constraint and transaction semantics differences.
+- **5.2.5** — `DJX-006` a constraint is declared that SQLite does not enforce.
+  **Done.** The most dangerous rule in the family, because it is the only one
+  whose consequence is *data*. Every other `DJX` rule makes a query answer
+  differently or a migration fail loudly. This one lets a developer's database
+  hold rows that production would have refused, and nothing about the local
+  database looks wrong until that data is loaded somewhere real.
+
+  The plan called it "deferred constraint and transaction semantics
+  differences", which understates it. Measured on a real SQLite and the live
+  Postgres before a line was written — the same model, one argument apart:
+
+  ```
+  UniqueConstraint(fields=["sku"], name="x")
+      sqlite   CREATE TABLE ... , CONSTRAINT "x" UNIQUE ("sku"))
+  UniqueConstraint(fields=["sku"], name="x", deferrable=DEFERRED)
+      sqlite   CREATE TABLE ... "sku" varchar(32) NOT NULL)
+  ```
+
+  SQLite does not decline the *deferral*; it drops the **constraint**. Inserting
+  the same value twice confirms the consequence rather than inferring it:
+  deferred → SQLite accepts two rows, Postgres raises `IntegrityError`;
+  immediate → identical; no `deferrable=` → both reject. `DEFERRED` and
+  `IMMEDIATE` are indistinguishable on SQLite, which is why the rule reads
+  `deferrable=` as present or absent and never as a mode. A rule that reported
+  only `DEFERRED` would be a rule about Postgres semantics wearing a
+  portability rule's name.
+
+  `ExclusionConstraint` fails earlier and louder: `manage.py check` returns
+  clean and `migrate` then stops at `near "EXCLUDE": syntax error`. Both are
+  reported, with different messages, because a silent failure that produces
+  data and a loud failure that produces nothing are not the same advice.
+
+  **The framework already covers half of it, and the rule says so.** Django
+  emits `models.W038` for the deferrable case. It is reported anyway for two
+  reasons written into `limitations`: `W038` is a warning that does not fail
+  `manage.py check`, and it only fires when the command happens to be pointed
+  at SQLite — a developer or a CI job running the same check against Postgres
+  sees nothing. Nothing at all warns about `ExclusionConstraint`. A rule that
+  quietly re-reports what the framework already told you, without saying that
+  is what it is doing, is how a tool loses the reader's trust on everything
+  else it says.
+
+  Reading it needed `ConstraintNode` to carry two new fields. `dotted` and
+  `deferrable` came from threading `record.bindings` down through `read_meta`
+  → `read_constraints`, so the class is resolved through the module's imports
+  rather than matched by name: a project's own `ExclusionConstraint` is not
+  Django's, and a name match would report someone else's portable constraint.
+  A test asserts that silence, and a presence control proves the silence is
+  aimed. An explicit `deferrable=None` — the default written out — reads as
+  absent.
+
+  `end_lineno` was the third field, and it came from a failing assertion rather
+  than from foresight. The first evidence snippet read `models.UniqueConstraint(`
+  and stopped: a five-line constraint, quoted up to the opening parenthesis,
+  showing everything except the argument the finding is about. Evidence that
+  does not contain the thing it is evidence of is decoration.
+
+  **Mutation: 167/173, then 173/173 after reading the survivors.** Four were
+  real and all four were about what the finding *says* rather than when it
+  fires — two message-template fragments and the config evidence's content and
+  source, none of which any test read. The substring assertions each checked
+  one clause and left the joins between them unchecked, so blanking `" is a "`
+  survived every one of them; the fix was to assert the whole string once per
+  branch. The remaining two survivors are the documented textual cost
+  prefilter, unchanged from 5.2.1.
+
+  Reading the fourth survivor found a real defect rather than a missing test:
+  every finding cited `supports_deferrable_unique_constraints = False` as its
+  config evidence, including the `ExclusionConstraint` ones, where it is a true
+  statement that explains nothing. The flag was read out of Django rather than
+  recalled (`sqlite3` → `False`, `postgresql` → `True`) and now appears only on
+  the deferrable branch; the exclusion branch cites the measured `migrate`
+  failure instead.
+
+  **Mutating `meta.py` separately found a real defect in the new reader.** The
+  `and/or` mutant in `_deferrable` survived, and the reason it survived was
+  that it was very nearly correct. Django was read rather than recalled:
+  `deferrable` must be `None` or a `Deferrable` member, and `False`, `0` and
+  `"deferred"` all raise `TypeError` when the class is defined. So *no* literal
+  can produce a deferrable constraint — `None` is the default written out and
+  the rest are code that does not run. The predicate collapsed to "a literal is
+  never deferrable", which is shorter, matches Django's own
+  `self.deferrable is not None` test, and has no boolean operator left to
+  mutate.
+
+  A second survivor, `dotted_name(item.func) or kind`, took two attempts to
+  kill and the first attempt is the more useful lesson. A test asserting
+  `dotted` on `models.UniqueConstraint` looked like it separated the two
+  branches and did not: the test helper's own header imports
+  `UniqueConstraint` by name, so the written path and the bare tail resolve to
+  the same string and the mutant passed. Switching to `models.CheckConstraint`
+  — a class that file does not import by name — made the branches disagree,
+  and the mutant was then applied by hand to watch the test fail before
+  believing it.
+
+  **The corpus proves nothing here, and that is recorded rather than dressed
+  up.** All three projects stayed exactly where they were — hc 38, nb 76, px
+  151, 100% precision — but grep says Healthchecks, NetBox and pretix contain
+  **zero** `deferrable=` and **zero** `ExclusionConstraint` between them, across
+  3,091 files. A rule with nothing to fire on cannot demonstrate precision by
+  not firing. The recall evidence is the fixture and the un-fix control, which
+  turns the `warehouse` twin's plain `UniqueConstraint` into a deferrable one
+  and is proven load-bearing at `warehouse/models.py:21`.
 - **5.2.6** — ~~`DJX-007` foreign keys unenforced by default under SQLite.~~
   **Withdrawn: the premise is false on every Django this tool supports.**
   Django's SQLite backend executes `PRAGMA foreign_keys = ON` on every
@@ -7849,7 +7951,7 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **83 rules are
+document specifies, and most of it is still only specified: **84 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
 all ten of Phase 4's migration rules, its deployment-check gap rule, and the

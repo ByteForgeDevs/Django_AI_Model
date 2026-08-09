@@ -297,6 +297,25 @@ class ConstraintNode:
     conditional: bool = False
     lineno: int = 0
 
+    end_lineno: int = 0
+    """Last line of the call. A constraint is routinely written across five
+    lines, and evidence that stops at ``UniqueConstraint(`` does not show the
+    argument the finding is about."""
+
+    dotted: str = ""
+    """The constraint class resolved through the module's imports, as far as we
+    can. Empty when the class was written in a form we could not name at all.
+    A project may define its own ``ExclusionConstraint``, so a rule that cares
+    where the class came from has to ask this rather than :attr:`kind`."""
+
+    deferrable: bool = False
+    """Whether ``deferrable=`` was passed anything other than ``None``.
+
+    Not *which* mode: measured against a real SQLite, ``DEFERRED`` and
+    ``IMMEDIATE`` behave identically there -- both make Django drop the whole
+    constraint -- so the distinction the argument draws is a Postgres-side one
+    and does not belong in a portability judgement."""
+
     @property
     def is_unique(self) -> bool:
         return self.kind == "UniqueConstraint"

@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from djaudit.dataflow.scopes import Scope
-    from djaudit.graph.nodes import FieldNode, ModelNode
+    from djaudit.graph.nodes import ConstraintNode, FieldNode, ModelNode
 
 _DATABASES_DOCS = "https://docs.djangoproject.com/en/stable/ref/settings/#databases"
 _BACKENDS_DOCS = "https://docs.djangoproject.com/en/stable/ref/databases/"
@@ -767,4 +767,139 @@ class PostgresOnlyField(DivergenceRule):
                 ),
             ),
             properties={"field": f"{model.name}.{field.name}", "kind": field.kind},
+        )
+
+
+POSTGRES_CONSTRAINTS = "django.contrib.postgres.constraints."
+"""Constraints that exist only on Postgres, by the same package test as DJX-005."""
+
+
+@register
+class UnenforcedConstraint(DivergenceRule):
+    """A constraint SQLite silently declines to create, or cannot parse at all.
+
+    The most dangerous rule in the family, because it is the only one whose
+    consequence is *data*. The others make a query answer differently or a
+    migration fail; this one lets a developer's database hold rows that
+    production would have refused, and nothing about the local database looks
+    wrong until that data is loaded somewhere real.
+    """
+
+    meta = RuleMeta(
+        id="DJX-006",
+        title="a constraint is declared that SQLite does not enforce",
+        family=Family.DJX,
+        severity=Severity.HIGH,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "Measured against a real SQLite: a `UniqueConstraint` carrying any "
+            "`deferrable=` is dropped from the emitted `CREATE TABLE` entirely -- not "
+            "the deferral, the constraint. The same model without the argument emits "
+            "`CONSTRAINT ... UNIQUE (...)`, and with it emits nothing, so two rows "
+            "sharing the supposedly unique value are accepted on SQLite and rejected "
+            "on Postgres. `DEFERRED` and `IMMEDIATE` behave identically there; both "
+            "lose the constraint. An `ExclusionConstraint` fails harder and earlier: "
+            "SQLite cannot parse `EXCLUDE` and `migrate` stops with a syntax error. "
+            "The difference matters because the first failure mode is silent and "
+            "produces data, and the second is loud and produces nothing."
+        ),
+        remediation=(
+            "For a deferrable unique constraint, decide whether the deferral is "
+            "actually needed -- it usually exists to allow a swap inside one "
+            "transaction -- and if it is not, drop the argument and get the "
+            "constraint enforced on both backends. If it is needed, the constraint is "
+            "a Postgres dependency and development should run Postgres too, because "
+            "the alternative is a local database with no uniqueness at all. An "
+            "`ExclusionConstraint` has no SQLite equivalent and the same choice "
+            "applies, without the silence."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/models/constraints/#deferrable",
+            "https://docs.djangoproject.com/en/stable/ref/contrib/postgres/constraints/",
+        ),
+        limitations=(
+            "Django's own system checks emit `models.W038` for the deferrable case "
+            "when SQLite is the configured backend, so this is not always the first "
+            "warning a developer could see. It is reported anyway, and for two "
+            "reasons: `W038` is a warning that does not fail `manage.py check`, and "
+            "it only appears when the command happens to be pointed at SQLite -- a "
+            "developer or a CI job running the same check against Postgres sees "
+            "nothing at all. Nothing warns about `ExclusionConstraint`; measured, "
+            "`check` returns clean and `migrate` then fails. Only constraints written "
+            "literally in `Meta.constraints` are read, so a list built by a helper "
+            "function is not seen.",
+        ),
+    )
+
+    def diverging(self, ctx: ProjectContext, found: Divergence) -> Iterator[Finding]:
+        for model in ctx.model_graph.models.values():
+            if model.is_proxy:
+                continue
+            for constraint in model.constraints:
+                effect = self.effect(constraint)
+                if effect is not None:
+                    yield self.report(ctx, model, constraint, *effect)
+
+    def effect(self, constraint: ConstraintNode) -> tuple[str, str] | None:
+        """What SQLite does with this constraint, and the citation for saying so.
+
+        The two halves fail differently enough that they cannot share one
+        citation. The deferrable case is a declared Django feature flag; the
+        exclusion case has no flag at all, only a measured `migrate` failure.
+        """
+        if constraint.dotted.startswith(POSTGRES_CONSTRAINTS):
+            return (
+                "SQLite cannot parse `EXCLUDE` and `migrate` stops there with a syntax "
+                "error, so the whole schema is unreachable on that engine",
+                'sqlite3.OperationalError: near "EXCLUDE": syntax error -- raised by '
+                "`migrate`; `manage.py check` reports no issues beforehand",
+            )
+        if constraint.deferrable:
+            return (
+                "SQLite drops the constraint from `CREATE TABLE` rather than declining "
+                "the deferral, so the uniqueness is not enforced there at all and two "
+                "rows sharing the value are accepted in development and rejected in "
+                "production",
+                "django.db.backends.sqlite3: supports_deferrable_unique_constraints = "
+                "False (postgresql: True)",
+            )
+        return None
+
+    def report(
+        self,
+        ctx: ProjectContext,
+        model: ModelNode,
+        constraint: ConstraintNode,
+        effect: str,
+        flag: str,
+    ) -> Finding:
+        named = f"`{constraint.name}`" if constraint.name else f"a {constraint.kind}"
+        return self.finding(
+            location=Location(
+                file=ctx.rel(model.path),
+                line=constraint.lineno,
+                end_line=constraint.end_lineno,
+                snippet=ctx.snippet(model.path, constraint.lineno, constraint.end_lineno),
+            ),
+            message=(
+                f"{named} on {model.name} is a {constraint.kind} that SQLite does not "
+                f"enforce -- {effect}"
+            ),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.SOURCE,
+                    content=ctx.snippet(model.path, constraint.lineno, constraint.end_lineno),
+                    source=ctx.rel(model.path),
+                ),
+                Evidence(
+                    kind=EvidenceKind.CONFIG,
+                    content=flag,
+                    source="measured against django 6.0 and sqlite 3",
+                ),
+            ),
+            properties={
+                "constraint": constraint.name or constraint.kind,
+                "kind": constraint.kind,
+            },
         )

@@ -282,6 +282,140 @@ class TestConstraints:
         assert constraint.fields == ("reference",)
         assert constraint.name == "uniq_ref"
 
+    def test_a_deferrable_constraint_records_the_argument(self, make_project) -> None:
+        # Read as present-or-absent, never as a mode: measured on SQLite,
+        # DEFERRED and IMMEDIATE both drop the constraint from CREATE TABLE.
+        order = one(
+            make_project,
+            """
+            class Meta:
+                constraints = [
+                    UniqueConstraint(
+                        fields=["reference"],
+                        name="uniq_ref",
+                        deferrable=models.Deferrable.IMMEDIATE,
+                    )
+                ]
+            """,
+        )
+        assert order.constraints[0].deferrable
+
+    def test_a_constraint_without_the_argument_is_not_deferrable(self, make_project) -> None:
+        order = one(
+            make_project,
+            """
+            class Meta:
+                constraints = [
+                    UniqueConstraint(fields=["reference"], name="uniq_ref")
+                ]
+            """,
+        )
+        assert not order.constraints[0].deferrable
+
+    def test_deferrable_written_as_none_is_not_deferrable(self, make_project) -> None:
+        # The default spelled out. Reading the keyword's presence rather than
+        # its value would call this deferrable and it is not.
+        order = one(
+            make_project,
+            """
+            class Meta:
+                constraints = [
+                    UniqueConstraint(
+                        fields=["reference"], name="uniq_ref", deferrable=None
+                    )
+                ]
+            """,
+        )
+        assert not order.constraints[0].deferrable
+
+    def test_a_literal_that_django_rejects_is_not_deferrable(self, make_project) -> None:
+        # Measured: `deferrable` must be None or a Deferrable member, and
+        # every other literal raises TypeError when the class is defined. So
+        # `deferrable=False` is not a deferrable constraint -- it is a model
+        # that does not import. Reading the keyword's mere presence would call
+        # it one.
+        order = one(
+            make_project,
+            """
+            class Meta:
+                constraints = [
+                    UniqueConstraint(
+                        fields=["reference"], name="uniq_ref", deferrable=False
+                    )
+                ]
+            """,
+        )
+        assert not order.constraints[0].deferrable
+
+    def test_a_constraint_resolves_its_class_through_the_imports(self, make_project) -> None:
+        # The kind is a name anyone can reuse; the dotted path says whose it
+        # is. Rules that gate on a package need the second one.
+        order = one(
+            make_project,
+            """
+            class Meta:
+                constraints = [
+                    UniqueConstraint(fields=["reference"], name="uniq_ref")
+                ]
+            """,
+        )
+        assert order.constraints[0].kind == "UniqueConstraint"
+        assert order.constraints[0].dotted == "django.db.models.UniqueConstraint"
+
+    def test_the_attribute_spelling_resolves_through_the_module_alias(self, make_project) -> None:
+        # `models.CheckConstraint` is the commoner spelling, and it is the one
+        # where the written name and the class tail differ: resolving the tail
+        # alone would throw away the `models.` that says which import it came
+        # through. It has to be a class this file does not also import by
+        # name, or both readings resolve alike and the test proves nothing.
+        order = one(
+            make_project,
+            """
+            class Meta:
+                constraints = [
+                    models.CheckConstraint(condition=Q(reference=""), name="ck")
+                ]
+            """,
+        )
+        assert order.constraints[0].dotted == "django.db.models.CheckConstraint"
+
+    def test_a_constraint_from_another_package_keeps_that_package(self, make_project) -> None:
+        # The presence control for the two above: same tail, different owner.
+        graph = project(
+            make_project,
+            """
+            from django.db import models
+            from django.contrib.postgres.constraints import ExclusionConstraint
+
+            class Order(models.Model):
+                reference = models.CharField(max_length=32)
+
+                class Meta:
+                    constraints = [ExclusionConstraint(name="no_overlap")]
+            """,
+        )
+        constraint = model(graph, "shop.Order").constraints[0]
+        assert constraint.kind == "ExclusionConstraint"
+        assert constraint.dotted == ("django.contrib.postgres.constraints.ExclusionConstraint")
+
+    def test_a_constraint_spans_from_its_first_line_to_its_last(self, make_project) -> None:
+        # A constraint is routinely five lines long, and evidence quoted from
+        # lineno alone stops at the opening parenthesis.
+        order = one(
+            make_project,
+            """
+            class Meta:
+                constraints = [
+                    UniqueConstraint(
+                        fields=["reference"],
+                        name="uniq_ref",
+                    )
+                ]
+            """,
+        )
+        constraint = order.constraints[0]
+        assert constraint.end_lineno == constraint.lineno + 3
+
     def test_a_check_constraint_is_not_unique(self, make_project) -> None:
         # A CheckConstraint creates no index. Conflating the two credits a
         # model with coverage it has not got.

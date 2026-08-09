@@ -317,6 +317,17 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
 
 PORTABILITY_UNFIXES: tuple[Unfix, ...] = (
     (
+        "DJX-006",
+        "ask for a deferrable unique constraint instead of a plain one",
+        PMODELS,
+        'models.UniqueConstraint(fields=["sku"], name="warehouse_item_sku_unique")',
+        "models.UniqueConstraint(\n"
+        '                fields=["sku"],\n'
+        '                name="warehouse_item_sku_unique",\n'
+        "                deferrable=models.Deferrable.DEFERRED,\n"
+        "            )",
+    ),
+    (
         "DJX-005",
         "hold the tags in a Postgres array instead of a portable column",
         PMODELS,

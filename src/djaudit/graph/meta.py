@@ -19,7 +19,7 @@ from __future__ import annotations
 import ast
 from typing import TYPE_CHECKING
 
-from djaudit.astutils import literal
+from djaudit.astutils import dotted_name, literal, resolve_dotted
 
 if TYPE_CHECKING:
     from djaudit.graph.nodes import ModelNode
@@ -174,7 +174,26 @@ def read_indexes(node: ast.expr | None) -> tuple[IndexNode, ...]:
     return tuple(out)
 
 
-def read_constraints(node: ast.expr | None) -> tuple[ConstraintNode, ...]:
+def _deferrable(call: ast.Call) -> bool:
+    """Whether ``deferrable=`` was passed anything that can actually defer.
+
+    Measured against Django 6.0: ``deferrable`` must be ``None`` or a
+    ``Deferrable`` member, and every other literal -- ``False``, ``0``,
+    ``"deferred"`` -- raises ``TypeError`` at class definition time. So no
+    literal at all can produce a deferrable constraint: ``None`` is the
+    default written out, and the rest are code that does not run. Anything
+    that is not a literal is a name or an attribute, which is how
+    ``Deferrable.DEFERRED`` arrives, and is read as present.
+    """
+    value = _kwarg(call, "deferrable")
+    if isinstance(value, ast.Constant):
+        return False
+    return value is not None
+
+
+def read_constraints(
+    node: ast.expr | None, bindings: dict[str, str] | None = None
+) -> tuple[ConstraintNode, ...]:
     if not isinstance(node, (ast.List, ast.Tuple)):
         return ()
     out: list[ConstraintNode] = []
@@ -185,6 +204,7 @@ def read_constraints(node: ast.expr | None) -> tuple[ConstraintNode, ...]:
         if kind not in CONSTRAINT_NAMES and not kind.endswith("Constraint"):
             continue
         name = literal(_kwarg(item, "name") or ast.Constant(None))
+        written = dotted_name(item.func) or kind
         out.append(
             ConstraintNode(
                 kind=kind,
@@ -192,6 +212,9 @@ def read_constraints(node: ast.expr | None) -> tuple[ConstraintNode, ...]:
                 name=name if isinstance(name, str) else None,
                 conditional=_kwarg(item, "condition") is not None,
                 lineno=item.lineno,
+                end_lineno=item.end_lineno or item.lineno,
+                dotted=resolve_dotted(bindings, written) if bindings is not None else "",
+                deferrable=_deferrable(item),
             )
         )
     return tuple(out)
@@ -209,7 +232,9 @@ def derive_table(model: ModelNode) -> str:
     return f"{model.app_label}_{model.name.lower()}"
 
 
-def read_meta(model: ModelNode, meta: ast.ClassDef | None) -> None:
+def read_meta(
+    model: ModelNode, meta: ast.ClassDef | None, bindings: dict[str, str] | None = None
+) -> None:
     """Fill in everything ``class Meta`` says about ``model``.
 
     Called before the model is keyed into the graph, because ``Meta.app_label``
@@ -248,7 +273,7 @@ def read_meta(model: ModelNode, meta: ast.ClassDef | None) -> None:
         model.unique_together = normalize_together(class_attr(meta, "unique_together"))
 
         model.indexes = read_indexes(class_attr(meta, "indexes"))
-        model.constraints = read_constraints(class_attr(meta, "constraints"))
+        model.constraints = read_constraints(class_attr(meta, "constraints"), bindings)
 
     if not model.db_table_explicit and not model.is_abstract:
         model.db_table = derive_table(model)

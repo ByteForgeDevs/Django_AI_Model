@@ -35,6 +35,13 @@
       "line": 10,
       "severity": "high",
       "confidence": "certain"
+    },
+    {
+      "rule_id": "DJX-006",
+      "file": "catalog/models.py",
+      "line": 15,
+      "severity": "high",
+      "confidence": "certain"
     }
   ],
   "must_not_report": [
@@ -64,6 +71,10 @@
     },
     {
       "rule_id": "DJX-005",
+      "file": "warehouse/models.py"
+    },
+    {
+      "rule_id": "DJX-006",
       "file": "warehouse/models.py"
     }
   ]

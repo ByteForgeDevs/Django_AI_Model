@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJX` — cross-database portability
 
-5 rules on the gap between the database a developer runs and the one
+6 rules on the gap between the database a developer runs and the one
 that serves requests. Nothing here is a vulnerability and nothing here fails
 at import time. These are the defects that pass the whole test suite and then
 fail on production data, because the test suite ran against the other engine.
@@ -55,6 +55,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJX-003`](#djx-003--distinct-on-is-used-in-a-project-that-also-runs-sqlite) | DISTINCT ON is used in a project that also runs SQLite | high | certain |
 | [`DJX-004`](#djx-004--a-case-sensitive-text-lookup-is-used-in-a-project-that-also-runs-sqlite) | a case-sensitive text lookup is used in a project that also runs SQLite | medium | firm |
 | [`DJX-005`](#djx-005--a-postgres-only-field-type-is-declared-in-a-project-that-also-runs-sqlite) | a Postgres-only field type is declared in a project that also runs SQLite | high | certain |
+| [`DJX-006`](#djx-006--a-constraint-is-declared-that-sqlite-does-not-enforce) | a constraint is declared that SQLite does not enforce | high | certain |
 
 ---
 
@@ -150,3 +151,22 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/contrib/postgres/fields/>
 - <https://docs.djangoproject.com/en/stable/ref/databases/>
+
+---
+
+### DJX-006 — a constraint is declared that SQLite does not enforce
+
+**Severity** high · **Confidence** certain · **Tier** static
+
+**What it means.** Measured against a real SQLite: a `UniqueConstraint` carrying any `deferrable=` is dropped from the emitted `CREATE TABLE` entirely -- not the deferral, the constraint. The same model without the argument emits `CONSTRAINT ... UNIQUE (...)`, and with it emits nothing, so two rows sharing the supposedly unique value are accepted on SQLite and rejected on Postgres. `DEFERRED` and `IMMEDIATE` behave identically there; both lose the constraint. An `ExclusionConstraint` fails harder and earlier: SQLite cannot parse `EXCLUDE` and `migrate` stops with a syntax error. The difference matters because the first failure mode is silent and produces data, and the second is loud and produces nothing.
+
+**How to fix it.** For a deferrable unique constraint, decide whether the deferral is actually needed -- it usually exists to allow a swap inside one transaction -- and if it is not, drop the argument and get the constraint enforced on both backends. If it is needed, the constraint is a Postgres dependency and development should run Postgres too, because the alternative is a local database with no uniqueness at all. An `ExclusionConstraint` has no SQLite equivalent and the same choice applies, without the silence.
+
+**What this rule cannot see.**
+
+- Django's own system checks emit `models.W038` for the deferrable case when SQLite is the configured backend, so this is not always the first warning a developer could see. It is reported anyway, and for two reasons: `W038` is a warning that does not fail `manage.py check`, and it only appears when the command happens to be pointed at SQLite -- a developer or a CI job running the same check against Postgres sees nothing at all. Nothing warns about `ExclusionConstraint`; measured, `check` returns clean and `migrate` then fails. Only constraints written literally in `Meta.constraints` are read, so a list built by a helper function is not seen.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/constraints/#deferrable>
+- <https://docs.djangoproject.com/en/stable/ref/contrib/postgres/constraints/>
