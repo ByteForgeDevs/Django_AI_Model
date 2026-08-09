@@ -31,5 +31,12 @@ def reserve(sku):
         return product
 
 
+def priced_in_usd():
+    # DJX-008: `\b` is a word boundary to Python's `re`, which is what SQLite
+    # uses, and a literal backspace to Postgres' POSIX engine. Neither engine
+    # raises; they just match different rows.
+    return Product.objects.filter(name__regex=r"\bUSD\b")
+
+
 def suppliers_in(region):
     return Supplier.objects.filter(region=region)

@@ -317,6 +317,13 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
 
 PORTABILITY_UNFIXES: tuple[Unfix, ...] = (
     (
+        "DJX-008",
+        "spell the word boundary the way only one engine understands",
+        PQUERIES,
+        'name__regex=r"(^|[^0-9A-Za-z])USD([^0-9A-Za-z]|$)"',
+        'name__regex=r"\\bUSD\\b"',
+    ),
+    (
         "DJX-007",
         "take the lock the defect takes instead of one atomic UPDATE",
         PQUERIES,

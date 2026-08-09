@@ -49,6 +49,13 @@
       "line": 28,
       "severity": "high",
       "confidence": "certain"
+    },
+    {
+      "rule_id": "DJX-008",
+      "file": "catalog/queries.py",
+      "line": 38,
+      "severity": "high",
+      "confidence": "certain"
     }
   ],
   "must_not_report": [
@@ -86,6 +93,10 @@
     },
     {
       "rule_id": "DJX-007",
+      "file": "warehouse/queries.py"
+    },
+    {
+      "rule_id": "DJX-008",
       "file": "warehouse/queries.py"
     }
   ]

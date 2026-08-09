@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJX` — cross-database portability
 
-7 rules on the gap between the database a developer runs and the one
+8 rules on the gap between the database a developer runs and the one
 that serves requests. Nothing here is a vulnerability and nothing here fails
 at import time. These are the defects that pass the whole test suite and then
 fail on production data, because the test suite ran against the other engine.
@@ -57,6 +57,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJX-005`](#djx-005--a-postgres-only-field-type-is-declared-in-a-project-that-also-runs-sqlite) | a Postgres-only field type is declared in a project that also runs SQLite | high | certain |
 | [`DJX-006`](#djx-006--a-constraint-is-declared-that-sqlite-does-not-enforce) | a constraint is declared that SQLite does not enforce | high | certain |
 | [`DJX-007`](#djx-007--select_for_update-takes-no-lock-in-a-project-that-also-runs-sqlite) | select_for_update() takes no lock in a project that also runs SQLite | high | certain |
+| [`DJX-008`](#djx-008--a-regex-lookup-uses-syntax-the-two-engines-read-differently) | a regex lookup uses syntax the two engines read differently | high | certain |
 
 ---
 
@@ -190,3 +191,22 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#select-for-update>
 - <https://docs.djangoproject.com/en/stable/ref/databases/#sqlite-notes>
+
+---
+
+### DJX-008 — a regex lookup uses syntax the two engines read differently
+
+**Severity** high · **Confidence** certain · **Tier** static
+
+**What it means.** `__regex` is handed to the database, and the two databases speak different regular-expression languages: Postgres uses POSIX ARE, while SQLite has no regex operator at all until Django registers a Python function that calls `re.search`. Measured over the same rows on both engines, `\b` is a word boundary in Python and a backspace character in POSIX -- `\bUSD\b` matched one row on SQLite and zero on Postgres, with no error on either side. `[[:digit:]]` is the mirror image: six rows on Postgres, zero on SQLite. Those are the dangerous ones, because the query succeeds and answers differently. `\y`, `\m` and `\M` fail loudly on SQLite, and `(?P<name>)` fails loudly on Postgres.
+
+**How to fix it.** Write the pattern in the subset both engines share -- `\d`, `\w`, `\s`, anchors, groups, alternation, counted repetition, lookaround and inline flags were all measured to agree. A word boundary has no portable spelling, so express it with an explicit character set such as `(^|[^0-9A-Za-z])USD([^0-9A-Za-z]|$)`, which was measured to return the same rows on both engines -- note that the POSIX spelling of that same idea, `[[:alnum:]]`, is itself one of the constructs below. Or step back and ask whether the question is really a regular expression: a `__iregex` standing in for a word search is usually better served by a database text search or a normalised column.
+
+**What this rule cannot see.**
+
+- Only patterns written as a literal string in the call are read. A pattern built from a variable, a format string or a settings value is not inspected, and a pattern supplied by a user is a DJI concern rather than a portability one. The eight constructs behind the seven tokens listed were measured; sixteen others were measured to agree and are deliberately not reported, so this is not a warning about regular expressions in general. `\z`, `\Q...\E` and `\h` fail on both engines and are left out for the same reason -- they are a broken pattern, not a divergence.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/models/querysets/#regex>
+- <https://www.postgresql.org/docs/current/functions-matching.html>

@@ -998,3 +998,174 @@ class DiscardedRowLock(QueryRule):
             ),
             properties={"arguments": " ".join(sorted(asked))},
         )
+
+
+REGEX_LOOKUPS = ("__regex", "__iregex")
+"""The two lookups Django routes to a regular-expression engine."""
+
+REGEX_DIALECT: tuple[tuple[str, str, str], ...] = (
+    (
+        "\\b",
+        "matches a word boundary under Python's `re` and a literal backspace under "
+        "Postgres' POSIX engine, so the pattern quietly matches different rows",
+        "silent",
+    ),
+    (
+        "\\B",
+        "matches a non-boundary under Python's `re` and is not a boundary construct "
+        "at all under Postgres, so the pattern quietly matches different rows",
+        "silent",
+    ),
+    (
+        "[[:",
+        "is a POSIX character class Postgres understands and Python's `re` reads as a "
+        "nested set, so the pattern quietly matches different rows -- and Python "
+        "raises a FutureWarning about it rather than an error",
+        "silent",
+    ),
+    (
+        "\\y",
+        "is Postgres' word boundary and is not valid in Python's `re`, so the query "
+        "raises OperationalError on SQLite",
+        "sqlite",
+    ),
+    (
+        "\\m",
+        "is Postgres' start-of-word boundary and is not valid in Python's `re`, so "
+        "the query raises OperationalError on SQLite",
+        "sqlite",
+    ),
+    (
+        "\\M",
+        "is Postgres' end-of-word boundary and is not valid in Python's `re`, so the "
+        "query raises OperationalError on SQLite",
+        "sqlite",
+    ),
+    (
+        "(?P<",
+        "is a Python named group and is not valid POSIX, so the query raises DataError on Postgres",
+        "postgres",
+    ),
+)
+"""Every construct measured to behave differently, with what it does and where.
+
+Measured by running each pattern against the same eleven rows on a real SQLite
+and the live Postgres and comparing the counts, not read off a compatibility
+table. Twenty-seven constructs were tried and sixteen agree exactly --
+including `\\d`, `\\w`, `\\S`, lookahead, negative lookahead, lookbehind,
+backreferences, `\\A`, `\\Z`, counted repetition and every inline flag -- so the
+rule names the eight that do not rather than warning about regular expressions
+in general. Those eight need only the seven tokens above, because
+`[[:digit:]]` and `[[:alpha:]]` are caught by the same `[[:` prefix.
+
+The remaining three, `\\z`, `\\Q...\\E` and `\\h`, are deliberately absent:
+they fail on *both* engines, which makes them a broken pattern rather than a
+portability defect.
+"""
+
+
+@register
+class DivergentRegex(QueryRule):
+    """A regex lookup whose pattern means different things to the two engines.
+
+    Django hands `__regex` straight to the database, and the two databases do
+    not run the same regular-expression language: Postgres uses POSIX ARE, and
+    SQLite has no regex at all until Django registers a Python function that
+    calls `re.search`. Most of the syntax coincides, which is exactly what
+    makes the parts that do not so easy to walk into.
+    """
+
+    meta = RuleMeta(
+        id="DJX-008",
+        title="a regex lookup uses syntax the two engines read differently",
+        family=Family.DJX,
+        severity=Severity.HIGH,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "`__regex` is handed to the database, and the two databases speak "
+            "different regular-expression languages: Postgres uses POSIX ARE, while "
+            "SQLite has no regex operator at all until Django registers a Python "
+            "function that calls `re.search`. Measured over the same rows on both "
+            "engines, `\\b` is a word boundary in Python and a backspace character in "
+            "POSIX -- `\\bUSD\\b` matched one row on SQLite and zero on Postgres, with "
+            "no error on either side. `[[:digit:]]` is the mirror image: six rows on "
+            "Postgres, zero on SQLite. Those are the dangerous ones, because the query "
+            "succeeds and answers differently. `\\y`, `\\m` and `\\M` fail loudly on "
+            "SQLite, and `(?P<name>)` fails loudly on Postgres."
+        ),
+        remediation=(
+            "Write the pattern in the subset both engines share -- `\\d`, `\\w`, `\\s`, "
+            "anchors, groups, alternation, counted repetition, lookaround and inline "
+            "flags were all measured to agree. A word boundary has no portable "
+            "spelling, so express it with an explicit character set such as "
+            "`(^|[^0-9A-Za-z])USD([^0-9A-Za-z]|$)`, which was measured to return the "
+            "same rows on both engines -- note that the POSIX spelling of that same "
+            "idea, `[[:alnum:]]`, is itself one of the constructs below. Or step "
+            "back and ask "
+            "whether the question is really a regular expression: a `__iregex` "
+            "standing in for a word search is usually better served by a database "
+            "text search or a normalised column."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/models/querysets/#regex",
+            "https://www.postgresql.org/docs/current/functions-matching.html",
+        ),
+        limitations=(
+            "Only patterns written as a literal string in the call are read. A "
+            "pattern built from a variable, a format string or a settings value is "
+            "not inspected, and a pattern supplied by a user is a DJI concern rather "
+            "than a portability one. The eight constructs behind the seven tokens "
+            "listed were measured; sixteen others were measured to agree and are "
+            "deliberately not reported, "
+            "so this is not a warning about regular expressions in general. `\\z`, "
+            "`\\Q...\\E` and `\\h` fail on both engines and are left out for the same "
+            "reason -- they are a broken pattern, not a divergence.",
+        ),
+    )
+
+    WORDS = REGEX_LOOKUPS
+
+    def wanted(self, node: ast.Call) -> bool:
+        if not isinstance(node.func, ast.Attribute) or node.func.attr not in LOOKUP_METHODS:
+            return False
+        return any(kw.arg is not None and kw.arg.endswith(REGEX_LOOKUPS) for kw in node.keywords)
+
+    def report(
+        self, ctx: ProjectContext, path: Path, call: ast.Call, model: str | None
+    ) -> Finding | None:
+        hits: list[tuple[str, str, str]] = []
+        for kw in call.keywords:
+            if kw.arg is None or not kw.arg.endswith(REGEX_LOOKUPS):
+                continue
+            if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, str):
+                continue
+            for token, effect, where in REGEX_DIALECT:
+                if token in kw.value.value:
+                    hits.append((token, effect, where))
+        if not hits:
+            return None
+        named = "; ".join(f"`{token}` {effect}" for token, effect, _ in hits)
+        return self.finding(
+            location=ctx.location(path, call),
+            message=f"this regex is not portable: {named}",
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.SOURCE,
+                    content=ctx.snippet(path, call.lineno, call.end_lineno),
+                    source=ctx.rel(path),
+                ),
+                Evidence(
+                    kind=EvidenceKind.CONFIG,
+                    content=(
+                        "sqlite:   django registers re.search as the REGEXP operator\n"
+                        "postgres: the ~ operator, POSIX ARE"
+                    ),
+                    source="measured against django 6.0",
+                ),
+            ),
+            properties={
+                "constructs": " ".join(sorted({token for token, _, _ in hits})),
+                "breaks": " ".join(sorted({where for _, _, where in hits})),
+            },
+        )

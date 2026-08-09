@@ -6534,7 +6534,7 @@ rules come first; the live tier is then built for consumers that exist.
   chooses to do at import time happens with the file system and network access
   of whoever typed the command. The note states why that is worth doing at all
   — only Django can say what SQL a migration emits, and only Django can give a
-  second opinion on its own deployment checks, which is 2 of 85 rules — and
+  second opinion on its own deployment checks, which is 2 of 86 rules — and
   then states exactly what the subprocess is allowed: 10 environment variables
   in, 4 refused outright, a 30-second timeout enforced by killing the process
   group, 1 MiB captured per stream, stdin closed. It records the `PASSTHROUGH`
@@ -7085,7 +7085,125 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   the new test fail. The other three survivors are the two documented textual
   cost prefilters and `DJX-007`'s own, which is the same guard for the same
   reason: blanking it leaves every finding identical and moves only the clock.
-- **5.2.7** — `DJX-008` date and time truncation with timezone handling that differs by backend.
+- **5.2.7** — ~~`DJX-008` date and time truncation with timezone handling that
+  differs by backend.~~ **Withdrawn: measured on both engines, and it does not
+  differ.** This is the second `DJX` premise to fall to measurement, and it
+  fell harder than the first — the foreign-key premise was merely out of date,
+  whereas this one is contradicted by a feature flag that appears to support it.
+
+  `supports_timezones` is `False` on the SQLite backend and `True` on Postgres,
+  which reads like a statement that timezone-aware truncation must diverge. It
+  is not. Django registers Python implementations on every SQLite connection it
+  opens — `django_datetime_trunc`, `django_datetime_extract`, `django_datetime_cast_date`
+  and their siblings, in `django/db/backends/sqlite3/_functions.py` — and those
+  helpers call `zoneinfo.ZoneInfo` and `timezone.localtime` to do in Python
+  exactly what Postgres does in C. The flag means "the engine has no native
+  timezone type, so we compensate", not "the answers differ".
+
+  Twenty-eight substantive comparisons, run against a real SQLite file and the
+  live Postgres, all agreeing exactly: `TruncDate`, `TruncDay`, `TruncHour`,
+  `TruncWeek`, `TruncQuarter` and `TruncSecond`; `ExtractHour`, `ExtractWeek`,
+  `ExtractIsoYear`, `ExtractIsoWeekDay` and `ExtractSecond`; the `__date`
+  lookup; each across the DST spring-forward gap and the fall-back fold, a
+  half-hour-offset zone (`Asia/Kathmandu`, +05:45), a fixed offset, and three
+  legacy zone aliases (`US/Eastern`, `Asia/Calcutta`, `Europe/Kyiv`); plus a
+  per-database `DATABASES['default']['TIME_ZONE']`. Not one pair differed.
+  Shipping the planned rule would have meant telling users to rewrite correct
+  code.
+
+  It is replaced by `DJX-008` **a regex lookup whose pattern means different
+  things to the two engines**, which is the same defect class stated about
+  something that is true. `__regex` and `__iregex` compile to different engines
+  entirely: on SQLite Django registers Python's `re.search` as the `REGEXP`
+  operator, and on Postgres the lookup becomes the `~` operator, which is POSIX
+  ARE. These are not two implementations of one syntax; they are two syntaxes
+  that overlap.
+
+  **Done, and the shape of the rule came from the measurement rather than the
+  other way round.** Twenty-seven constructs were run against the same eleven
+  rows on both engines. Twenty agree and are deliberately silent — `\d`, `\w`,
+  `\s`, `\S`, `\A`, `\Z`, backreferences, all four inline flags, lookahead,
+  negative lookahead, lookbehind, `a{2,}`, alternation, anchors and negated
+  character sets. Seven diverge, and they fall into three classes that a
+  developer needs told apart:
+
+  ```
+  \bUSD\b        sqlite 1    postgres 0      silent
+  \BSD           sqlite 1    postgres 0      silent
+  [[:digit:]]+   sqlite 0    postgres 6      silent
+  [[:alpha:]]+   sqlite 0    postgres 11     silent
+  \y555\y        sqlite ERR  postgres 1      crashes on sqlite
+  \mUSD          sqlite ERR  postgres 1      crashes on sqlite
+  (?P<w>abc)     sqlite 1    postgres ERR    crashes on postgres
+  ```
+
+  The first four are the reason this rule exists. `\b` is the single commonest
+  construct in the whole matrix and one of the few that is genuinely dangerous:
+  Python reads it as a word boundary, POSIX ARE reads it as a literal backspace
+  character, and *neither engine complains*. A whole-word search written and
+  tested under SQLite silently becomes a search for a control character in
+  production. `[[:digit:]]` is the same failure mirrored — Python's `re` reads
+  it as a nested set and matches nothing where Postgres matches six rows.
+
+  **`\z`, `\Q...\E` and `\h` were measured to fail on both engines and are
+  deliberately not reported.** A pattern that is broken everywhere is a bug, not
+  a portability defect, and filing it under `DJX` would tell the reader the
+  wrong thing about why it is broken and what fixing it involves. Likewise
+  `[:alpha:]` with a single bracket agrees on both — the rule matches on `[[:`,
+  not `[:`, and there is a test whose only job is that distinction.
+
+  The remediation admits what it cannot offer. `[[:digit:]]` has a portable
+  spelling (`[0-9]`), and `(?P<name>)` has one (drop the name). **`\b` does
+  not.** The fixture's twin writes the same whole-word question as
+  `(^|[^0-9A-Za-z])USD([^0-9A-Za-z]|$)`, which was measured to return the same
+  six rows on both engines — longer, uglier, and correct. A rule that claimed
+  otherwise would be selling a fix it does not have.
+
+  The rule reads only patterns written as literal strings. A pattern held in a
+  name or built by concatenation could be anything, and guessing would be the
+  one thing this family cannot afford; the limitation says so rather than the
+  rule pretending. That is a real cost — the fixture defect was written with
+  concatenation first, and the rule correctly said nothing about it.
+
+  **The corpus moved by zero, and the reason was measured rather than assumed.**
+  Across all 3,091 files, eight mention a regex lookup at all: five in NetBox
+  and three in pretix, none in Healthchecks. NetBox and pretix both compute
+  `ENGINE` at import time, so the divergence gate excludes them from every
+  `DJX` rule regardless of content; Healthchecks is the only corpus project
+  that passes the gate and it has none. So this rule's corpus silence is
+  vacuous as recall evidence, exactly as `DJX-006`'s was, and the fixture is
+  again the only place it has a known answer. What the corpus *can* say is
+  smaller but not nothing: every literal pattern in those eight files —
+  pretix's `(^|,)`, NetBox's `[^X]$` and `^ABC.*` — is built from anchors,
+  alternation and negated sets, all of which were measured to agree, so the
+  rule would be silent on all of them for the right reason rather than by
+  accident.
+
+  **Mutation: 231/242**, after two rounds that each found a defect rather than
+  a missing test. The first round's survivors showed `wanted()` re-implementing
+  the whole of `report()`, and that duplication was not merely redundant — it
+  *shielded* `report`'s own guards, so the test for a non-literal pattern was
+  passing through a prefilter and never reaching the code it was written to
+  exercise. Cutting `wanted()` back to the cheap syntactic check the other
+  rules use exposed them. A second survivor showed that
+  `assert " and " in message` proved nothing about the conjunction, because the
+  `[[:` clause contains its own "and" — and reading the joined message showed
+  it was an unreadable run-on for exactly that reason. The separator is now
+  "; " and the tests assert whole messages. The eleven remaining survivors are
+  the three documented cost prefilters, three widening mutants of this rule's
+  own prefilter, which `report` re-validates, and five table-prose blanks now
+  covered by whole-message assertions.
+
+  Two further defects came out of re-reading the shipped prose rather than the
+  code. The counts did not add up — the rationale said twenty of twenty-seven
+  constructs agreed and named seven that did not, which leaves three
+  unaccounted for; it is sixteen that agree, eight that diverge across seven
+  tokens, and three that fail on both. And the remediation offered
+  `(^|[^[:alnum:]])USD([^[:alnum:]]|$)` as the portable spelling of a word
+  boundary, which is self-contradictory: `[[:alnum:]]` is one of the constructs
+  this very rule reports. It now recommends `[^0-9A-Za-z]`, the form the
+  fixture twin uses and the one that was actually measured to return the same
+  six rows on both engines.
 - **5.2.8** — `DJX-009` `max_length` enforced by Postgres but not SQLite.
 
 ### Step 5.3 — External tool adapters
@@ -7999,11 +8117,11 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **85 rules are
+document specifies, and most of it is still only specified: **86 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
 all ten of Phase 4's migration rules, its deployment-check gap rule, and the
-first of Phase 5's portability family.
+first eight of Phase 5's portability family.
 `DJM-010` is the first **live** rule: the first that reads the SQL a migration
 emits rather than predicting it from the operation. `DJS-028` is the first rule
 whose subject is this tool rather than the project it is auditing.
