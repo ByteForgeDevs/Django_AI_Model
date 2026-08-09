@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJX` — cross-database portability
 
-4 rules on the gap between the database a developer runs and the one
+5 rules on the gap between the database a developer runs and the one
 that serves requests. Nothing here is a vulnerability and nothing here fails
 at import time. These are the defects that pass the whole test suite and then
 fail on production data, because the test suite ran against the other engine.
@@ -54,6 +54,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJX-002`](#djx-002--a-jsonfield-containment-lookup-is-used-in-a-project-that-also-runs-sqlite) | a JSONField containment lookup is used in a project that also runs SQLite | high | certain |
 | [`DJX-003`](#djx-003--distinct-on-is-used-in-a-project-that-also-runs-sqlite) | DISTINCT ON is used in a project that also runs SQLite | high | certain |
 | [`DJX-004`](#djx-004--a-case-sensitive-text-lookup-is-used-in-a-project-that-also-runs-sqlite) | a case-sensitive text lookup is used in a project that also runs SQLite | medium | firm |
+| [`DJX-005`](#djx-005--a-postgres-only-field-type-is-declared-in-a-project-that-also-runs-sqlite) | a Postgres-only field type is declared in a project that also runs SQLite | high | certain |
 
 ---
 
@@ -61,7 +62,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 **Severity** medium · **Confidence** certain · **Tier** static
 
-**What it means.** SQLite and Postgres disagree about more than speed. SQLite compares text case-sensitively by default and Postgres does too but collates it differently, so ordering and `iexact` diverge; SQLite does not enforce `max_length`, so a value that truncates in one and raises in the other passes every local test; foreign keys are unenforced under SQLite unless explicitly switched on; `distinct('field')`, `ArrayField` and the JSON containment operators exist only on Postgres. None of these fail at import time and none are visible in a diff. They fail in production, against real data, on code that passed the whole test suite -- because the test suite ran against the other database. That is what makes this worth reporting even though nothing here is a vulnerability: it converts 'works locally' from evidence into a coincidence.
+**What it means.** SQLite and Postgres disagree about more than speed. SQLite's `LIKE` folds ASCII case and Postgres' does not, so `contains`, `startswith` and `endswith` match different rows on each; the two sort text under different collations, so `order_by` on a name column returns a different order -- measured, SQLite answers Apple, Banana, apple and Postgres answers apple, Apple, Banana; SQLite does not enforce `max_length`, so a value that truncates in one and raises in the other passes every local test; `distinct('field')`, `ArrayField` and the JSON containment operators exist only on Postgres. None of these fail at import time and none are visible in a diff. They fail in production, against real data, on code that passed the whole test suite -- because the test suite ran against the other database. That is what makes this worth reporting even though nothing here is a vulnerability: it converts 'works locally' from evidence into a coincidence.
 
 **How to fix it.** Run the same engine everywhere -- a container or a managed development instance costs less than one production-only bug. Where that is not possible, run the test suite against the production engine in CI so the divergence is exercised before a deploy rather than after, and treat the rest of the DJX findings on this project as live rather than theoretical.
 
@@ -130,3 +131,22 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#contains>
 - <https://docs.djangoproject.com/en/stable/ref/databases/#substring-matching-and-case-sensitivity>
+
+---
+
+### DJX-005 — a Postgres-only field type is declared in a project that also runs SQLite
+
+**Severity** high · **Confidence** certain · **Tier** static
+
+**What it means.** `django.contrib.postgres` exists to expose types Postgres has and other backends do not, and Django does not stop you pointing one at SQLite -- it renders the Postgres type verbatim and lets the database complain. Measured against a real SQLite: an `ArrayField` renders `varchar(16)[]` and `migrate` fails outright; an `HStoreField` renders `hstore`, which SQLite accepts as a column type because it accepts any word, so the table is created and the first write fails instead; a `SearchVectorField` gets as far as storing NULL and fails only when something searches it. All three end in a broken developer environment, and the last two end in one that looks healthy until it is used.
+
+**How to fix it.** Either stop running SQLite -- these types are a deliberate dependency on Postgres and the honest response is to depend on it everywhere -- or replace the field with a portable one: `JSONField` covers `ArrayField` and `HStoreField` for most uses, a range becomes two nullable columns with a `CheckConstraint`, and full-text search becomes a search service or a portable `icontains` fallback.
+
+**What this rule cannot see.**
+
+- Reported per field, not per model, because the replacement differs by type and a single finding naming four fields would have four different fixes. A field imported under an alias is still resolved, but a model built by a factory function rather than declared is not seen at all. Fields outside `django.contrib.postgres` that nonetheless require Postgres -- a third-party package's own vector or citext field -- are not reported, because we cannot know what SQL an unfamiliar field emits. Only reported when the project is evidenced to reach both SQLite and Postgres: NetBox declares 23 of these fields and is not reported, because NetBox runs Postgres and only Postgres, and 23 findings about a dependency it took deliberately is how a family earns an ignore rule.
+
+**References**
+
+- <https://docs.djangoproject.com/en/stable/ref/contrib/postgres/fields/>
+- <https://docs.djangoproject.com/en/stable/ref/databases/>

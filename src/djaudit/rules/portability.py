@@ -22,7 +22,16 @@ from typing import TYPE_CHECKING
 
 from djaudit.context import ProjectContext
 from djaudit.engines import Divergence, EngineChoice, Vendor, module_name
-from djaudit.models import Confidence, Evidence, EvidenceKind, Family, Finding, Severity, Tier
+from djaudit.models import (
+    Confidence,
+    Evidence,
+    EvidenceKind,
+    Family,
+    Finding,
+    Location,
+    Severity,
+    Tier,
+)
 from djaudit.registry import Rule, RuleMeta, register
 from djaudit.rules._injection import Frame, own_calls
 
@@ -30,7 +39,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from djaudit.dataflow.scopes import Scope
-    from djaudit.graph.nodes import FieldNode
+    from djaudit.graph.nodes import FieldNode, ModelNode
 
 _DATABASES_DOCS = "https://docs.djangoproject.com/en/stable/ref/settings/#databases"
 _BACKENDS_DOCS = "https://docs.djangoproject.com/en/stable/ref/databases/"
@@ -103,18 +112,20 @@ class EngineDivergence(Rule):
         confidence=Confidence.CERTAIN,
         tier=Tier.STATIC,
         rationale=(
-            "SQLite and Postgres disagree about more than speed. SQLite compares text "
-            "case-sensitively by default and Postgres does too but collates it "
-            "differently, so ordering and `iexact` diverge; SQLite does not enforce "
-            "`max_length`, so a value that truncates in one and raises in the other "
-            "passes every local test; foreign keys are unenforced under SQLite unless "
-            "explicitly switched on; `distinct('field')`, `ArrayField` and the JSON "
-            "containment operators exist only on Postgres. None of these fail at "
-            "import time and none are visible in a diff. They fail in production, "
-            "against real data, on code that passed the whole test suite -- because "
-            "the test suite ran against the other database. That is what makes this "
-            "worth reporting even though nothing here is a vulnerability: it converts "
-            "'works locally' from evidence into a coincidence."
+            "SQLite and Postgres disagree about more than speed. SQLite's `LIKE` folds "
+            "ASCII case and Postgres' does not, so `contains`, `startswith` and "
+            "`endswith` match different rows on each; the two sort text under "
+            "different collations, so `order_by` on a name column returns a different "
+            "order -- measured, SQLite answers Apple, Banana, apple and Postgres "
+            "answers apple, Apple, Banana; SQLite does not enforce `max_length`, so a "
+            "value that truncates in one and raises in the other passes every local "
+            "test; `distinct('field')`, `ArrayField` and the JSON containment "
+            "operators exist only on Postgres. None of these fail at import time and "
+            "none are visible in a diff. They fail in production, against real data, "
+            "on code that passed the whole test suite -- because the test suite ran "
+            "against the other database. That is what makes this worth reporting even "
+            "though nothing here is a vulnerability: it converts 'works locally' from "
+            "evidence into a coincidence."
         ),
         remediation=(
             "Run the same engine everywhere -- a container or a managed development "
@@ -604,4 +615,156 @@ class CaseSensitiveTextLookup(QueryRule):
                 ),
             ),
             properties={"lookups": " ".join(kw for kw, _ in hits), "fields": " ".join(columns)},
+        )
+
+
+POSTGRES_PACKAGE = "django.contrib.postgres."
+"""Every field under this package is Postgres-only by construction.
+
+Matching the package rather than a list of class names is deliberate. A list
+goes stale the first time Django adds a field and reports nothing while looking
+like it still works; the package boundary is Django's own statement about which
+fields need Postgres, and it cannot drift out of date.
+"""
+
+POSTGRES_ONLY_EFFECT = {
+    "ArrayField": (
+        "SQLite cannot create the column at all: the type renders as `varchar(n)[]` "
+        'and `migrate` fails with `near "[]": syntax error` before the table exists'
+    ),
+    "HStoreField": (
+        "SQLite accepts `hstore` as a column type -- it accepts any word as a column "
+        "type -- so the table is created and the failure moves to the first write, "
+        "which raises `type 'dict' is not supported`"
+    ),
+    "IntegerRangeField": (
+        "SQLite creates the column, because `int4range` is just a word to it, and the "
+        "first write fails on the range literal"
+    ),
+    "BigIntegerRangeField": (
+        "SQLite creates the column, because `int8range` is just a word to it, and the "
+        "first write fails on the range literal"
+    ),
+    "DecimalRangeField": (
+        "SQLite creates the column, because `numrange` is just a word to it, and the "
+        "first write fails on the range literal"
+    ),
+    "DateRangeField": (
+        "SQLite creates the column, because `daterange` is just a word to it, and the "
+        "first write fails on the range literal"
+    ),
+    "DateTimeRangeField": (
+        "SQLite creates the column, because `tstzrange` is just a word to it, and the "
+        "first write fails on the range literal"
+    ),
+    "SearchVectorField": (
+        "SQLite creates the column and even stores NULL in it, so nothing fails until "
+        "something searches: `SearchVector` needs `to_tsvector`, which SQLite does not "
+        "have, and the `@@` operator is a syntax error there"
+    ),
+}
+"""What SQLite actually does with each type, measured rather than assumed.
+
+The three outcomes are genuinely different and a developer needs to know which
+one they are in: `migrate` fails, the first write fails, or nothing fails until
+a query runs. Types absent from this table are still reported -- the package is
+what decides that -- but described in general terms, because describing a
+failure we have not measured is how a rule starts inventing.
+"""
+
+
+@register
+class PostgresOnlyField(DivergenceRule):
+    """A `django.contrib.postgres` field in a project that also runs SQLite.
+
+    The bluntest rule in the family. `DJX-004` reports a query that answers
+    differently; this reports a schema that one of the two engines cannot hold
+    at all. Whatever the project believes about running SQLite in development,
+    a model with an `ArrayField` cannot be migrated there.
+    """
+
+    meta = RuleMeta(
+        id="DJX-005",
+        title="a Postgres-only field type is declared in a project that also runs SQLite",
+        family=Family.DJX,
+        severity=Severity.HIGH,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "`django.contrib.postgres` exists to expose types Postgres has and other "
+            "backends do not, and Django does not stop you pointing one at SQLite -- "
+            "it renders the Postgres type verbatim and lets the database complain. "
+            "Measured against a real SQLite: an `ArrayField` renders `varchar(16)[]` "
+            "and `migrate` fails outright; an `HStoreField` renders `hstore`, which "
+            "SQLite accepts as a column type because it accepts any word, so the table "
+            "is created and the first write fails instead; a `SearchVectorField` gets "
+            "as far as storing NULL and fails only when something searches it. All "
+            "three end in a broken developer environment, and the last two end in one "
+            "that looks healthy until it is used."
+        ),
+        remediation=(
+            "Either stop running SQLite -- these types are a deliberate dependency on "
+            "Postgres and the honest response is to depend on it everywhere -- or "
+            "replace the field with a portable one: `JSONField` covers `ArrayField` "
+            "and `HStoreField` for most uses, a range becomes two nullable columns "
+            "with a `CheckConstraint`, and full-text search becomes a search service "
+            "or a portable `icontains` fallback."
+        ),
+        references=(
+            "https://docs.djangoproject.com/en/stable/ref/contrib/postgres/fields/",
+            _BACKENDS_DOCS,
+        ),
+        limitations=(
+            "Reported per field, not per model, because the replacement differs by "
+            "type and a single finding naming four fields would have four different "
+            "fixes. A field imported under an alias is still resolved, but a model "
+            "built by a factory function rather than declared is not seen at all. "
+            "Fields outside `django.contrib.postgres` that nonetheless require "
+            "Postgres -- a third-party package's own vector or citext field -- are not "
+            "reported, because we cannot know what SQL an unfamiliar field emits. "
+            "Only reported when the project is evidenced to reach both SQLite and "
+            "Postgres: NetBox declares 23 of these fields and is not reported, because "
+            "NetBox runs Postgres and only Postgres, and 23 findings about a "
+            "dependency it took deliberately is how a family earns an ignore rule.",
+        ),
+    )
+
+    def diverging(self, ctx: ProjectContext, found: Divergence) -> Iterator[Finding]:
+        for model in ctx.model_graph.models.values():
+            if model.is_proxy:
+                continue
+            for field in model.all_fields.values():
+                if not field.dotted.startswith(POSTGRES_PACKAGE):
+                    continue
+                yield self.report(ctx, model, field)
+
+    def report(self, ctx: ProjectContext, model: ModelNode, field: FieldNode) -> Finding:
+        effect = POSTGRES_ONLY_EFFECT.get(
+            field.kind,
+            "SQLite has no equivalent type and the column cannot hold what this field is for",
+        )
+        return self.finding(
+            location=Location(
+                file=ctx.rel(model.path),
+                line=field.lineno,
+                end_line=field.end_lineno,
+                snippet=ctx.snippet(model.path, field.lineno, field.end_lineno),
+            ),
+            message=(
+                f"`{model.name}.{field.name}` uses {field.kind}, which only Postgres "
+                f"has -- {effect}"
+            ),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.SOURCE,
+                    content=ctx.snippet(model.path, field.lineno, field.end_lineno),
+                    source=ctx.rel(model.path),
+                ),
+                Evidence(
+                    kind=EvidenceKind.CONFIG,
+                    content=f"{field.dotted} resolved through this module's imports",
+                    source="model graph",
+                ),
+            ),
+            properties={"field": f"{model.name}.{field.name}", "kind": field.kind},
         )

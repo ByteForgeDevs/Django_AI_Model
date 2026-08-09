@@ -32,6 +32,7 @@ ICONTROLS = INJECTION / "shop/controls.py"
 
 PORTABILITY = ROOT / "tests/fixtures/portability_project"
 PQUERIES = PORTABILITY / "warehouse/queries.py"
+PMODELS = PORTABILITY / "warehouse/models.py"
 
 Unfix = tuple[str, str, Path, str, str]
 
@@ -315,6 +316,23 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
 )
 
 PORTABILITY_UNFIXES: tuple[Unfix, ...] = (
+    (
+        "DJX-005",
+        "hold the tags in a Postgres array instead of a portable column",
+        PMODELS,
+        # The import and the declaration have to move together: an unresolvable
+        # `ArrayField` is not a Postgres field as far as the model graph is
+        # concerned, so either half alone un-fixes nothing.
+        "from django.db import models\n\n\nclass Item(models.Model):\n"
+        "    sku = models.CharField(max_length=32, unique=True)\n"
+        "    name = models.CharField(max_length=200)\n"
+        '    tags = models.TextField(default="")',
+        "from django.contrib.postgres.fields import ArrayField\n"
+        "from django.db import models\n\n\nclass Item(models.Model):\n"
+        "    sku = models.CharField(max_length=32, unique=True)\n"
+        "    name = models.CharField(max_length=200)\n"
+        "    tags = ArrayField(models.CharField(max_length=40), default=list)",
+    ),
     (
         "DJX-004",
         "match a substring case-sensitively instead of asking for either case",

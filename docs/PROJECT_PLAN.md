@@ -6534,7 +6534,7 @@ rules come first; the live tier is then built for consumers that exist.
   chooses to do at import time happens with the file system and network access
   of whoever typed the command. The note states why that is worth doing at all
   — only Django can say what SQL a migration emits, and only Django can give a
-  second opinion on its own deployment checks, which is 2 of 82 rules — and
+  second opinion on its own deployment checks, which is 2 of 83 rules — and
   then states exactly what the subprocess is allowed: 10 environment variables
   in, 4 refused outright, a 30-second timeout enforced by killing the process
   group, 1 MiB captured per stream, stdin closed. It records the `PASSTHROUGH`
@@ -6862,7 +6862,62 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   there would cost precision across every rule built on the tracker, not just
   this one. It is recorded in the triage note and pinned by two tests with a
   single-rebinding presence control.
-- **5.2.4** — `DJX-005` Postgres-only fields (`ArrayField`, `HStoreField`, `JSONField` operators, ranges) in a project that runs SQLite in development.
+- **5.2.4** — `DJX-005` Postgres-only field types in a project that runs SQLite
+  in development. **Done.**
+
+  Measured first, one model per field type against a real SQLite, and the
+  measurement is why the rule says three different things instead of one:
+
+  | field | what SQLite does |
+  |---|---|
+  | `ArrayField` | `migrate` fails — `near "[]": syntax error`, no table |
+  | `HStoreField` | table created, first write: `type 'dict' is not supported` |
+  | range fields | table created, first write fails on the range literal |
+  | `SearchVectorField` | table created, NULL round-trips; only a search fails |
+
+  The same models on the live Postgres created, wrote, read back and filtered
+  without complaint. The three outcomes matter to whoever reads the finding:
+  one breaks the migration, one breaks the first write, and one looks healthy
+  until the search feature is switched on. Django does not refuse any of them —
+  it renders the Postgres type verbatim and lets the database complain, which
+  is how `hstore` becomes a column type SQLite happily accepts.
+
+  The rule gates on the **package**, `django.contrib.postgres.`, resolved
+  through the module's imports rather than on a list of class names. A list
+  goes stale the first time Django adds a field and reports nothing while still
+  looking like it works; the package boundary is Django's own statement about
+  which fields need Postgres and cannot drift. It also gets the two directions
+  right for free: a project's own class called `ArrayField` is not reported,
+  and `django.contrib.postgres.fields.ArrayField` imported under an alias still
+  is. The per-type effects table only decides *how precisely* the failure is
+  described; a type absent from it is still reported, in general terms, because
+  describing a failure we have not measured is how a rule starts inventing.
+
+  Reported per field rather than per model, because the replacement differs by
+  type — an `ArrayField` becomes a `JSONField`, a range becomes two nullable
+  columns and a `CheckConstraint` — and one finding naming four fields would
+  have four different fixes.
+
+  What the divergence gate buys was measured rather than assumed: NetBox
+  declares **23** of these fields on its models, and `DJX-005` reports none of
+  them, because NetBox has never run SQLite. Healthchecks, the only corpus
+  project that passes the gate, declares none. That is the family's precision
+  argument in one number, and it is now in the rule's `limitations`.
+
+  **`DJX-001`'s rationale was corrected in the same substep.** It claimed
+  "foreign keys are unenforced under SQLite unless explicitly switched on",
+  which substep 5.2.6 had already withdrawn as false — Django has executed
+  `PRAGMA foreign_keys = ON` on every SQLite connection since 2.0, and
+  `PRAGMA foreign_keys` reads `1`, measured. It also claimed `iexact`
+  diverges; measured, `iexact` returns the same rows on both engines, because
+  it is the *case-sensitive* spellings that diverge. Both were replaced with
+  what was measured, including the one divergence the plan named for 5.2.3 and
+  the rule family does not report: default collation genuinely differs —
+  SQLite orders `Apple, Banana, apple` and Postgres orders `apple, Apple,
+  Banana` — but it is a per-column property invisible from source, and a rule
+  that flagged every `order_by` on a text column would flag almost every
+  queryset in the corpus. A false claim inside a rationale is worse than a
+  missing rule: it is the tool teaching a developer something untrue.
 - **5.2.5** — `DJX-006` deferred constraint and transaction semantics differences.
 - **5.2.6** — ~~`DJX-007` foreign keys unenforced by default under SQLite.~~
   **Withdrawn: the premise is false on every Django this tool supports.**
@@ -7794,7 +7849,7 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **82 rules are
+document specifies, and most of it is still only specified: **83 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
 all ten of Phase 4's migration rules, its deployment-check gap rule, and the
