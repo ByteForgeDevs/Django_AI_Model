@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from djaudit import fingerprint as fp
 from djaudit import scope
+from djaudit.adapters.base import Adapter, Report
+from djaudit.adapters.merge import merge
 from djaudit.baseline import Baseline
 from djaudit.context import ProjectContext
 from djaudit.degradation import Degradation, assess
@@ -49,6 +52,16 @@ class RunResult:
     a static run where it was never asked both show zero findings raised to
     `certain`, and they are not the same situation.
     """
+
+    external_notices: tuple[str, ...] = ()
+    """One line per external tool asked for, whether it ran or not.
+
+    A report that is short because a linter was missing looks exactly like a
+    report that is short because a project is clean, so the run says which.
+    """
+
+    external_diagnostics: tuple[str, ...] = ()
+    external_duplicates: int = 0
 
     rule_errors: dict[str, str] = field(default_factory=dict)
     degraded: Degradation | None = None
@@ -102,6 +115,7 @@ def run(
     min_confidence: Confidence = Confidence.TENTATIVE,
     baseline: Baseline | None = None,
     context: ProjectContext | None = None,
+    external: Sequence[Adapter] = (),
 ) -> RunResult:
     """Audit the project at ``root``.
 
@@ -124,6 +138,7 @@ def run(
             min_confidence=min_confidence,
             baseline=baseline,
             context=context,
+            external=external,
         )
 
 
@@ -138,6 +153,7 @@ def _audit(
     min_confidence: Confidence,
     baseline: Baseline | None,
     context: ProjectContext | None,
+    external: Sequence[Adapter],
 ) -> RunResult:
     """The audit itself. Separated so :func:`run` reads as policy, then work."""
     started = time.perf_counter()
@@ -186,17 +202,23 @@ def _audit(
 
     result.total_raw = len(collected)
 
+    def suppressed(finding: Finding) -> bool:
+        path = ctx.root / finding.location.file
+        return is_suppressed(
+            ctx.lines(path), finding.location.line, finding.location.end_line, finding.rule_id
+        )
+
     kept: list[Finding] = []
     for finding in collected:
-        path = ctx.root / finding.location.file
-        if is_suppressed(
-            ctx.lines(path), finding.location.line, finding.location.end_line, finding.rule_id
-        ):
+        if suppressed(finding):
             result.suppressed_inline += 1
             continue
         kept.append(scope.apply(finding))
 
     kept = fp.assign(kept)
+
+    if external:
+        kept = _fold_external(ctx, external, kept, result, suppressed)
 
     if baseline is not None:
         before = len(kept)
@@ -209,6 +231,57 @@ def _audit(
     result.findings = sorted(above, key=lambda f: f.sort_key)
     result.duration_seconds = time.perf_counter() - started
     return result
+
+
+def _fold_external(
+    ctx: ProjectContext,
+    adapters: Sequence[Adapter],
+    ours: list[Finding],
+    result: RunResult,
+    suppressed: Callable[[Finding], bool],
+) -> list[Finding]:
+    """Add every external tool's findings to ours, under our own rules.
+
+    Called *after* our findings have their identities and *before* the baseline
+    and the thresholds, so an external finding is suppressed, baselined and
+    ranked by exactly what governs one of ours. An adapter that bypassed them
+    would turn `--external` into a way to defeat the user's own filters.
+    """
+    reports = _collect_external(ctx, adapters, result)
+    merged = merge(ours, reports)
+    result.external_notices = merged.notices
+    result.external_diagnostics = merged.diagnostics
+    result.external_duplicates = merged.duplicates
+    result.total_raw += sum(len(report.findings) for report in reports)
+
+    kept: list[Finding] = []
+    for finding in merged.findings:
+        if suppressed(finding):
+            result.suppressed_inline += 1
+            continue
+        kept.append(finding)
+    return kept
+
+
+def _collect_external(
+    ctx: ProjectContext, adapters: Sequence[Adapter], result: RunResult
+) -> list[Report]:
+    """Ask every adapter, and let none of them end the run.
+
+    `Adapter.collect` already promises not to raise for anything its tool does,
+    but the promise is a protocol's and an adapter is somebody else's object.
+    The same isolation rules apply as to a rule that crashes: the failure is
+    recorded under the tool's name and the other results survive, because a
+    security tool that abandons an audit over an optional linter is worse than
+    one that reports the linter is broken.
+    """
+    reports: list[Report] = []
+    for adapter in adapters:
+        try:
+            reports.append(adapter.collect(ctx.root))
+        except Exception as exc:  # deliberate: adapter isolation, as for rules
+            result.rule_errors[adapter.name] = f"{type(exc).__name__}: {exc}"
+    return reports
 
 
 def _corroborate(ctx: ProjectContext, findings: list[Finding]) -> tuple[list[Finding], int]:

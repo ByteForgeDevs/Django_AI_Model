@@ -7683,7 +7683,65 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   zero. It was proved load-bearing the only way that means anything: narrowing
   `DJD-002` to skip three columns of pretix produced three failures naming the
   exact lines, while every other gate in the project stayed green.
-- **5.3.6** — `--with-external` / `--without-external` flags; external tools never block a run when absent.
+- **5.3.6** — `--external` / `--no-external` on `djaudit run`, default off.
+
+  **DONE.** Shipped as one flag rather than the planned pair of long-form
+  names, because `typer` renders a boolean option as `--external/--no-external`
+  and a second spelling of the same switch is a second thing to keep true.
+
+  **The default is off, and it is load-bearing twice.** Every precision number
+  this project records — healthchecks 35 findings from 41 raw, netbox 66 from
+  76, pretix 141 from 151 — was measured without external tools. A flag that
+  leaked findings into a default run would silently invalidate the benchmarks,
+  the triage priors and the recorded subsumption shortfall all at once. And
+  `pip-audit` queries a vulnerability database over the network, which is not
+  something a static analyser should do because somebody typed its name. Both
+  counts were re-measured after the change and are unchanged.
+
+  **The fold happens inside the engine, not in the CLI.** `engine.run` gained
+  an `external: Sequence[Adapter] = ()` parameter, and external findings are
+  merged in at exactly one point: *after* our own findings are fingerprinted,
+  and *before* the baseline and the thresholds. That position is the substep.
+  Folding later — which is the obvious place, since the adapters are a CLI
+  concern — would mean `--external` bypassed `--min-severity`,
+  `--min-confidence`, `--baseline` and `# djaudit: ignore`, turning the flag
+  into a way to defeat the user's own filters. Moving the fold after the
+  threshold filter as a control fails five tests; after the baseline, two.
+
+  Inline suppression is applied to merged findings as well as to ours, using
+  the same predicate, so `# djaudit: ignore[RUFF-S324]` works on a linter's
+  finding exactly as it does on one of ours.
+
+  **Absent tools degrade, and this was checked for real.** Hiding both
+  executables from the venv and re-running produced
+  `external: ruff unavailable: \`ruff\` is not on PATH` on stderr and the same
+  35 findings, exit code unchanged. An adapter that raises anyway — `collect`
+  promises not to, but the promise is somebody else's object's — is caught and
+  recorded in `rule_errors` under the tool's name, under the same isolation
+  rule as a rule that crashes, and the other adapters are still asked.
+
+  **Notices and diagnostics go to stderr.** `RunResult` gained
+  `external_notices`, `external_diagnostics` and `external_duplicates`. A
+  report that is short because a linter was missing looks exactly like a report
+  that is short because a project is clean, so every tool asked for is named
+  whether or not it found anything. They are printed alongside the existing
+  `rule_errors` block and never on stdout, because stdout may be JSON or SARIF.
+
+  **The disclosure is printed before anything runs**, in `_with_live`'s spirit:
+  a notice that a vulnerability database was queried is worth nothing once the
+  query has been made. Which adapters reach the network is read from
+  `adapters.REACHES_THE_NETWORK` rather than written into the message, so
+  adding a third adapter that phones home cannot leave the text describing the
+  old set.
+
+  *Verified:* 37 tests in `tests/test_external_flag.py`, none of which runs a
+  real external tool — `pip-audit` reaches the network and `ruff` is not
+  guaranteed anywhere this suite runs, so both are replaced by adapters that
+  answer from memory. Nine un-fix controls, each targeting one behaviour, are
+  all caught. Two earlier control attempts were non-controls and were rewritten:
+  one asserted an ordering the test itself performed, and one "moved" the
+  disclosure without moving it.
+
 
 ### Step 5.4 — Benchmark and document
 
