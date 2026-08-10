@@ -336,6 +336,21 @@ jobs:
             --name ${{ matrix.target.name }} \
             --expect benchmarks/graph/${{ matrix.target.name }}.json
 
+      # A third question, and the only gate here that can see a finding that
+      # was never made. Marking a linter's rule code SUBSUMED deletes every
+      # finding it would have produced, on the assertion that one of our rules
+      # covers the same ground; the precision gate cannot check that, because a
+      # finding that does not exist cannot be a false positive. This runs ruff
+      # restricted to the subsumed codes and compares where it reports against
+      # where our rule does. The recorded shortfall is not expected to be zero
+      # -- our rules are deliberately narrower than the linters they subsume --
+      # but it is expected not to grow without somebody looking.
+      - name: subsumption claims still hold
+        run: |
+          uv run python scripts/check_subsumption.py target \
+            --name ${{ matrix.target.name }} \
+            --expect benchmarks/subsumption/${{ matrix.target.name }}.json
+
       # Risk 8 described this step as existing for the whole of Phase 2 while
       # nothing here timed anything. It is checked on the same clone the
       # precision gate just used.

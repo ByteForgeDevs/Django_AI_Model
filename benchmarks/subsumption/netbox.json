@@ -1,0 +1,62 @@
+{
+  "target": "netbox",
+  "claims": {
+    "DJ001": {
+      "ours": [
+        "DJD-002"
+      ],
+      "reported": 48,
+      "matched": 0,
+      "unmatched": [
+        "netbox/circuits/models/circuits.py:209",
+        "netbox/dcim/models/cables.py:127",
+        "netbox/dcim/models/cables.py:85",
+        "netbox/dcim/models/device_component_templates.py:220",
+        "netbox/dcim/models/device_component_templates.py:255",
+        "netbox/dcim/models/device_component_templates.py:291",
+        "netbox/dcim/models/device_component_templates.py:356",
+        "netbox/dcim/models/device_component_templates.py:374",
+        "netbox/dcim/models/device_component_templates.py:468",
+        "netbox/dcim/models/device_component_templates.py:475",
+        "netbox/dcim/models/device_component_templates.py:482",
+        "netbox/dcim/models/device_components.py:174",
+        "netbox/dcim/models/device_components.py:440",
+        "netbox/dcim/models/device_components.py:467",
+        "netbox/dcim/models/device_components.py:498",
+        "netbox/dcim/models/device_components.py:640",
+        "netbox/dcim/models/device_components.py:655",
+        "netbox/dcim/models/device_components.py:708",
+        "netbox/dcim/models/device_components.py:873",
+        "netbox/dcim/models/device_components.py:886",
+        "netbox/dcim/models/device_components.py:893",
+        "netbox/dcim/models/device_components.py:925",
+        "netbox/dcim/models/device_components.py:932",
+        "netbox/dcim/models/devices.py:122",
+        "netbox/dcim/models/devices.py:131",
+        "netbox/dcim/models/devices.py:542",
+        "netbox/dcim/models/devices.py:591",
+        "netbox/dcim/models/devices.py:604",
+        "netbox/dcim/models/modules.py:88",
+        "netbox/dcim/models/racks.py:107",
+        "netbox/dcim/models/racks.py:275",
+        "netbox/dcim/models/racks.py:294",
+        "netbox/dcim/models/racks.py:355",
+        "netbox/extras/models/customfields.py:907",
+        "netbox/extras/models/models.py:243",
+        "netbox/ipam/models/fhrp.py:33",
+        "netbox/ipam/models/ip.py:977",
+        "netbox/ipam/models/vlans.py:263",
+        "netbox/netbox/models/mixins.py:38",
+        "netbox/netbox/models/mixins.py:85",
+        "netbox/tenancy/models/contacts.py:149",
+        "netbox/users/models/tokens.py:98",
+        "netbox/vpn/models/crypto.py:133",
+        "netbox/vpn/models/crypto.py:139",
+        "netbox/vpn/models/crypto.py:36",
+        "netbox/vpn/models/crypto.py:79",
+        "netbox/wireless/models.py:25",
+        "netbox/wireless/models.py:32"
+      ]
+    }
+  }
+}

@@ -7617,7 +7617,72 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   drive `collect` through a stub on disk, so nothing in the suite touches the
   network. 56 tests, 86/87 mutation — the one survivor is the scratch
   directory's name prefix.
-- **5.3.5** — Deduplication: same file, same line, same underlying issue reported by two tools collapses to one finding with both as evidence.
+- **5.3.5** — Deduplication, in `src/djaudit/adapters/merge.py`, and the gate
+  that turned out to matter more, `scripts/check_subsumption.py`.
+
+  The substep was planned as "same file, same line, same underlying issue
+  reported by two tools collapses to one finding with both as evidence". The
+  corpus says that situation does not arise, and that manufacturing it would
+  destroy real findings. Both halves were measured before anything was written.
+
+  **Across tools there is nothing to collapse.** Over healthchecks, netbox and
+  pretix — 268 findings of ours against the 41 the ruff adapter adopts — not one
+  external finding lands on a file *and* line that any djaudit finding also
+  names. Twelve share a file; none share a line. That is structural rather than
+  lucky: overlap is settled a layer earlier by the claim table, which rules on a
+  tool's rule *codes* before any of them become findings, so a code we cover
+  never reaches the merge. Deciding once per code, in writing, with a reason,
+  beats re-guessing per location on every run. The two shipped adapters cannot
+  collide with each other either — ruff reads Python source, pip-audit reads
+  dependency manifests, and the file sets are disjoint.
+
+  **Within a run, a shared location is usually not a duplicate.** Nine corpus
+  locations carry more than one finding and every one is two different problems:
+  `serializers/order.py:1393` carries two `DJP-001`s because `cp.variation` and
+  `cp.item` are two unprefetched attributes on one line; `views/order.py:1057`
+  carries two `DJA-014`s because one `Meta` is shared by two viewsets;
+  `settings.py:1` carries five `DJS` findings because a settings module's
+  problems all attach to the module. Collapsing by location would have deleted a
+  finding at every one. So identity here is the **fingerprint**, which is what
+  identity already means everywhere else in djaudit — it is what a baseline
+  matches on — and location is deliberately not part of it.
+
+  Writing the tests found a real defect in the design. Adapters do not
+  fingerprint what they build, so every external finding arrives with an empty
+  one, and a merge keyed on fingerprint would have collapsed all 41 of ruff's
+  into a single finding. Assignment therefore happens in the merge, **per
+  group**: a tool reporting the same text twice keeps two findings, two tools
+  reporting one thing keep one. Findings that already carry a fingerprint are
+  never re-derived, because re-deriving over a different set can change an
+  occurrence index and silently invalidate every baseline entry written for it;
+  a half-identified set is refused rather than guessed at.
+
+  **The gate is the more valuable half.** A `SUBSUMED` claim deletes every
+  finding an external code would have produced, and the decision is global —
+  it applies at the locations where our rule does *not* fire just as much as
+  where it does. Nothing could check it. A precision gate cannot: a finding that
+  was never made cannot be a false positive. So `check_subsumption.py` runs ruff
+  restricted to the subsumed codes and compares where it reports against where
+  the rule named in the claim reports, matching on grouped evidence as well as
+  the headline location because `DJD-002` reports once per model and names the
+  remaining columns in its evidence.
+
+  Measured on the corpus, `DJ001 → DJD-002` covers 179 locations: 24 our rule
+  reports, 148 exempt because the column carries `blank=True`, 2 exempt under a
+  uniqueness rule — both documented `limitations` of `DJD-002`, and both the
+  reason our version is worth having — and **5 in `WebAuthnDevice`, a model
+  absent from our graph entirely because it inherits from `django_otp`'s
+  `Device` rather than from `models.Model`.** Two of those five (`ukey`,
+  `pub_key`) are genuine `DJD-002` material that the subsumption silently
+  deleted. That is a model-graph gap rather than an adapter one, so it is
+  recorded here and left to the graph rather than patched from an adapter
+  substep — but it was invisible until this gate existed.
+
+  The shortfall is recorded per target in `benchmarks/subsumption/` and the gate
+  fails on any drift in either direction. It is deliberately not asserted to be
+  zero. It was proved load-bearing the only way that means anything: narrowing
+  `DJD-002` to skip three columns of pretix produced three failures naming the
+  exact lines, while every other gate in the project stayed green.
 - **5.3.6** — `--with-external` / `--without-external` flags; external tools never block a run when absent.
 
 ### Step 5.4 — Benchmark and document

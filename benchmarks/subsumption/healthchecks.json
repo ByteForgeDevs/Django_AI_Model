@@ -1,0 +1,17 @@
+{
+  "target": "healthchecks",
+  "claims": {
+    "DJ001": {
+      "ours": [
+        "DJD-002"
+      ],
+      "reported": 3,
+      "matched": 0,
+      "unmatched": [
+        "hc/accounts/models.py:104",
+        "hc/accounts/models.py:106",
+        "hc/api/models.py:692"
+      ]
+    }
+  }
+}
