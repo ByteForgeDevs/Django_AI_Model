@@ -118,8 +118,9 @@ class EngineDivergence(Rule):
             "different collations, so `order_by` on a name column returns a different "
             "order -- measured, SQLite answers Apple, Banana, apple and Postgres "
             "answers apple, Apple, Banana; SQLite does not enforce `max_length`, so a "
-            "value that truncates in one and raises in the other passes every local "
-            "test; `distinct('field')`, `ArrayField` and the JSON containment "
+            "value that is stored whole in one and raises `DataError` in the other "
+            "passes every local test; `distinct('field')`, `ArrayField` and the JSON "
+            "containment "
             "operators exist only on Postgres. None of these fail at import time and "
             "none are visible in a diff. They fail in production, against real data, "
             "on code that passed the whole test suite -- because the test suite ran "
@@ -1167,5 +1168,189 @@ class DivergentRegex(QueryRule):
             properties={
                 "constructs": " ".join(sorted({token for token, _, _ in hits})),
                 "breaks": " ".join(sorted({where for _, _, where in hits})),
+            },
+        )
+
+
+LENGTH_DEFAULTS: dict[str, int] = {"SlugField": 50, "EmailField": 254, "URLField": 200}
+"""Fields whose column is a `varchar` whose width Django supplies for you.
+
+Read off the emitted DDL on both engines rather than the documentation, which
+is also where `UUIDField` was dropped from this table: its `max_length` is 32,
+but it becomes a native `uuid` on Postgres rather than a `varchar`, so it is a
+different question and is not measured here.
+"""
+
+RANGE_LIMITS: dict[str, tuple[str, int]] = {
+    "IntegerField": ("integer", 2**31),
+    "PositiveIntegerField": ("integer", 2**31),
+    "SmallIntegerField": ("smallint", 2**15),
+    "PositiveSmallIntegerField": ("smallint", 2**15),
+}
+"""Integer fields whose Postgres column is narrower than a Python int.
+
+`BigIntegerField` is deliberately absent: `bigint` holds everything SQLite
+will, and the two were measured to agree at 2**62.
+
+The `Positive` variants are present for the range question and *not* for the
+sign question, which is the distinction that keeps this rule honest. Django
+emits the `>= 0` check constraint on both engines, so a negative value raises
+`IntegerError` on each -- measured, not assumed. It is only the upper bound
+that diverges.
+"""
+
+
+@register
+class UnenforcedColumnLimit(DivergenceRule):
+    """SQLite declares the column width and then ignores it.
+
+    Reported once for the whole project. Per-field would mean one finding for
+    every `CharField` in the codebase -- on the benchmark corpus that is over
+    two thousand -- which is the "4,000 alerts and an uninstall" outcome the
+    plan's adoptability principle exists to prevent. The count and a sample
+    carry the same information and cost one line of output.
+    """
+
+    meta = RuleMeta(
+        id="DJX-009",
+        title="column limits SQLite accepts and Postgres rejects",
+        family=Family.DJX,
+        severity=Severity.MEDIUM,
+        confidence=Confidence.CERTAIN,
+        tier=Tier.STATIC,
+        rationale=(
+            "SQLite has type affinity where Postgres has type constraints, so a "
+            "column declared `varchar(10)` accepts a fifty-character value and hands "
+            "it back at full length -- it is not truncated, it is simply kept. The "
+            "same write raises `DataError: value too long for type character "
+            "varying(10)` on Postgres. Measured across `create()`, `save()`, "
+            "`bulk_create()` and `update()`: all four diverge, because none of them "
+            "calls `full_clean()`, and `full_clean()` is the only thing in Django "
+            "that checks `max_length` before the database sees it. The same holds "
+            "for integer width -- 2**31 into an `IntegerField` is stored by SQLite "
+            "and raises `integer out of range` on Postgres -- and for "
+            "`DecimalField`, where too many digits raises `numeric field overflow`. "
+            "So the defect is not that the data is wrong. It is that every local "
+            "test writes values no local database will ever reject, and the first "
+            "thing that rejects them is production."
+        ),
+        remediation=(
+            "Call `full_clean()` before saving anything whose length or magnitude "
+            "comes from outside the code -- it raises `ValidationError` identically "
+            "on both engines, which is the point. A `ModelForm` and a DRF serializer "
+            "both do this for you; `Model.save()`, `bulk_create()` and "
+            "`QuerySet.update()` do not, and that is where this bites. Running the "
+            "test suite against Postgres in CI turns the whole class of defect into "
+            "a test failure rather than a production incident."
+        ),
+        references=(
+            "https://www.sqlite.org/datatype3.html",
+            "https://docs.djangoproject.com/en/stable/ref/models/instances/#validating-objects",
+        ),
+        limitations=(
+            "Counted from the model graph, so a field whose `max_length` or "
+            "`max_digits` could not be read statically is skipped rather than "
+            "guessed at. This rule says a limit is unenforced, not that any code "
+            "actually writes an over-long value -- proving that would need dataflow "
+            "from every request into every save. `TextField` is excluded on "
+            "measurement rather than on principle: it takes a `max_length` that "
+            "looks exactly like `CharField`'s, but that argument is a form "
+            "validator and produces no column constraint, so a fifty-character "
+            "value into `TextField(max_length=10)` was accepted by both engines. "
+            "`BigIntegerField` is excluded for the same reason.",
+        ),
+    )
+
+    def diverging(self, ctx: ProjectContext, found: Divergence) -> Iterator[Finding]:
+        lengths: list[str] = []
+        ranges: list[str] = []
+        digits: list[str] = []
+        for model in ctx.model_graph.models.values():
+            if model.is_proxy:
+                continue
+            for field in model.all_fields.values():
+                where = f"{model.name}.{field.name} ({ctx.rel(model.path)}:{field.lineno})"
+                if field.kind in RANGE_LIMITS:
+                    column, _ = RANGE_LIMITS[field.kind]
+                    ranges.append(f"{where} is {column}")
+                elif field.kind == "DecimalField":
+                    # `unreadable` is not consulted here the way it is for
+                    # `max_length` below: it only ever records booleans,
+                    # `max_length`, `default` and `choices`, so a `max_digits`
+                    # clause would be dead. It does not matter -- the finding
+                    # never prints the precision, so a column whose
+                    # `max_digits` we cannot read still declares one.
+                    if "max_digits" in field.kwargs:
+                        digits.append(where)
+                elif "max_length" not in field.unreadable:
+                    width = LENGTH_DEFAULTS.get(field.kind)
+                    if width is None and field.kind == "CharField":
+                        width = field.max_length
+                    if width is not None:
+                        lengths.append(f"{where} is varchar({width})")
+        if not (lengths or ranges or digits):
+            return
+        yield self._report(ctx, found, lengths, ranges, digits)
+
+    def _report(
+        self,
+        ctx: ProjectContext,
+        found: Divergence,
+        lengths: list[str],
+        ranges: list[str],
+        digits: list[str],
+    ) -> Finding:
+        counted = [
+            (lengths, "text column", "text columns", "a width"),
+            (ranges, "integer column", "integer columns", "a range"),
+            (digits, "decimal column", "decimal columns", "a precision"),
+        ]
+        parts = [
+            f"{len(group)} {one if len(group) == 1 else many} "
+            f"{'declares' if len(group) == 1 else 'declare'} {limit}"
+            for group, one, many, limit in counted
+            if group
+        ]
+        total = len(lengths) + len(ranges) + len(digits)
+        sample = (lengths + ranges + digits)[:6]
+        default = found.default
+        location = (
+            # `node` is the alias dict and is the more precise of the two;
+            # `definition.node` is the whole `DATABASES = ...` statement and is
+            # an `ast.stmt`, so this fallback always yields something.
+            ctx.location(default.definition.module, default.node or default.definition.node)
+            if default is not None
+            else Location(file=ctx.rel(ctx.root / "manage.py"), line=1)
+        )
+        return self.finding(
+            location=location,
+            message=(
+                f"{_series(parts, 'and')} that SQLite will not enforce, so "
+                f"{'this column accepts' if total == 1 else 'these columns accept'} "
+                f"values in development that Postgres rejects with DataError in "
+                f"production"
+            ),
+            evidence=(
+                Evidence(
+                    kind=EvidenceKind.AST,
+                    content="\n".join(sample),
+                    source=f"{total} columns; first {len(sample)} shown"
+                    if total > len(sample)
+                    else f"{total} columns",
+                ),
+                Evidence(
+                    kind=EvidenceKind.CONFIG,
+                    content=(
+                        'sqlite:   varchar(10) <- "x"*50 stored, reads back 50 chars\n'
+                        "postgres: DataError: value too long for type character varying(10)\n"
+                        "both:     full_clean() raises ValidationError before either"
+                    ),
+                    source="measured against django 6.0",
+                ),
+            ),
+            properties={
+                "text": str(len(lengths)),
+                "integer": str(len(ranges)),
+                "decimal": str(len(digits)),
             },
         )

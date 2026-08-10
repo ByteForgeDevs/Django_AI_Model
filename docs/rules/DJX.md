@@ -7,7 +7,7 @@ to change the rule and run the script. CI checks the two agree.
 
 # `DJX` — cross-database portability
 
-8 rules on the gap between the database a developer runs and the one
+9 rules on the gap between the database a developer runs and the one
 that serves requests. Nothing here is a vulnerability and nothing here fails
 at import time. These are the defects that pass the whole test suite and then
 fail on production data, because the test suite ran against the other engine.
@@ -58,6 +58,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 | [`DJX-006`](#djx-006--a-constraint-is-declared-that-sqlite-does-not-enforce) | a constraint is declared that SQLite does not enforce | high | certain |
 | [`DJX-007`](#djx-007--select_for_update-takes-no-lock-in-a-project-that-also-runs-sqlite) | select_for_update() takes no lock in a project that also runs SQLite | high | certain |
 | [`DJX-008`](#djx-008--a-regex-lookup-uses-syntax-the-two-engines-read-differently) | a regex lookup uses syntax the two engines read differently | high | certain |
+| [`DJX-009`](#djx-009--column-limits-sqlite-accepts-and-postgres-rejects) | column limits SQLite accepts and Postgres rejects | medium | certain |
 
 ---
 
@@ -65,7 +66,7 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 **Severity** medium · **Confidence** certain · **Tier** static
 
-**What it means.** SQLite and Postgres disagree about more than speed. SQLite's `LIKE` folds ASCII case and Postgres' does not, so `contains`, `startswith` and `endswith` match different rows on each; the two sort text under different collations, so `order_by` on a name column returns a different order -- measured, SQLite answers Apple, Banana, apple and Postgres answers apple, Apple, Banana; SQLite does not enforce `max_length`, so a value that truncates in one and raises in the other passes every local test; `distinct('field')`, `ArrayField` and the JSON containment operators exist only on Postgres. None of these fail at import time and none are visible in a diff. They fail in production, against real data, on code that passed the whole test suite -- because the test suite ran against the other database. That is what makes this worth reporting even though nothing here is a vulnerability: it converts 'works locally' from evidence into a coincidence.
+**What it means.** SQLite and Postgres disagree about more than speed. SQLite's `LIKE` folds ASCII case and Postgres' does not, so `contains`, `startswith` and `endswith` match different rows on each; the two sort text under different collations, so `order_by` on a name column returns a different order -- measured, SQLite answers Apple, Banana, apple and Postgres answers apple, Apple, Banana; SQLite does not enforce `max_length`, so a value that is stored whole in one and raises `DataError` in the other passes every local test; `distinct('field')`, `ArrayField` and the JSON containment operators exist only on Postgres. None of these fail at import time and none are visible in a diff. They fail in production, against real data, on code that passed the whole test suite -- because the test suite ran against the other database. That is what makes this worth reporting even though nothing here is a vulnerability: it converts 'works locally' from evidence into a coincidence.
 
 **How to fix it.** Run the same engine everywhere -- a container or a managed development instance costs less than one production-only bug. Where that is not possible, run the test suite against the production engine in CI so the divergence is exercised before a deploy rather than after, and treat the rest of the DJX findings on this project as live rather than theoretical.
 
@@ -210,3 +211,22 @@ $ djaudit run . --min-severity info --min-confidence tentative
 
 - <https://docs.djangoproject.com/en/stable/ref/models/querysets/#regex>
 - <https://www.postgresql.org/docs/current/functions-matching.html>
+
+---
+
+### DJX-009 — column limits SQLite accepts and Postgres rejects
+
+**Severity** medium · **Confidence** certain · **Tier** static
+
+**What it means.** SQLite has type affinity where Postgres has type constraints, so a column declared `varchar(10)` accepts a fifty-character value and hands it back at full length -- it is not truncated, it is simply kept. The same write raises `DataError: value too long for type character varying(10)` on Postgres. Measured across `create()`, `save()`, `bulk_create()` and `update()`: all four diverge, because none of them calls `full_clean()`, and `full_clean()` is the only thing in Django that checks `max_length` before the database sees it. The same holds for integer width -- 2**31 into an `IntegerField` is stored by SQLite and raises `integer out of range` on Postgres -- and for `DecimalField`, where too many digits raises `numeric field overflow`. So the defect is not that the data is wrong. It is that every local test writes values no local database will ever reject, and the first thing that rejects them is production.
+
+**How to fix it.** Call `full_clean()` before saving anything whose length or magnitude comes from outside the code -- it raises `ValidationError` identically on both engines, which is the point. A `ModelForm` and a DRF serializer both do this for you; `Model.save()`, `bulk_create()` and `QuerySet.update()` do not, and that is where this bites. Running the test suite against Postgres in CI turns the whole class of defect into a test failure rather than a production incident.
+
+**What this rule cannot see.**
+
+- Counted from the model graph, so a field whose `max_length` or `max_digits` could not be read statically is skipped rather than guessed at. This rule says a limit is unenforced, not that any code actually writes an over-long value -- proving that would need dataflow from every request into every save. `TextField` is excluded on measurement rather than on principle: it takes a `max_length` that looks exactly like `CharField`'s, but that argument is a form validator and produces no column constraint, so a fifty-character value into `TextField(max_length=10)` was accepted by both engines. `BigIntegerField` is excluded for the same reason.
+
+**References**
+
+- <https://www.sqlite.org/datatype3.html>
+- <https://docs.djangoproject.com/en/stable/ref/models/instances/#validating-objects>

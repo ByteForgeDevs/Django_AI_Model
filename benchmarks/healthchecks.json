@@ -405,6 +405,16 @@
       "note": "Verified against source. The comment above reads \"Start a transaction, select for update, update. Use get_object_or_404 here again, in case another concurrent request has *just* deleted this check\" -- the author is explicitly reasoning about a concurrent request racing this one, and the lock is the mechanism chosen to serialise them. `_update()` then writes the check inside the same block. Under SQLite no FOR UPDATE is emitted, so two concurrent update_check requests are not serialised at the row and the last writer wins silently. Same divergence evidence as hc/api/models.py:510; also inside `atomic()`, so the TransactionManagementError half of the rule does not apply.",
       "reviewed": "2026-08-09",
       "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "50849aa19911eb9e",
+      "rule_id": "DJX-009",
+      "verdict": "true_positive",
+      "file": "hc/settings.py",
+      "line": 208,
+      "note": "Verified against source, and the strongest evidence is an absence: `full_clean` does not appear anywhere in Healthchecks. The project defaults to SQLite (hc/settings.py:209) and ships Postgres (223) and MySQL (244) for deployment, so it is the one corpus project that genuinely runs the divergence this family is gated on. Views save models directly -- hc/accounts/views.py:80, 86, 91, 97 are four bare `.save()` calls -- and `Model.save()` does not validate `max_length`, so nothing between a request and the column checks the width on either engine. The 57 counted columns are real `varchar(N)` and narrow integer columns; the six sampled were confirmed by reading hc/accounts/models.py (Profile.reports varchar(10) at :80, Profile.token varchar(128) at :85, Profile.tz varchar(36) at :103). Counted once for the project rather than 57 times, which is the reported shape.",
+      "reviewed": "2026-08-09",
+      "reviewer": "Zambagarrah"
     }
   ]
 }

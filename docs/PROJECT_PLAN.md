@@ -6534,7 +6534,7 @@ rules come first; the live tier is then built for consumers that exist.
   chooses to do at import time happens with the file system and network access
   of whoever typed the command. The note states why that is worth doing at all
   — only Django can say what SQL a migration emits, and only Django can give a
-  second opinion on its own deployment checks, which is 2 of 86 rules — and
+  second opinion on its own deployment checks, which is 2 of 87 rules — and
   then states exactly what the subprocess is allowed: 10 environment variables
   in, 4 refused outright, a 30-second timeout enforced by killing the process
   group, 1 MiB captured per stream, stdin closed. It records the `PASSTHROUGH`
@@ -7194,6 +7194,21 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   own prefilter, which `report` re-validates, and five table-prose blanks now
   covered by whole-message assertions.
 
+  **Correction, made while finishing 5.2.8.** That last sentence was wrong, and
+  the DJX-009 mutation run is what exposed it. `report` does *not* re-validate
+  the method name, so those three survivors were not cost mutants at all — they
+  were an untested correctness guard, and one of them was a crash. Measured:
+  reordering the guard's two halves so `node.func.attr` is read before the
+  `isinstance` check raises `AttributeError: 'Name' object has no attribute
+  'attr'` on any plain function call carrying a `__regex` keyword, and because
+  the engine abandons a raising rule wholesale it silently drops every real
+  DJX-008 finding in the process. Removing the guard entirely was measured to
+  report `.annotate`, `.values`, `.order_by` and a project's own queryset method
+  — four false positives. Two tests now close all three, each verified to fail
+  on the mutant it was written for. The lesson is not about this rule: a
+  survivor filed under "the authoritative check re-validates it" is a claim
+  about code, and it needs measuring like any other.
+
   Two further defects came out of re-reading the shipped prose rather than the
   code. The counts did not add up — the rationale said twenty of twenty-seven
   constructs agreed and named seven that did not, which leaves three
@@ -7205,6 +7220,81 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   fixture twin uses and the one that was actually measured to return the same
   six rows on both engines.
 - **5.2.8** — `DJX-009` `max_length` enforced by Postgres but not SQLite.
+  **Done, and for once the premise survived — it was only too narrow.** After
+  two withdrawn premises in a row this one measured true on the first attempt,
+  and then measuring around it found the rule was about something larger than
+  one keyword. SQLite has type *affinity* where Postgres has type
+  *constraints*, so `max_length` is one instance of a general fact rather than
+  a special case.
+
+  Measured on a real SQLite and the live Postgres, writing through `create()`,
+  `save()`, `bulk_create()` and `update()` — all four diverge, because not one
+  of them calls `full_clean()`:
+
+  ```
+  CharField(max_length=10)   <- "x"*50    sqlite stores it, reads back 50 chars
+                                          postgres DataError: value too long for
+                                                   type character varying(10)
+  IntegerField               <- 2**31     sqlite stores 2147483648
+                                          postgres DataError: integer out of range
+  SmallIntegerField          <- 2**15     postgres DataError: smallint out of range
+  DecimalField(max_digits=4) <- 12345.67  postgres DataError: numeric field overflow
+  SlugField/EmailField/URLField           varchar(50)/(254)/(200), same failure
+  ```
+
+  **The value is not truncated on SQLite — it is stored whole and handed back
+  at full length.** "Truncates" is the intuitive guess, and it sends a reader
+  looking for the wrong symptom, so the rationale says so explicitly. It also
+  turned out that `DJX-001`'s shipped rationale had been making exactly that
+  wrong claim since Phase 5 began: *"a value that truncates in one and raises
+  in the other"*. Corrected in the same commit — a rule that misdescribes a
+  divergence is worse than one that omits it.
+
+  **Three shapes were measured to agree and are excluded, and each would have
+  been a false positive.** `TextField(max_length=10)` is the trap: the argument
+  reads exactly like `CharField`'s and produces no column constraint at all, so
+  a fifty-character value was accepted by *both* engines. `BigIntegerField`
+  holds everything SQLite will. And `PositiveIntegerField` given `-1` raises on
+  both, because Django emits the `>= 0` check constraint on each engine — so
+  the `Positive` variants are in the table for their *ceiling* (2**31 diverges)
+  and explicitly not for their sign. A rule keyed on "has a `max_length`" would
+  have reported the first, and one keyed on "is a positive field" would have
+  reported the third.
+
+  **Reported once for the whole project.** Per-field would be one finding per
+  `CharField` in the codebase — 57 on Healthchecks alone, over two thousand
+  across the corpus — which is precisely the "4,000 alerts and an uninstall"
+  outcome the adoptability principle exists to prevent. The finding carries the
+  count per column class, a six-column sample with `file:line`, and points at
+  the settings that diverge, because the decision a reader can actually take is
+  about the engine pair. To keep it from being a restatement of `DJX-001` it is
+  gated on there being such a column at all: a project whose models are all
+  `TextField` gets nothing.
+
+  Like `DJX-001`, and alone in this family besides it, `DJX-009` has no twin in
+  `warehouse` and therefore no un-fix. It cannot have one — `warehouse`'s
+  `CharField`s are exactly as unenforced as `catalog`'s, which is the finding's
+  point. Its control is the settings file that gates the whole family.
+
+  **Healthchecks is genuine recall evidence, and the strongest part of it is an
+  absence: `full_clean` does not appear anywhere in the project.** It defaults
+  to SQLite and ships Postgres and MySQL, its views call `.save()` directly,
+  and `Model.save()` validates nothing. 57 columns, one finding, triaged true
+  positive; corpus 40 → 41.
+
+  **Mutation: 308/311**, and the survivors it produced were worth more than the
+  score. Four sat in this rule. Two were plural nouns — "integer columns" and
+  "decimal columns" — that no assertion had ever seen, because the only plural
+  test used text columns and each kind carries its own noun pair. One was
+  `default.node or default.definition.node`, invisible because the fixture
+  writes `DATABASES` on a single line, which makes the alias dict and the
+  assignment statement share a line number; spread over several lines they are
+  measured to be line 6 and line 5, and the test now asserts the alias. The
+  fourth was dead code rather than a missing test: `Definition.node` is an
+  `ast.stmt` and is never `None`, so `node is not None` could not be false
+  unless `default` already was. It is gone. The remaining three are the
+  documented cost prefilters — the `WORDS` scan and the two literal substring
+  guards — each of which changes only the clock.
 
 ### Step 5.3 — External tool adapters
 
@@ -8117,11 +8207,11 @@ conversation.
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **86 rules are
+document specifies, and most of it is still only specified: **87 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-all ten of Phase 4's migration rules, its deployment-check gap rule, and the
-first eight of Phase 5's portability family.
+all ten of Phase 4's migration rules, its deployment-check gap rule, and all
+nine of Phase 5's portability family.
 `DJM-010` is the first **live** rule: the first that reads the SQL a migration
 emits rather than predicting it from the operation. `DJS-028` is the first rule
 whose subject is this tool rather than the project it is auditing.
