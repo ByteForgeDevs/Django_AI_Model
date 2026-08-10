@@ -7296,9 +7296,116 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   documented cost prefilters — the `WORDS` scan and the two literal substring
   guards — each of which changes only the clock.
 
+  This figure was re-measured in 5.3.1 after a bug was found in the harness
+  that could report a mutant as surviving without ever running it. It came
+  back 308/311 with the same three survivors: the defect needs two adjacent
+  mutants of identical length written inside the same second, and at roughly
+  five seconds a mutant on a file this size that had not happened here.
+
 ### Step 5.3 — External tool adapters
 
 - **5.3.1** — Adapter interface and availability probing.
+  **Done, and the measurement inverted the design.** The plan's phrasing —
+  "map into our schema" — describes a translator: run the tool, rename the
+  fields, append. Running `ruff --select DJ,S` over the benchmark corpus shows
+  what that would ship:
+
+  | project | ruff | djaudit |
+  | --- | --- | --- |
+  | healthchecks | 958 | 41 |
+  | netbox | 210 | 76 |
+  | pretix | **12,220** | 151 |
+
+  Twelve thousand two hundred and twenty findings on pretix. That is not a
+  larger audit, it is the "4,000 alerts and an uninstall" outcome the
+  adoptability principle exists to prevent, delivered under our name. So the
+  interface is built around the question of *what to refuse*, and the mapping
+  is the trivial part.
+
+  Three measurements set the shape.
+
+  **Most of the volume is test code.** 850 of healthchecks' 958 and 11,857 of
+  pretix's 12,220 sit under `tests/`, and `S101` — bare `assert` — is what
+  pytest is made of. Excluding test paths removes 89% before any judgement is
+  needed and removes nothing a deployment can be harmed by. The exclusion is
+  syntactic and lives in one place, so no individual claim ever has to reason
+  about it.
+
+  **Some of it would silently overrule a decision we already published.**
+  ruff's `DJ001` reports a nullable string field; so does our `DJD-002` —
+  except that `DJD-002` exempts `blank=True`, because the project has then
+  stated that empty is permitted input, and exempts columns spanned by a
+  uniqueness rule, because Django documents `null` as the way to allow more
+  than one row with no value. Measured: **151 of the 179** `DJ001` hits outside
+  test code carry `blank=True`, and on healthchecks and netbox it is all of
+  them. Importing `DJ001` would add no coverage and would reverse a documented
+  precision decision 151 times.
+
+  **Where we both fire, ours is the better answer.** `DJD-002` reports once per
+  model and names every affected column, because pretix's `Invoice` declares
+  fifteen and they are one migration to fix, not fifteen. Its eight pretix
+  findings cover all 28 columns `DJ001` finds outside tests.
+
+  So no external code reaches a report without a written claim: `ADOPT` (no
+  rule of ours covers this and it is worth having), `SUBSUMED` (we own this
+  ground and say it better — must name the rule) or `REJECTED` (measured noise
+  — may not name one of our rules, because that is a subsumption whose author
+  changed their mind mid-line). Each invariant is a `ValueError` rather than a
+  convention, in the same spirit as `ResponseSchema.validate`: a claim without
+  a reason, a subsumption naming nothing, and an adopted code with no severity
+  are all unconstructible.
+
+  **The fourth state is the one that matters: unclaimed.** A tool that adds a
+  check in a point release emits a code nobody has ruled on, and both silent
+  outcomes are wrong — dropping it makes our coverage depend on a version pin,
+  adopting it ships a finding nobody read. An unclaimed code is therefore
+  neither: it is surfaced by name as a task. This is `provenance.py`'s argument
+  about labels applied to rule codes — silence must never be readable as a
+  judgement.
+
+  Availability is a value, never an exception, modelled directly on
+  `NullProvider`: djaudit works without any of these tools, and making "absent"
+  an ordinary answer every caller must handle is what keeps degradation the
+  tested path. bandit and pip-audit were genuinely absent from this machine
+  while the interface was written, which is the best possible condition for
+  building one. Version parsing is measured rather than assumed — `ruff 0.16.1`
+  and `pip-audit 2.10.1` are one line, `bandit 1.9.4` prints a second naming
+  its Python, and reading past the first line would have put `(main)` in the
+  evidence of every bandit finding.
+
+  The subprocess machinery is reused from `djaudit.live.runner` rather than
+  rewritten, and the module says why: these tools read the target's source as
+  text and never import it, so the "assume the target is hostile" framing does
+  not apply — but killing by process group and refusing to hand a CI job's
+  deployment tokens to a subprocess apply to any child process at all, and two
+  copies of code whose failure mode is a hang is one too many. The
+  `Interpreter` machinery is deliberately *not* reused: these tools run from
+  our environment, and asking the target's virtualenv for its `ruff` would mean
+  executing a binary the target chose.
+
+  **Mutation: 76 of 76.** Getting there took two rounds and turned up a bug in
+  the harness itself. The first run reported 24 survivors, and one of them —
+  the flip of the duplicate-code guard from `> 1` to `<= 1` — was impossible,
+  because nine tests construct a `ClaimTable` and that mutant makes every
+  single-claim table raise. Run by hand with the harness's own command line it
+  died immediately. The harness was not executing it: CPython treats cached
+  bytecode as current when the source's size and its whole-second mtime both
+  match, mutants of one module are frequently the same length as each other,
+  and two written inside the same second are indistinguishable to that check,
+  so the second silently runs the first one's code and its tests pass. Forcing
+  the two to share an mtime reproduces the skip exactly. Fixed in
+  `scripts/mutate.py`, with `tests/test_mutate.py` — which the script had never
+  had — keeping the hazard itself as a control.
+
+  The remaining 23 were all genuine, and three are worth recording. Every
+  path in the test-directory fixture also had a `test_`-shaped *filename*, so
+  the filename check alone satisfied all of them and `TEST_DIRECTORIES` was
+  never the thing deciding — a file called `tests/helpers.py` is what makes
+  that constant load-bearing. The `', '` in each error message needed a case
+  supplying *two* names, because a joiner between one item and nothing else
+  leaves no trace. And the `Claim` values are a `StrEnum`'s serialized form,
+  so they are asserted as literals rather than read back off the enum, which
+  would agree with whatever the enum happened to say.
 - **5.3.2** — ruff adapter: run with Django-relevant rule sets, map into our schema.
 - **5.3.3** — bandit adapter, with the Django-specific noise filtered out.
 - **5.3.4** — pip-audit adapter for dependency CVEs against the resolved requirements.

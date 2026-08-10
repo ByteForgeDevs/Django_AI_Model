@@ -49,6 +49,15 @@ dev = [
     # that with subprocesses means sleeping and guessing, which is how a
     # concurrency test becomes flaky by construction.
     "psycopg[binary]>=3.2",
+    # The external adapters of Step 5.3. Dev-only: djaudit never imports them
+    # and a missing one is an ordinary fact about a machine rather than an
+    # error, which `Availability` exists to express. They are pinned in here
+    # so the measurements the adapter layer is built on stay reproducible --
+    # `read_version` is written against the fact that bandit prints a second
+    # line naming its Python and the other two do not, and a claim about a
+    # tool's output that CI cannot re-run is a claim nobody is checking.
+    "bandit>=1.9.4",
+    "pip-audit>=2.10.1",
 ]
 
 [tool.hatch.build.targets.wheel]
