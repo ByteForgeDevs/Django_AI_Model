@@ -133,6 +133,15 @@ jobs:
       - name: releases can only happen the way we say
         run: uv run python scripts/check_release.py
 
+      # The published contract: report shape, enum vocabularies, and the
+      # fingerprint digests every downstream baseline is keyed on. The last is
+      # why this runs on every commit rather than at release time -- changing
+      # how a snippet is normalised alters no field name, breaks no test that
+      # checks fingerprints are stable, and silently invalidates every baseline
+      # committed in every repository that has adopted the tool.
+      - name: the published contract has not moved
+        run: uv run python scripts/gen_schema.py --check
+
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch
       # cache. Every other method clones the queryset and re-queries, so the

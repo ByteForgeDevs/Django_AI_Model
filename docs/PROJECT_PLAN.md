@@ -8780,7 +8780,77 @@ conversation.
   whole class of silent no-op into a test failure. Had the tests asserted only
   a non-zero exit, the two would have looked like gate defects and been "fixed"
   in the gate.
-- **7.1.2** — Semantic versioning policy, including what constitutes a breaking change to the finding schema.
+- **7.1.2** — Semantic versioning policy, including what constitutes a
+  breaking change to the finding schema. **Done** — `docs/versioning.md`,
+  `schema/contract.json`, `scripts/gen_schema.py`,
+  `tests/test_schema_contract.py` (48 tests).
+
+  *The policy already existed as a sentence.* `models.py` opened with "treat
+  changes here as breaking changes and bump `SCHEMA_VERSION`", and nothing
+  anywhere enforced it. Three numbers govern three different contracts —
+  `__version__` for the release, `SCHEMA_VERSION` for the report, and
+  `FINGERPRINT_VERSION` for finding identity — and only the first was even
+  mechanically checkable before this substep.
+
+  *The third is the one that matters most and shows least.* A fingerprint is
+  the key in every baseline file committed in every repository that has adopted
+  the tool. Change how a snippet is normalised — a `.lower()`, a different
+  whitespace rule — and no field name changes, no shape changes, and every test
+  asserting fingerprints are *stable* still passes, because they are perfectly
+  stable, at new values. Every baseline everywhere stops matching and findings
+  triaged months ago reappear as new. Nothing in the repository pinned a single
+  digest, so the whole class was invisible. It is pinned now, with vectors
+  chosen for what could drift unseen: whitespace collapsing, the occurrence
+  index, an empty snippet, and non-ASCII text.
+
+  *A ledger rather than a snapshot,* because a snapshot has an obvious bypass.
+  A developer changes the shape, the gate fails, and they regenerate — which is
+  what the error message told them to do — and now the file agrees with the new
+  code under the old version number. So `schema/contract.json` holds one entry
+  per published version, the generator only ever *adds* entries, and the gate
+  additionally compares every published entry against the copy in `HEAD`.
+  Changing the contract has two ways out: revert, or publish a new version.
+
+  *The contract is derived, never written.* It comes from running the reporter
+  over two specimens — one with every optional populated, one with everything
+  at its default — and merging what they emit. Both are needed: a single
+  populated specimen records `end_line` as an integer when a real run almost
+  always emits `null`, so the contract would promise consumers a field that is
+  always there. Keys that are data rather than field names — `parse_errors`,
+  `rule_errors`, `findings[].properties` — collapse to `map`, because the first
+  draft baked one specimen's invented filename into the contract as though
+  `parse_errors.broken.py` were a field. `summary.by_severity` deliberately
+  does not collapse: its keys are the `Severity` enum, so they are contract.
+
+  *Writing it found two defects in it.* The first draft left `diagnostics`,
+  `parse_errors` and `settings_modules` empty, so eight fields never entered
+  the contract at all and the docstring claiming otherwise was false. The
+  second was worse and only surfaced when a test bumped a release: `build()`
+  *assigned* each entry, so `tool_version` on an already-published entry was
+  rewritten every time the release number moved — meaning a routine patch
+  release would rewrite history and trip the append-only check on its way out
+  the door. `setdefault` fixed both that and the laundering bypass at once, and
+  a control now bumps `0.1.0` to `0.1.1` and asserts the ledger is byte
+  identical.
+
+  *Verified:* 21 un-fixes, each caught with its own message — a field removed,
+  renamed and retyped; a severity and a family added; snippet normalisation
+  changed, the fingerprint payload reordered and the digest truncated
+  differently; both version constants bumped without recording anything; the
+  ledger deleted; a vector, an enum member and a shape entry tampered with; a
+  digest quietly corrected; and six against the doc gate. Two controls were
+  themselves wrong and were fixed rather than accepted: one produced invalid
+  JSON, so it proved the parser worked and not the gate, and one renamed a
+  constant the gate imports, so it crashed rather than reporting. `--check`
+  also caught a genuine hole on its first run: the path regex required the
+  whole backtick span to be a path, so every path cited with arguments —
+  including `scripts/gen_schema.py --check`, the doc's own headline command —
+  was never verified to exist.
+
+  *Verified against reality:* four fixture projects are audited through the
+  real CLI in a subprocess and their output asserted to conform, with a
+  companion test that fails if those fixtures ever stop producing findings —
+  a conformance check over an empty report would pass while proving nothing.
 - **7.1.3** — Changelog generation from the commit trail.
 
 ### Step 7.2 — Integrations
