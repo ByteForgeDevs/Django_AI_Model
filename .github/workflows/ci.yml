@@ -6,6 +6,10 @@ on:
     # whole phase discovering breakage at pull request time.
     branches: [main, 'phase-*']
   pull_request:
+  # Called by `release.yml` so a tag runs this whole file rather than trusting
+  # that some earlier commit passed it. A tag can be moved; a run on the tagged
+  # tree cannot be.
+  workflow_call:
 
 env:
   UV_VERSION: "0.12.1"
@@ -118,6 +122,16 @@ jobs:
       # column being the one `REACHES_THE_NETWORK` actually holds.
       - name: adapters note matches the code
         run: uv run python scripts/check_adapters_doc.py
+
+      # Publishing is the one action here with no undo: a version on PyPI is
+      # permanent and its files immutable, and `__version__` is stamped into
+      # every report that release will ever emit. This checks the release path
+      # on every commit rather than on the tag, because the tag is the moment
+      # it is too late to find out that the workflow can be started by hand,
+      # that publishing no longer waits for this file, or that somebody added
+      # an API token to a repository whose publishing needs none.
+      - name: releases can only happen the way we say
+        run: uv run python scripts/check_release.py
 
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch

@@ -1,0 +1,93 @@
+name: Release
+
+# Tags only. A release is not something that should be reachable by pushing to
+# a branch, and `workflow_dispatch` is deliberately absent: a human choosing a
+# ref from a dropdown is exactly the path by which an untested commit reaches
+# PyPI, and the version would then have no tag to point back at.
+on:
+  push:
+    tags: ['v*']
+
+env:
+  UV_VERSION: "0.12.1"
+
+# No `contents: write`, no `packages: write`. The publish job asks for
+# `id-token: write` and nothing else, and it asks for it in its own job rather
+# than here, so the build cannot mint an OIDC token it has no use for.
+permissions: {}
+
+jobs:
+  # The whole gate, again, on the tagged commit. `workflow_run` on a green CI
+  # would be cheaper and would be checking the wrong thing: it proves some
+  # commit passed, not that this tag's tree does, and a tag can be moved.
+  gate:
+    name: the full gate, on the tag
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: build sdist and wheel
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - run: uv sync
+
+      # Before building, not after. A tag that disagrees with the package
+      # version publishes an artefact stamped with a version nobody tagged, and
+      # every JSON and SARIF report we emit carries that same string -- so the
+      # mismatch would outlive the release and travel in the reports of anyone
+      # who installed it.
+      - name: the tag is the version
+        run: uv run python scripts/check_release.py --tag "${{ github.ref_name }}"
+
+      - run: uv build
+
+      # `uv build` succeeding says the metadata parsed, not that the artefact
+      # works. This installs the wheel into a throwaway environment with no
+      # development dependencies and no source tree on the path, which is the
+      # first moment anything has run djaudit the way a user gets it.
+      - name: the wheel runs where the source tree is not
+        run: |
+          set -euo pipefail
+          wheel=$(ls dist/*.whl)
+          uv venv /tmp/fresh
+          VIRTUAL_ENV=/tmp/fresh uv pip install --quiet "$wheel"
+          cd /tmp
+          reported=$(/tmp/fresh/bin/djaudit version)
+          echo "installed wheel reports $reported"
+          test "$reported" = "${GITHUB_REF_NAME#v}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Trusted publishing. There is no API token in this repository's secrets
+    # and there should never be one: a token is a long-lived credential that
+    # can publish from anywhere, whereas this exchanges a short-lived OIDC
+    # token that PyPI will only accept from this workflow, in this repository,
+    # in this environment.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/djaudit
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

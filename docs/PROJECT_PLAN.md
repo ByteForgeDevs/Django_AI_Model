@@ -8721,7 +8721,65 @@ conversation.
 
 ### Step 7.1 — Packaging and release
 
-- **7.1.1** — PyPI release workflow with trusted publishing.
+- **7.1.1** — PyPI release workflow with trusted publishing. **Done** —
+  `.github/workflows/release.yml`, `scripts/check_release.py`,
+  `tests/test_release.py` (33 tests).
+
+  *The version had two sources.* `pyproject.toml` said `0.1.0` and
+  `src/djaudit/__init__.py` said `0.1.0`, with nothing keeping them equal —
+  and they are not interchangeable, because every JSON and SARIF report we
+  emit stamps `__version__` into `tool.version`. A tree whose metadata and
+  module disagree publishes findings labelled with a version that was never
+  released, and the mistake travels in the reports of everyone who installed
+  it. The module is now the source (`[tool.hatch.version]`), the literal is
+  gone, and the link was verified by changing `__version__` to `9.8.7` and
+  watching `uv build` produce `djaudit-9.8.7`. Building with both numbers
+  already equal would have proved nothing.
+
+  *Publishing is the only thing here with no undo,* so the gate guards the
+  path rather than the artefact. Trusted publishing means no API token exists
+  in this repository — a token is a long-lived credential that publishes from
+  anywhere and whose theft is invisible from inside CI, whereas OIDC mints a
+  short-lived one that PyPI accepts only from this workflow, in this
+  repository, in this environment. The release runs `ci.yml` through
+  `workflow_call` on the tagged tree rather than trusting that some earlier
+  commit was green: a tag can be moved, and a `workflow_run` gate would be
+  checking a different commit than the one being shipped. `workflow_dispatch`
+  is deliberately absent, because a human picking a ref from a dropdown is
+  exactly how an untested commit reaches PyPI under a version no tag points at.
+  The tag/version comparison runs *before* the build, since a mismatch does not
+  fail — it succeeds, and ships the wrong number.
+
+  *Building is not shipping.* `uv build` succeeding says the metadata parsed.
+  The workflow installs the built wheel into an empty environment with no dev
+  dependencies and no source tree on the path, runs `djaudit version` from
+  outside the repository, and compares it to the tag. Locally the same wheel
+  was made to audit Healthchecks and returned the same 35 findings the source
+  tree does, stamped `0.1.0` — the first evidence that packaging carries
+  everything the rules need rather than merely importing.
+
+  *Verified:* 16 un-fixes, each caught with its own message — a literal
+  version restored, `dynamic` dropped, the build pointed at a missing file and
+  at a module with no `__version__`, `workflow_dispatch` added, a branch
+  trigger added, the tag trigger removed, the publisher replaced by an echo,
+  `id-token` removed, the environment removed, an API token passed, `needs`
+  cut at the end of the chain and in its middle, the gate job pointed
+  elsewhere, and `workflow_call` removed from `ci.yml`. Two of the gate's own
+  readers are asserted directly rather than assumed: YAML 1.1 folds the bare
+  word `on` to the boolean `true`, so a reader asking for `workflow["on"]`
+  raises on a real workflow and one asking with a default returns empty and
+  makes every trigger check vacuous; and `needs: gate` must walk the same as
+  `needs: [gate]`, or a legal spelling silently breaks the dependency graph.
+
+  *One test-design defect, found by asserting the message.* Two un-fixes
+  anchored on the path `src/djaudit/__init__.py`, which `pyproject.toml`
+  mentions in a comment *before* it mentions it in `[tool.hatch.version]` — so
+  they rewrote the prose, changed the file, and left the build reading exactly
+  what it read before. Both reported that the gate had passed. The helper now
+  requires its anchor to be unique rather than merely present, which turns that
+  whole class of silent no-op into a test failure. Had the tests asserted only
+  a non-zero exit, the two would have looked like gate defects and been "fixed"
+  in the gate.
 - **7.1.2** — Semantic versioning policy, including what constitutes a breaking change to the finding schema.
 - **7.1.3** — Changelog generation from the commit trail.
 

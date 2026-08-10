@@ -4,7 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "djaudit"
-version = "0.1.0"
+# Read from `src/djaudit/__init__.py` rather than written here. Two literals
+# would be two answers to "which version produced this report": every JSON and
+# SARIF report we emit carries `__version__`, so a tree whose package metadata
+# and module disagree publishes findings stamped with a version that was never
+# released. One of them has to be the source, and it has to be the one the
+# running code can see without being installed.
+dynamic = ["version"]
 description = "Django-aware static analysis: security, DRF authorization, ORM performance, migration safety and database portability."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -61,7 +67,17 @@ dev = [
     # instead of passing unnoticed.
     "bandit>=1.9.4",
     "pip-audit>=2.10.1",
+    # `scripts/check_release.py` parses the release workflow, because a claim
+    # about how we publish -- gated, tag-triggered, no long-lived token -- is
+    # only worth making if something re-reads the YAML that implements it. It
+    # arrives anyway as a dependency of bandit, and that is the reason to
+    # declare it: a gate resting on a transitive dependency stops working on
+    # the day an unrelated tool drops it, and the failure looks like the gate.
+    "pyyaml>=6.0",
 ]
+
+[tool.hatch.version]
+path = "src/djaudit/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/djaudit"]
@@ -124,6 +140,13 @@ ignore_missing_imports = true
 # nothing the script does not already assert about the shape it gets back.
 [[tool.mypy.overrides]]
 module = "bandit.*"
+ignore_missing_imports = true
+
+# PyYAML ships no stubs. It is imported by one gate, which reads a workflow
+# into dicts and asserts the shape it expects, so a stub package would restate
+# what that script already checks at runtime.
+[[tool.mypy.overrides]]
+module = "yaml.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
