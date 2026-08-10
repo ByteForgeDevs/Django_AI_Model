@@ -7824,7 +7824,62 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   *Verified:* 25 tests in `tests/live/test_divergence.py`, taking the live tier
   to 662. No CI change: the live job already runs `tests/live` wholesale and
   `scripts/live_gate.py` already fails on a skip.
-- **5.4.3** — `docs/rules/DJX.md` and `docs/adapters.md`.
+- **5.4.3** — `docs/rules/DJX.md` and the adapters note. **DONE**, and half of
+  it was already true. `docs/rules/DJX.md` is *generated* from `RuleMeta` by
+  `scripts/gen_rule_docs.py` and has been checked by `--check` in CI since
+  Phase 2, so all nine `DJX` rules have had a reference page since the day they
+  were registered; writing one by hand would have created a second, worse copy
+  that drifts. What was missing is the half no generator can produce: why this
+  layer exists at all.
+
+  The note landed at `docs/architecture/adapters.md` rather than
+  `docs/adapters.md`, next to `live-tier.md` and `llm-layer.md`, because it is
+  the same kind of document — a decision record for a subsystem, not a
+  reference for a user. It records the two adapters and which one reaches the
+  network, the three verdicts and why a fourth ("no opinion") is not one, the
+  25 ruff claims and pip-audit's 1, the measured subsumption shortfall, the
+  fold position that makes external findings obey `--min-severity`, the
+  baseline and `# djaudit: ignore`, and the bandit adapter that step 5.3.3
+  planned and measurement declined.
+
+  *The gate is the substep.* Every claim in that list rots silently: a count
+  in a table, a verdict on a code, a flag in an argument tuple. None of them
+  breaks a test when it changes, which is exactly the condition under which a
+  reader keeps believing a document that has stopped being true. So
+  `scripts/check_adapters_doc.py` re-derives each one from the code —
+  `adapters.every()`, `REACHES_THE_NETWORK`, both `ClaimTable`s, `Claim`,
+  `pip_audit.ARGUMENTS`, `engine.run`'s signature, and the recorded shortfall
+  in `benchmarks/subsumption/*.json` — and fails on any disagreement. It found
+  one on its first run: the note wrote `` `--vulnerability-service osv` `` and
+  the check looked for the flag alone.
+
+  Two defects in the gate were found by controlling it rather than by reading
+  it. The subsumption pairing was first checked by asking whether `DJ001` and
+  `DJD-002` both appeared *somewhere* in the note — and the note states that
+  pairing twice, once in prose and once as a table header, so rewriting either
+  one to name a different rule left the note contradicting itself and the gate
+  green. It now looks at every place the external code is mentioned and
+  requires each nearby rule id to be one the table actually claims. The other
+  was a control of mine, not the gate's: three "misses" turned out to be
+  un-fixes that changed one of two statements of the same fact, which is a
+  test-design defect and not a gate defect, and it is the same shape as risk
+  12: a control that changes one of two statements of a fact leaves the fact
+  true, so it reports MISSED and reads as a weak gate.
+
+  *Verified:* 34 tests in `tests/test_adapters_doc.py`. Twenty of them edit the
+  note — a wrong adapter count, a cleared network column, a wrong claim total,
+  a pairing that names the wrong rule, a measured row that overstates coverage,
+  arithmetic that no longer adds up, a renamed cited path — and each asserts
+  the gate's own complaint rather than merely a non-zero exit, because several
+  of these defects make the note inconsistent in more than one way and a test
+  that accepts any failure cannot tell one check from its neighbour. Eight
+  leave the note untouched and move the *code* instead: a third adapter
+  shipping, an adapter starting to reach the network, `REACHES_THE_NETWORK`
+  emptied (which would make the network check vacuously true), a claim added,
+  the subsumption reversed, `--disable-pip` dropped, the vulnerability service
+  swapped. Five un-fixes of the gate itself — each of its four check groups
+  disconnected in turn, plus `problems` collected and never acted on — are all
+  caught. Wired into the fast CI job beside `check_live_doc.py`.
 
 ---
 
@@ -8700,7 +8755,7 @@ conversation.
 | 9 | LLM layer erodes determinism | Medium | High | Model may never create or suppress a finding; all output labelled |
 | 10 | Benchmark repositories drift | Low | Low | Pinned by commit SHA; updated deliberately |
 | 11 | A project djaudit cannot read scores as a clean one | Medium | High | Discovery emits a blocking diagnostic rather than returning quietly, and `run`, `eval` and `benchmark` all refuse to exit 0 on one. Pinned by tests using a class-configured project, which is the shape we detect and cannot yet parse |
-| 12 | A gate passes because what it checks is absent | High | High | Three found and fixed in Phase 2 alone — a doc generator hardcoded to one family, a triage citation nothing verified, a plan checker that only read the plan. Two more in Phase 3: the timing-gate test that asserted a result was dead by end of loop, which rebinding achieves anyway, and 3.1.2's reachability test, which put an unconditional rebind after the branch and so passed with the reachability filter deleted. Every new gate must be shown failing on the defect it exists to catch, in the commit that adds it |
+| 12 | A gate passes because what it checks is absent | High | High | Three found and fixed in Phase 2 alone — a doc generator hardcoded to one family, a triage citation nothing verified, a plan checker that only read the plan. Two more in Phase 3: the timing-gate test that asserted a result was dead by end of loop, which rebinding achieves anyway, and 3.1.2's reachability test, which put an unconditional rebind after the branch and so passed with the reachability filter deleted. Every new gate must be shown failing on the defect it exists to catch, in the commit that adds it. Phase 5 adds two more: `check_adapters_doc.py` compared a subsumption pairing by asking whether both rule names appeared anywhere in the note, and the note states that pairing twice — so rewriting one of the two left the note self-contradictory and the gate green; and three of the controls written against it changed one of two statements of the same fact, which leaves the fact true and makes a working gate look weak. **A control must remove every statement of what it is testing** |
 | 13 | A detector is measured only where it fires, so its noise floor is never seen | Medium | High | **Run the detector with its real signal removed and count what survives.** 3.1.3's queryset tracker was first measured by accident against an empty model graph, where every remaining detection was by construction spurious — which is how a rule claiming `self.get(...)` on a DRF view and `self.update()` on a form as querysets was caught, 33× over-detection on a 12-model project. Precision measured only on a populated graph would have buried it in true positives. The empty-input control is cheap, is now a test, and is run deliberately for each new detector |
 | 14 | A local timing number is quoted as the budget position | High | Medium | The dev box runs at load ~7 on 8 cores, and the same unchanged commit measures NetBox at 7.40 s and 8.96 s an hour apart — a 21% swing from load alone, verified by stashing the working tree and re-running. CI measured the same commit at 5.05 s. **Local timings are only ever valid as a same-session A/B against a stashed tree; CI is the only authoritative budget position.** Commit messages before `3.1.3` quote local figures as though they were the gate's, which overstates the deficit by up to 75% |
 
@@ -8715,7 +8770,7 @@ conversation.
 | 2 | Model graph and DRF authorization | 7 | 37 | **Complete** (PR #3) — `DJA-001`…`DJA-015`, `DJD-001`…`DJD-003`, 100% precision on three real targets |
 | 3 | Performance and injection | 6 | 36 | **Complete** (PR #5) — `DJP-001`…`DJP-010`, `DJI-001`…`DJI-012`, 100% precision on three real targets |
 | 4 | Migration safety and live tier | 6 | 28 | **Complete** (PR #7) — `DJM-001`…`DJM-010`, the live tier, and lock classification measured against a real `pg_locks` |
-| 5 | Portability and external adapters | 4 | 20 | In progress — step 5.1 under way |
+| 5 | Portability and external adapters | 4 | 20 | **Complete** — `DJX-001`…`DJX-009`, two external adapters behind `--external`, 100% precision on three real targets |
 | 6 | LLM layer | 5 | 19 | **Complete** (PR #6) — **pulled forward, ran after Phase 3** |
 | 7 | Distribution | 3 | 10 | Not started |
 | | **Total** | **52** | **235** | |

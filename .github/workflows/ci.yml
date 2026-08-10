@@ -109,6 +109,16 @@ jobs:
       - name: bandit is still subsumed by ruff
         run: uv run python scripts/check_bandit_subsumed.py
 
+      # The decision record for what we take from other people's tools. Its
+      # claims rot quietly -- a count of claims in a table, which verdict a
+      # code carries, which adapter reaches the network -- because none of
+      # them break a test when they change. The one about the network is the
+      # reason this runs in the fast job rather than the corpus one: a reader
+      # deciding whether `--external` is safe offline is relying on that
+      # column being the one `REACHES_THE_NETWORK` actually holds.
+      - name: adapters note matches the code
+        run: uv run python scripts/check_adapters_doc.py
+
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch
       # cache. Every other method clones the queryset and re-queries, so the
