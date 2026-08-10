@@ -237,6 +237,33 @@ class TestWhatItDoesNotReport:
         # means anything to a regex engine.
         assert findings(build(tmp_path, DIVERGENT, query(r'r"\bUSD\b"', "sku__contains"))) == []
 
+    def test_a_queryset_method_that_is_not_a_lookup_is_not_reported(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # A project's own queryset method forwarding keyword arguments is the
+        # realistic shape here, and the name says nothing about what reaches
+        # SQL -- `search` may well parse the argument itself. Measured with
+        # the method-name guard removed, this reports, and so do `.annotate`,
+        # `.values` and `.order_by`: the guard is correctness, not just cost.
+        code = (
+            "from shop.models import Order\n\n\n"
+            "def search():\n"
+            "    return Order.objects.filter(sku='a').search(sku__regex='[[:digit:]]')\n"
+        )
+        assert findings(build(tmp_path, DIVERGENT, code)) == []
+
+    def test_the_lookup_control_proves_the_method_name_is_what_decided_it(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # Presence control for the test above: the same chain, the same
+        # pattern, a method that does reach SQL.
+        code = (
+            "from shop.models import Order\n\n\n"
+            "def search():\n"
+            "    return Order.objects.filter(sku='a').exclude(sku__regex='[[:digit:]]')\n"
+        )
+        assert len(findings(build(tmp_path, DIVERGENT, code))) == 1
+
 
 class TestShapesThatMustNotCrashIt:
     """`filter(**params)` gives a keyword with no name at all.
@@ -261,6 +288,23 @@ class TestShapesThatMustNotCrashIt:
             "from shop.models import Order\n\n\n"
             "def search(params):\n"
             '    return Order.objects.filter(**params, sku__regex=r"\\bUSD\\b")\n'
+        )
+        assert len(findings(build(tmp_path, DIVERGENT, code))) == 1
+
+    def test_a_plain_function_call_carrying_a_lookup_kwarg_is_survived(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # `helper(sku__regex=...)` has an `ast.Name` where the guard expects an
+        # `ast.Attribute`. Measured, reordering that guard's two halves raises
+        # `AttributeError: 'Name' object has no attribute 'attr'`, and because
+        # a raising rule is abandoned wholesale it takes the real finding on
+        # the next line with it -- which is what the control below catches.
+        code = (
+            "from shop.models import Order\n\n\n"
+            "def helper(**kw):\n    return kw\n\n\n"
+            "def search():\n"
+            "    helper(sku__regex='[[:digit:]]')\n"
+            "    return Order.objects.filter(sku__regex='[[:digit:]]')\n"
         )
         assert len(findings(build(tmp_path, DIVERGENT, code))) == 1
 
