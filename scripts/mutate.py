@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -208,6 +209,32 @@ def check_generated(candidates: list[Mutant], original: str) -> None:
         raise SystemExit(f"harness is broken: mutants identical to the original: {identical}")
 
 
+def drop_bytecode(module: Path) -> None:
+    """Delete the module's cached bytecode so the next run compiles the mutant.
+
+    Not an optimisation -- a correctness fix, and the harness is worthless
+    without it. CPython decides a ``.pyc`` is current by comparing the source's
+    *whole-second* mtime and its size, so two mutants of the same file that
+    happen to be the same length and get written inside the same second are
+    indistinguishable to that check, and the second one is never executed: the
+    interpreter loads the first one's bytecode and the tests pass, which the
+    harness reads as a survivor.
+
+    That is not hypothetical. On `adapters/base.py` the mutant flipping the
+    duplicate-code guard reported SURVIVED on two consecutive full runs, and
+    running the identical mutant with the identical command by hand killed it.
+    Its source was byte-for-byte the same length as the preceding mutant's,
+    both were written in the same second, and it had run the preceding
+    mutant's code. Every same-length neighbour in every run before this fix
+    was exposed to the same silent skip.
+
+    Unlinking only the mutated module's cache keeps the rest of the package
+    cached, so this costs one recompilation of one file per mutant.
+    """
+    cached = importlib.util.cache_from_source(str(module))
+    Path(cached).unlink(missing_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Mutate a module; check its tests notice.")
     parser.add_argument("module", type=Path, help="the source file to mutate")
@@ -224,6 +251,7 @@ def main() -> int:
     try:
         for i, mutant in enumerate(candidates, 1):
             module.write_text(mutant.source)
+            drop_bytecode(module)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -247,6 +275,7 @@ def main() -> int:
                 survivors.append(mutant.label)
     finally:
         module.write_text(original)
+        drop_bytecode(module)
         if module.read_text() != original:
             print(f"\nFAILED TO RESTORE {module} -- the working tree holds a mutant")
 
