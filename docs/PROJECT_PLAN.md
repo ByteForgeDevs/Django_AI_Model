@@ -7497,6 +7497,58 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   `djaudit-ruff-` prefix on a temporary directory we create and delete
   ourselves, which is a label for a human reading `ls /tmp` and nothing else.
 - **5.3.3** — bandit adapter, with the Django-specific noise filtered out.
+  **Declined by measurement.** No adapter was built, and
+  `scripts/check_bandit_subsumed.py` re-checks the reason on every commit.
+
+  The premise was that bandit says things ruff does not. It does not, because
+  ruff's `S` rules *are* a port of bandit, and the port is essentially complete.
+  Two independent measurements agree.
+
+  By inventory: bandit registers **75 checks** across its plugins and its
+  blacklist, and ruff has an `S` equivalent for **71**. The four without are
+  `B614` (PyTorch) and `B615` (HuggingFace), neither of which a Django audit
+  reaches; `B613` trojansource, which ruff has as `PLE2502` outside the `S`
+  family and which fires nowhere in the corpus; and `B703` `django_mark_safe`.
+
+  By output, on the same 3,091 files: 987 / 236 / 12,245 findings, which is
+  13,468 against ruff's 13,388. Outside test code it is 469, of which 312 sit at
+  the *identical file, line and check number* as a ruff finding.
+
+  `B703` deserved the closest look, being the one Django-specific check ruff
+  lacks, and it turned out to be the weakest. All **101** of its findings share
+  a line with a `B308` — none stands alone — so bandit reports the same
+  `mark_safe` call twice under two ids. `B308` is ruff's `S308`, which 5.3.2
+  rejected because `DJI-011` makes the claim that matters and makes it about
+  *where the string came from*, which is the only thing separating
+  `mark_safe(escape(s))` from a real one.
+
+  What bandit reported and ruff did not was noise in every case read. `B404`
+  flags `import subprocess` — the import, not any use of it. `B405` and `B406`
+  flag importing an XML module, and `B406`'s single hit is
+  `from xml.sax.saxutils import escape`, a quoting helper that parses nothing;
+  bandit matched the module name and ignored the name imported from it. `B413`
+  reports the "no longer maintained" pyCrypto in pretix, which pins
+  `pycryptodome==3.23.*` — the maintained fork, sharing the `Crypto` import
+  namespace.
+
+  The one place the two disagreed on a code we had *adopted* settled it. bandit
+  reports `B113` (no request timeout) at `netbox/extras/dashboard/widgets.py:380`
+  where ruff does not, and the call reads
+  `timeout=self.config.get('request_timeout', 3)`. bandit is wrong and ruff is
+  right: the timeout is there, just not a literal. So on the single code where
+  bandit offered extra recall, the extra was a false positive.
+
+  Cost decided nothing but is worth recording: bandit takes 3.7s / 23.9s / 26.7s
+  where ruff takes 0.06s / 0.25s / 0.26s, roughly 100×. An adapter adopting zero
+  codes would have added 54 seconds to a run to report nothing.
+
+  A decline is a decision that stops being re-examined the moment it is written
+  down, and bandit gains checks between releases, so the structural half of the
+  argument is now a gate. `check_bandit_subsumed.py` reads both tools' own
+  inventories — under a second, no corpus — and fails if any bandit check has
+  neither a ruff counterpart nor a recorded reason. It was verified to fail by
+  removing one of the four exceptions. The empirical half stays here, because
+  re-running it costs a minute per project and would buy nothing per commit.
 - **5.3.4** — pip-audit adapter for dependency CVEs against the resolved requirements.
 - **5.3.5** — Deduplication: same file, same line, same underlying issue reported by two tools collapses to one finding with both as evidence.
 - **5.3.6** — `--with-external` / `--without-external` flags; external tools never block a run when absent.

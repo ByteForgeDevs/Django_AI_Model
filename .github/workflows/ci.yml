@@ -98,6 +98,17 @@ jobs:
       - name: live tier note matches the code
         run: uv run python scripts/check_live_doc.py
 
+      # Step 5.3.3 planned a bandit adapter and measurement declined it: ruff's
+      # `S` rules are a port of bandit, and on the corpus bandit's only
+      # unshared output was noise or a duplicate. A decline stops being
+      # re-examined the moment it is written down, so the structural half --
+      # every bandit check has a ruff counterpart or a recorded reason -- is
+      # re-checked here. bandit gains checks between releases, and a
+      # Django-relevant one should reopen the decision rather than pass
+      # unnoticed.
+      - name: bandit is still subsumed by ruff
+        run: uv run python scripts/check_bandit_subsumed.py
+
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch
       # cache. Every other method clones the queryset and re-queries, so the
