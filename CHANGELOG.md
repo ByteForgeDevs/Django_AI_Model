@@ -12,6 +12,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Added
 
+- **changelog:** derive the release notes from the trail that already exists (0ad7e0c4)
 - **schema:** make the published contract something you cannot change quietly (8204c650)
 - **cli:** let a run ask for the external tools, and never by default (b80af89d)
 - **adapters:** merge by fingerprint, and make a subsumed claim answerable (03701f95)
