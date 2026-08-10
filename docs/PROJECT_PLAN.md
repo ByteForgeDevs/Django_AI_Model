@@ -8731,12 +8731,41 @@ conversation.
 - **7.2.2** — `pre-commit` hook definition.
 - **7.2.3** — Container image for non-Python CI environments.
 
-### Step 7.3 — Documentation
+### Step 7.3 — Configuration
 
-- **7.3.1** — Getting-started guide and adoption path for a legacy codebase.
-- **7.3.2** — Complete rule reference, generated from `RuleMeta` so it cannot drift.
-- **7.3.3** — Rule authoring guide for external contributors.
-- **7.3.4** — Configuration reference: `pyproject.toml` settings, per-rule severity overrides, per-path exclusions.
+**Amended.** This step did not exist. The original 7.3.4 promised a
+*configuration reference* covering "`pyproject.toml` settings, per-rule
+severity overrides, per-path exclusions", and none of those three things had
+been built: `[tool.djaudit.llm]` is read by `src/djaudit/llm/config.py` and
+nothing else is, `--ignore` takes rule ids rather than paths, and no severity
+can be overridden anywhere. A documentation substep whose subject does not
+exist is the failure mode risk 12 is about, one layer up — it would have
+produced a reference page for a feature nobody could use, and the page would
+have passed review because references are read for shape, not truth.
+
+So the reference stays (as 7.4.4) and the feature it describes is built first.
+Configuration comes before documentation in the step order deliberately: 7.4.1
+tells a reader how to adopt djaudit on a legacy codebase, and on a legacy
+codebase the honest answer involves exclusions.
+
+- **7.3.1** — `[tool.djaudit]` in `pyproject.toml`: discovery, validation, and
+  the precedence rule against CLI flags. The subtle part is not reading TOML,
+  it is that a flag left unset must be distinguishable from a flag set to its
+  own default, or config silently loses to a default nobody typed.
+- **7.3.2** — Per-path exclusions. The design question is *where* they apply:
+  excluding files from parsing would remove models from the graph and change
+  cross-file analysis in ways nobody asked for, so exclusions are expected to
+  filter findings by location instead. Measure it before choosing.
+- **7.3.3** — Per-rule severity overrides, applied before thresholds rather
+  than after, since an override that cannot change what `--min-severity` keeps
+  or what `--fail-on` fails on is decoration.
+
+### Step 7.4 — Documentation
+
+- **7.4.1** — Getting-started guide and adoption path for a legacy codebase.
+- **7.4.2** — Complete rule reference, generated from `RuleMeta` so it cannot drift.
+- **7.4.3** — Rule authoring guide for external contributors.
+- **7.4.4** — Configuration reference: `pyproject.toml` settings, per-rule severity overrides, per-path exclusions.
 
 ---
 
@@ -8772,8 +8801,8 @@ conversation.
 | 4 | Migration safety and live tier | 6 | 28 | **Complete** (PR #7) — `DJM-001`…`DJM-010`, the live tier, and lock classification measured against a real `pg_locks` |
 | 5 | Portability and external adapters | 4 | 20 | **Complete** — `DJX-001`…`DJX-009`, two external adapters behind `--external`, 100% precision on three real targets |
 | 6 | LLM layer | 5 | 19 | **Complete** (PR #6) — **pulled forward, ran after Phase 3** |
-| 7 | Distribution | 3 | 10 | Not started |
-| | **Total** | **52** | **235** | |
+| 7 | Distribution | 4 | 13 | In progress — step 7.1 under way |
+| | **Total** | **53** | **238** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
