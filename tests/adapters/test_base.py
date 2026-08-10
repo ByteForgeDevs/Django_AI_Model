@@ -7,6 +7,7 @@ constructible, and a code nobody ruled on must not vanish.
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -265,6 +266,28 @@ class TestWhenTheToolIsNotThere:
 
     def test_the_probe_timeout_is_short_enough_to_be_a_probe(self) -> None:
         assert PROBE_TIMEOUT <= 10.0
+
+    def test_a_tool_run_by_path_is_still_called_by_its_name(self) -> None:
+        # `Availability.tool` is not a label. `as_finding` builds rule ids from
+        # it, so probing a resolved path without saying what it is produced
+        # findings called `/HOME/...//.VENV/BIN/RUFF-S324` -- and rule ids are
+        # what fingerprints and baselines key on.
+        path = shutil.which("ruff")
+        assert path is not None, "ruff is a dev dependency and should be installed"
+        found = probe_tool(path, name="ruff")
+        assert found, found.reason
+        assert found.tool == "ruff"
+        assert found.describe() == f"ruff {found.version}"
+
+    def test_without_a_name_the_path_is_all_the_probe_has_to_go_on(self) -> None:
+        # The contrast that makes the parameter above load-bearing rather than
+        # decorative. It also degrades the version, because `read_version` can
+        # no longer recognise the tool's own name in `ruff 0.16.1`.
+        path = shutil.which("ruff")
+        assert path is not None
+        found = probe_tool(path)
+        assert found.tool == path
+        assert found.version.startswith("ruff ")
 
 
 class TestReadingAVersionString:

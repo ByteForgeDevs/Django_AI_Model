@@ -41,17 +41,28 @@ bandit walks the same trees in Python rather than Rust.
 """
 
 
-def probe_tool(tool: str, *, argument: str = "--version") -> Availability:
-    """Whether `tool` is on `PATH` and will answer, and at what version.
+def probe_tool(
+    executable: str, *, name: str | None = None, argument: str = "--version"
+) -> Availability:
+    """Whether `executable` is on `PATH` and will answer, and at what version.
+
+    `name` is what the tool is *called*, which is not always what we run: a
+    caller may hold a resolved path, and an `Availability.tool` is not just a
+    label. It names the tool in every diagnostic, and `ClaimTable.as_finding`
+    builds rule ids out of it -- so an absolute path would produce a finding
+    called `/USR/BIN/RUFF-S324`, and rule ids are what fingerprints and
+    baselines are keyed on. It also decides whether `read_version` recognises
+    the first token of `ruff 0.16.1` as the tool's own name.
 
     Never raises. Every way this can fail -- not installed, installed but not
     executable, installed but hanging, installed but exiting non-zero -- comes
     back as an `Availability` carrying the reason, because a missing optional
     tool is an ordinary fact about a machine and not an error in an audit.
     """
-    found = shutil.which(tool)
+    tool = name or executable
+    found = shutil.which(executable)
     if found is None:
-        return Availability(tool=tool, reason=f"`{tool}` is not on PATH")
+        return Availability(tool=tool, reason=f"`{executable}` is not on PATH")
     outcome = run_command([found, argument], cwd=Path.cwd(), timeout=PROBE_TIMEOUT)
     if not outcome.started:
         return Availability(tool=tool, reason=f"`{tool}` could not be started: {outcome.error}")
