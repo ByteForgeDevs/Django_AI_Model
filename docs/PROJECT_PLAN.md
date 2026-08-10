@@ -8851,7 +8851,50 @@ conversation.
   real CLI in a subprocess and their output asserted to conform, with a
   companion test that fails if those fixtures ever stop producing findings —
   a conformance check over an empty report would pass while proving nothing.
-- **7.1.3** — Changelog generation from the commit trail.
+- **7.1.3** — Changelog generation from the commit trail. **Done.**
+
+  The commit trail is already the changelog: 232 commits, 222 of which match
+  `<type>(<scope>): <subject>`, the other ten being eight merges and two
+  commits written before the convention was adopted. Writing a second,
+  hand-maintained account of the same history would create a file that can
+  disagree with the repository, and nothing would notice when it did. So
+  `scripts/gen_changelog.py` derives `CHANGELOG.md` from `git log` and
+  `--check` rebuilds and compares, which makes a hand edit and a forgotten
+  regeneration fail identically.
+
+  Three details are not obvious:
+
+  - **Changelog-only commits are excluded.** Regenerating the changelog is
+    itself a commit; if it were included, the next run would find the trail
+    changed and demand another regeneration, forever. Commits whose only
+    touched file is `CHANGELOG.md` are dropped.
+  - **Upgrade notes come from the contract ledger, not from subjects.** A
+    commit can say `feat(core): better snippets` while quietly bumping
+    `FINGERPRINT_VERSION`, and the reader needs to be told to regenerate their
+    baseline. `contract_changes()` diffs `schema/contract.json` between the
+    last tag and `HEAD` and requires the changelog to mention any new schema
+    or fingerprint version by name.
+  - **Tagged-release paths are exercised only in constructed repositories.**
+    The real repo has no tags, so everything under a version heading is tested
+    against temporary git repositories built by the test fixture. The
+    `--check` summary reports `0 released · 224 commits unreleased`, which is
+    the honest state.
+
+  Writing the CI step found a defect the local run could not: GitHub's
+  checkout action clones to depth 1 by default, and a depth-1 clone rebuilds
+  the changelog from a single commit and reports a *correct* file as out of
+  date. Verified by cloning the repo shallowly and watching the gate fail for
+  the wrong reason. Fixed twice over — the `quality` job now checks out with
+  `fetch-depth: 0`, and the gate detects a shallow clone and says so, rather
+  than sending the reader after a content problem that does not exist.
+
+  *Verified:* 27 tests; six un-fix controls against the generator (merges
+  admitted, changelog-only commits kept, the breaking marker dropped, the
+  `BREAKING CHANGE:` footer ignored, unknown types kept, scope dropped) all
+  caught by the unit tests; six controls against the real tree (an entry
+  deleted, an entry reworded, a sha altered, the preamble stripped, the
+  versioning link removed, the file deleted) all caught by `--check`; the
+  shallow guard confirmed load-bearing by removing it.
 
 ### Step 7.2 — Integrations
 

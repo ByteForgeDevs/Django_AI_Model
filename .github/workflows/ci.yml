@@ -23,7 +23,12 @@ jobs:
     name: lint, types, tests
     runs-on: ubuntu-latest
     steps:
+      # The changelog is generated from the whole commit trail, so the default
+      # depth-1 checkout would rebuild it from a single commit and report it
+      # stale on every pull request.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -141,6 +146,12 @@ jobs:
       # committed in every repository that has adopted the tool.
       - name: the published contract has not moved
         run: uv run python scripts/gen_schema.py --check
+
+      # The changelog is a derived file, so the only way it can be wrong is if
+      # someone edited it by hand or forgot to regenerate it. Both read the
+      # same here: rebuild from the trail and compare.
+      - name: the changelog matches the commit trail
+        run: uv run python scripts/gen_changelog.py --check
 
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch
