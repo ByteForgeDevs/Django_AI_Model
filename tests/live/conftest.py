@@ -73,3 +73,11 @@ def live_pairs(tmp_path: Path) -> Iterator[Path]:
     from .pairs import build_pairs
 
     yield from _isolated(tmp_path, build_pairs)
+
+
+@pytest.fixture
+def live_divergence(tmp_path: Path) -> Iterator[Path]:
+    """A project that reaches PostgreSQL and SQLite from one settings module."""
+    from .divergence import build_divergence
+
+    yield from _isolated(tmp_path, build_divergence)

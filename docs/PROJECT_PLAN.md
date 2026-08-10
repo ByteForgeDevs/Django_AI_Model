@@ -7745,8 +7745,85 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
 
 ### Step 5.4 — Benchmark and document
 
-- **5.4.1** — Dual-database fixture project.
-- **5.4.2** — Validate against Healthchecks, which is the ideal target for this family.
+- **5.4.1** — Dual-database fixture project. **DONE**, built incrementally
+  alongside the rules rather than up front, and first committed with `DJX-003`.
+
+  `tests/fixtures/portability_project` is the only place any `DJX` rule has a
+  known answer, and the reason is recorded in the manifest: this family cannot
+  be measured for recall on the corpus even in principle. Every rule is gated
+  on `Divergence.reaches`, and of the three benchmark projects only Healthchecks
+  passes that gate — NetBox and pretix compute their `ENGINE` at import time and
+  cannot be read statically at all. Healthchecks then contains almost none of
+  the constructs: zero `JSONField`, zero `ArrayField`, zero `icontains`, zero
+  `Trunc`, and two `.distinct()` calls that are both the portable form.
+
+  9 expected findings, one per rule, and 10 `must_not_report` twins in a second
+  app that differ only in the thing each rule is about. The project-wide control
+  is the settings file: deleting the one `if` that introduces the second engine
+  silences the entire family, which is the difference between a portability rule
+  and a style rule.
+
+- **5.4.2** — Validate against Healthchecks. **DONE**, and the substep turned
+  out to be a gap rather than a confirmation.
+
+  Healthchecks was already at 100% precision with all 7 `DJX` findings triaged
+  in long form, so the obvious reading of this substep — run it and look — was
+  already true before it started. The gap is one layer down. **Every `DJX` rule
+  is a claim that two engines disagree, and nothing in this suite had ever made
+  them disagree.** The static tests prove we report a construct; the triage
+  proves the construct is really in Healthchecks; neither touches a database.
+  The belief in the middle had been carried on reading alone since the family
+  was written.
+
+  `tests/live/test_pairs.py` had already solved this shape for `DJM`: a rule
+  predicts what PostgreSQL will do with a migration, and `TestPostgresAgrees`
+  makes PostgreSQL do it. `tests/live/divergence.py` is that applied to
+  portability — one project reaching PostgreSQL and SQLite through two aliases
+  in one settings module, so a difference in the answers cannot be a difference
+  between two differently-configured projects.
+
+  The columns are Healthchecks' own (`api_key` and `api_key_readonly` as
+  `CharField(max_length=128, blank=True)`, `tags` as `CharField(max_length=500,
+  blank=True)`) and the expressions are transcribed from the four flagged lines,
+  because a fixture asking a *similar* question would be evidence about the
+  fixture. Measured on PostgreSQL 18.1 and CPython 3.13's SQLite, over one
+  `Project` holding `ABCDEFGHij` and one `Check` tagged `PROD staging`:
+
+  | expression | flagged at | sqlite | postgres |
+  |---|---|---|---|
+  | `filter(api_key__startswith='abcdefgh')` | `accounts/models.py:411` | 1 | **0** |
+  | `filter(api_key_readonly__startswith='abcdefgh')` | `accounts/models.py:417` | 1 | **0** |
+  | `filter(tags__contains='prod')` | `api/views.py:750` | 1 | **0** |
+  | `filter(api_key__startswith='ABCDEFGH')` | control | 1 | 1 |
+  | `filter(tags__contains='PROD')` | control | 1 | 1 |
+
+  `select_for_update()`, flagged at `api/models.py:510` and `api/views.py:515`,
+  compiles to SQL ending `FOR UPDATE` on PostgreSQL and to the identical
+  statement with no locking clause of any name on SQLite — accepted silently
+  rather than refused, which is what makes it a rule instead of a bug somebody
+  would have found. Both sites sit inside `transaction.atomic()` and both carry
+  a comment naming the concurrent write they mean to serialise.
+
+  **The last two rows are the substep.** A harness that reported a divergence
+  for every pair would produce the first three rows and be indistinguishable
+  from a correct one. Three controls confirm it: pointing both aliases at
+  PostgreSQL fails 14 tests, both at SQLite fails 12, and storing the row
+  lower-case fails 5 — so the tests read the engines and the data, not
+  constants.
+
+  One assertion was written, failed, and was inverted rather than fixed.
+  `DJX-001` is not reported on this fixture, and that is correct: it reports
+  development and production running *different* engines, which Healthchecks
+  does by branching on a `DB` environment variable, whereas this fixture reaches
+  both engines through two aliases because the probe has to open both
+  connections in one process to compare answers over the same rows. Two aliases
+  are not two environments. Reshaping the fixture around the rule would have
+  meant reshaping it away from the measurement, so the absence is asserted with
+  its reason instead.
+
+  *Verified:* 25 tests in `tests/live/test_divergence.py`, taking the live tier
+  to 662. No CI change: the live job already runs `tests/live` wholesale and
+  `scripts/live_gate.py` already fails on a skip.
 - **5.4.3** — `docs/rules/DJX.md` and `docs/adapters.md`.
 
 ---
