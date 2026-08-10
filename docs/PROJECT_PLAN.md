@@ -7406,7 +7406,96 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   leaves no trace. And the `Claim` values are a `StrEnum`'s serialized form,
   so they are asserted as literals rather than read back off the enum, which
   would agree with whatever the enum happened to say.
-- **5.3.2** — ruff adapter: run with Django-relevant rule sets, map into our schema.
+- **5.3.2** — ruff adapter: run with Django-relevant rule sets, map into our
+  schema. **Done.** `src/djaudit/adapters/ruff.py` with `tests/adapters/test_ruff.py`
+  (30 tests, **92/93 mutation**).
+
+  The measurement came before the design. `ruff --select DJ,S` on the three
+  benchmark projects emits 958 / 210 / 12,220 findings, which is 13,388 against
+  djaudit's 268 and is the whole problem in one line. Outside test code it is
+  617 across 25 codes, and every one of those 25 was read and decided
+  individually rather than by rule family.
+
+  | corpus | ruff `DJ,S` | outside tests | djaudit |
+  |---|---|---|---|
+  | healthchecks | 958 | 108 | 41 |
+  | netbox | 210 | 146 | 76 |
+  | pretix | 12,220 | 363 | 151 |
+
+  Four codes adopted, one subsumed, twenty rejected — 41 findings kept from 617,
+  and none of them duplicates anything we already say. That was measured, not
+  assumed: comparing file *and line* against djaudit's own output, the overlap
+  is **zero for every code except `DJ001`**, whose 8 same-line hits are all
+  `DJD-002`. The reason is structural and worth stating once. Our `DJI` rules
+  are dataflow claims — *this* value reached *that* sink — while ruff's `S`
+  rules are shape claims about a single line. Two tools looking at the same file
+  for different kinds of evidence land in different places, so "overlaps with
+  ruff" was never the interesting question; "says something we cannot" is.
+
+  Adopted: `S113` (a `requests` call with no timeout — pretix calls its own
+  update endpoint, Stripe's OAuth endpoint and two currency services this way,
+  and no djaudit rule looks at outbound HTTP at all), `S324` (weak hash;
+  **tentative**, because the tool cannot see whether the digest is
+  security-bearing and both kinds are present — healthchecks hashes API keys,
+  pretix builds cache keys and PDF filenames), and `DJ007` / `DJ006`. The last
+  two are the clearest case in the table: they make **exactly** `DJA-008` and
+  `DJA-009`'s argument — an allowlist stays correct when the model grows, a
+  denylist does not — about `ModelForm`, a class djaudit does not parse. Two of
+  the three `DJ006` hits exclude `user`, which is the field `DJA-011` exists
+  for. Adopting them extends a published claim to a class we cannot reach
+  rather than importing a foreign opinion.
+
+  `DJ001` is subsumed rather than rejected because `DJD-002` already reports it,
+  and rejecting it would say we disagree. What justifies our narrower version is
+  in the numbers: **151 of the 179 `DJ001` findings outside test code carry
+  `blank=True`**, including every one in healthchecks and netbox, and a
+  `null=True, blank=True` char field is a deliberate tri-state, not a defect.
+
+  The twenty rejections each carry their measurement, because a rejection is the
+  one decision with no visible consequence and its reason is all that stands
+  between it and a shrug. Reading the flagged lines is what settled most of
+  them. `S105` is almost pure false positive — `CENSOR_TOKEN = '********'`, a
+  charset constant, `email_password_status = "success"`. `S603` flags the *list*
+  form of `subprocess.run`, which is the form we would recommend. `S104`'s
+  single hit is inside an argparse **help string**. `S101` outside tests is
+  internal invariants and mypy narrowing. `S608` and `S310` are `DJI`'s
+  territory, and `DJI` reads dataflow where these read shape.
+
+  `--isolated` is load-bearing rather than tidiness: without it a target
+  silences our audit by editing its own `pyproject.toml`, which is the wrong way
+  round.
+
+  Two defects surfaced, both invisible to unit tests and both found by running
+  the thing on real projects.
+
+  **pretix returned zero findings.** `live/runner.py` caps each captured stream
+  at 1 MiB so a runaway subprocess cannot exhaust memory, and pretix's ruff JSON
+  is larger — truncated mid-object at exactly 1,048,576 bytes, which `json` then
+  rejects, so the largest project in the corpus reported nothing and said only
+  that its output could not be read. The cap is correct; the fix is to stop
+  using the pipe. ruff writes to `--output-file` in a temporary directory we
+  own, so a read-only checkout still works and nothing is left in the target
+  tree. The regression test drives a stub ruff that writes 4,000 findings,
+  with a stub that prints to stdout instead as the control that proves the
+  findings came out of the file.
+
+  **A tool run by path was named by its path.** `probe_tool` used one string as
+  both the executable and the tool's name, and `ClaimTable.as_finding` builds
+  rule ids out of that name — so probing a resolved path produced findings
+  called `/HOME/…/.VENV/BIN/RUFF-S324`, and rule ids are what fingerprints and
+  baselines are keyed on. It degraded the version string too, since
+  `read_version` could no longer recognise the tool's own name in `ruff 0.16.1`.
+  `probe_tool` now takes `name` separately from `executable`.
+
+  The mutation run found three real gaps and one equivalent mutant. Blanking the
+  `remediation` of any of the four adopted claims survived — an adopted finding
+  is one we put our name on, and ruff's message is a description rather than an
+  instruction, so each is now asserted for the specific fix it names. Dropping
+  the "tool is absent" guard survived because the absent-tool test never checked
+  that a machine without ruff gains **no diagnostic**. And `RuffAdapter`'s
+  `frozen`/`slots` had no test. The survivor left at 92/93 is the
+  `djaudit-ruff-` prefix on a temporary directory we create and delete
+  ourselves, which is a label for a human reading `ls /tmp` and nothing else.
 - **5.3.3** — bandit adapter, with the Django-specific noise filtered out.
 - **5.3.4** — pip-audit adapter for dependency CVEs against the resolved requirements.
 - **5.3.5** — Deduplication: same file, same line, same underlying issue reported by two tools collapses to one finding with both as evidence.
