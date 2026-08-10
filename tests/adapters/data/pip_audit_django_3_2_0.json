@@ -1,0 +1,81 @@
+{
+  "dependencies": [
+    {
+      "name": "django",
+      "version": "3.2.0",
+      "vulns": [
+        {
+          "id": "PYSEC-2022-190",
+          "fix_versions": [
+            "4.0.4"
+          ],
+          "aliases": [
+            "CVE-2022-28346",
+            "BIT-django-2022-28346",
+            "GHSA-2gwj-7jmv-h26r"
+          ],
+          "description": "SQL Injection in Django"
+        },
+        {
+          "id": "PYSEC-2023-13",
+          "fix_versions": [
+            "4.0.10"
+          ],
+          "aliases": [
+            "CVE-2023-24580",
+            "BIT-django-2023-24580",
+            "GHSA-2hrw-hx67-34x6"
+          ],
+          "description": "Resource exhaustion in Django"
+        },
+        {
+          "id": "PYSEC-2026-2090",
+          "fix_versions": [
+            "6.0.7"
+          ],
+          "aliases": [
+            "GHSA-3h9f-r86x-qvjx",
+            "BIT-django-2026-48588",
+            "CVE-2026-48588"
+          ],
+          "description": "Django: cache middleware may expose private responses when unrelated request cookies are present"
+        },
+        {
+          "id": "PYSEC-2022-190",
+          "fix_versions": [
+            "4.0.4"
+          ],
+          "aliases": [
+            "CVE-2022-28346",
+            "BIT-django-2022-28346",
+            "GHSA-2gwj-7jmv-h26r"
+          ],
+          "description": "SQL Injection in Django"
+        }
+      ]
+    },
+    {
+      "name": "requests",
+      "version": "2.19.0",
+      "vulns": [
+        {
+          "id": "PYSEC-2026-1872",
+          "fix_versions": [
+            "2.32.4"
+          ],
+          "aliases": [
+            "GHSA-9hjg-9r4m-mvj7",
+            "CVE-2024-47081"
+          ],
+          "description": "Requests vulnerable to .netrc credentials leak via malicious URLs"
+        }
+      ]
+    },
+    {
+      "name": "jinja2",
+      "version": "2.10",
+      "vulns": []
+    }
+  ],
+  "fixes": []
+}

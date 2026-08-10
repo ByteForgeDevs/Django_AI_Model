@@ -7549,7 +7549,74 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
   neither a ruff counterpart nor a recorded reason. It was verified to fail by
   removing one of the four exceptions. The empirical half stays here, because
   re-running it costs a minute per project and would buy nothing per commit.
-- **5.3.4** — pip-audit adapter for dependency CVEs against the resolved requirements.
+- **5.3.4** — pip-audit adapter for dependency CVEs, in
+  `src/djaudit/adapters/pip_audit.py`. The opposite outcome to 5.3.3: nothing
+  else in the project knows what a published advisory is, so every finding here
+  is one djaudit could not have produced alone.
+
+  The input was already built. `manifest.py` finds dependency declarations and
+  separates development from production, so the adapter asks about what the
+  deployment installs and stays quiet about test tooling. Its dependency counts
+  turned out to match pip-audit's own reading of the same files exactly —
+  netbox 46, healthchecks 15 — which is an independent check on a parser we
+  wrote for another purpose.
+
+  **`--no-deps` is not the flag it sounds like.** It only *permits* dependency
+  resolution to be disabled; `--disable-pip` is what actually disables it. That
+  was read out of pip-audit's own `requirement.py` rather than guessed, and the
+  guess would have been expensive in two ways. Without `--disable-pip`,
+  pip-audit builds a virtualenv and runs `pip install --dry-run` against the
+  target's requirements — which reaches the network, and which executes package
+  build backends. The static tier's promise is that it never runs the code it
+  audits, and a resolver that builds sdists from an untrusted requirements file
+  breaks that promise regardless of how good its findings are. It is also 5×
+  slower: netbox 102s resolving against 19s frozen.
+
+  The cost is real and is recorded rather than hidden. Frozen, pip-audit sees
+  only direct exact pins, so netbox's one genuine vulnerability — `pyjwt
+  2.12.1`, five advisories, arriving through `social-auth-core` — is invisible
+  to us. A transitive-dependency audit belongs to the live tier, where the
+  target's environment is already installed and no resolution is needed. The
+  finding schema loses nothing by waiting.
+
+  `--disable-pip` refuses the whole file if a single requirement is unpinned,
+  and pretix pins 12 of 76 exactly, so one `babel` would have silently cost the
+  other 75 their audit. The adapter therefore selects the exactly-pinned lines
+  itself, writes them to a scratch file of its own — which also means a
+  read-only checkout works — and reports the rest as a diagnostic naming three
+  and counting the remainder. What was *not* audited is part of the answer.
+
+  `--vulnerability-service osv` because the default PyPI service timed out at
+  82s where OSV answered the same file in 21s. OSV returns duplicate advisory
+  entries — 52 of the probe's 114 were repeats — so deduplication by
+  `(package, id)` is not tidiness, it is correctness.
+
+  Two structural decisions. Runs are grouped **by file** rather than by manifest
+  because netbox's `pyproject.toml` declares ten optional groups: per-manifest
+  it was thirteen subprocess invocations and eleven near-identical diagnostics,
+  by file it is two. And `ClaimTable.as_finding` is deliberately unused. It
+  gives every finding of a code one title, one message and one rule id, which is
+  right for a linter — every `S324` is the same observation — and wrong for a
+  vulnerability, where the title *is* the content and five advisories against
+  one pinned line would share a fingerprint and collapse to a single baseline
+  entry. The claim table still rules, but on advisory *databases*: an id is
+  minted daily and no table could rule on one, while a source is a small stable
+  set and the decision is real.
+
+  Output goes to a file rather than stdout, for the reason 5.3.2 found the hard
+  way — `live.runner` caps a captured stream at 1 MiB and a JSON report
+  truncated mid-object parses as nothing at all.
+
+  The corpus reports **zero** findings, because healthchecks, netbox and pretix
+  all pin current versions. That means the corpus cannot test the finding path
+  at all, and a green run there is not evidence. It was exercised against
+  deliberately old pins (`django==3.2.0`, `requests==2.19.0`, `jinja2==2.10`):
+  50 findings, 50 distinct rule ids, correct line numbers, 114 raw entries
+  deduplicated to 50. Every advisory-id form seen was checked to resolve at
+  `osv.dev` before being shipped as a reference. Tests read recorded output and
+  drive `collect` through a stub on disk, so nothing in the suite touches the
+  network. 56 tests, 86/87 mutation — the one survivor is the scratch
+  directory's name prefix.
 - **5.3.5** — Deduplication: same file, same line, same underlying issue reported by two tools collapses to one finding with both as evidence.
 - **5.3.6** — `--with-external` / `--without-external` flags; external tools never block a run when absent.
 
