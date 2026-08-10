@@ -155,7 +155,7 @@ def build_node(record: ClassRecord, app_label: str, index: ClassIndex) -> ModelN
         node=node,
         fields=extract_fields(node, record.bindings),
     )
-    read_meta(model, meta_class(node))
+    read_meta(model, meta_class(node), record.bindings)
     model.managers = extract_managers(node, record, index)
     model.relations = build_edges(model, record.bindings)
     return model

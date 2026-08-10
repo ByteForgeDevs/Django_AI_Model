@@ -98,6 +98,27 @@ jobs:
       - name: live tier note matches the code
         run: uv run python scripts/check_live_doc.py
 
+      # Step 5.3.3 planned a bandit adapter and measurement declined it: ruff's
+      # `S` rules are a port of bandit, and on the corpus bandit's only
+      # unshared output was noise or a duplicate. A decline stops being
+      # re-examined the moment it is written down, so the structural half --
+      # every bandit check has a ruff counterpart or a recorded reason -- is
+      # re-checked here. bandit gains checks between releases, and a
+      # Django-relevant one should reopen the decision rather than pass
+      # unnoticed.
+      - name: bandit is still subsumed by ruff
+        run: uv run python scripts/check_bandit_subsumed.py
+
+      # The decision record for what we take from other people's tools. Its
+      # claims rot quietly -- a count of claims in a table, which verdict a
+      # code carries, which adapter reaches the network -- because none of
+      # them break a test when they change. The one about the network is the
+      # reason this runs in the fast job rather than the corpus one: a reader
+      # deciding whether `--external` is safe offline is relying on that
+      # column being the one `REACHES_THE_NETWORK` actually holds.
+      - name: adapters note matches the code
+        run: uv run python scripts/check_adapters_doc.py
+
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch
       # cache. Every other method clones the queryset and re-queries, so the
@@ -161,6 +182,8 @@ jobs:
           uv run djaudit eval tests/fixtures/injection_project \
             --summary "$GITHUB_STEP_SUMMARY"
           uv run djaudit eval tests/fixtures/migration_project \
+            --summary "$GITHUB_STEP_SUMMARY"
+          uv run djaudit eval tests/fixtures/portability_project \
             --summary "$GITHUB_STEP_SUMMARY"
 
       # The manifest above proves the controls are silent. It cannot prove they
@@ -322,6 +345,21 @@ jobs:
           uv run python scripts/graph_coverage.py target \
             --name ${{ matrix.target.name }} \
             --expect benchmarks/graph/${{ matrix.target.name }}.json
+
+      # A third question, and the only gate here that can see a finding that
+      # was never made. Marking a linter's rule code SUBSUMED deletes every
+      # finding it would have produced, on the assertion that one of our rules
+      # covers the same ground; the precision gate cannot check that, because a
+      # finding that does not exist cannot be a false positive. This runs ruff
+      # restricted to the subsumed codes and compares where it reports against
+      # where our rule does. The recorded shortfall is not expected to be zero
+      # -- our rules are deliberately narrower than the linters they subsume --
+      # but it is expected not to grow without somebody looking.
+      - name: subsumption claims still hold
+        run: |
+          uv run python scripts/check_subsumption.py target \
+            --name ${{ matrix.target.name }} \
+            --expect benchmarks/subsumption/${{ matrix.target.name }}.json
 
       # Risk 8 described this step as existing for the whole of Phase 2 while
       # nothing here timed anything. It is checked on the same clone the

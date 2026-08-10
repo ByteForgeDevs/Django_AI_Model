@@ -30,6 +30,10 @@ VIEWS = ORM / "inventory/views.py"
 INJECTION = ROOT / "tests/fixtures/injection_project"
 ICONTROLS = INJECTION / "shop/controls.py"
 
+PORTABILITY = ROOT / "tests/fixtures/portability_project"
+PQUERIES = PORTABILITY / "warehouse/queries.py"
+PMODELS = PORTABILITY / "warehouse/models.py"
+
 Unfix = tuple[str, str, Path, str, str]
 
 ORM_UNFIXES: tuple[Unfix, ...] = (
@@ -311,12 +315,87 @@ MIGRATION_UNFIXES: tuple[Unfix, ...] = (
     ),
 )
 
+PORTABILITY_UNFIXES: tuple[Unfix, ...] = (
+    (
+        "DJX-008",
+        "spell the word boundary the way only one engine understands",
+        PQUERIES,
+        'name__regex=r"(^|[^0-9A-Za-z])USD([^0-9A-Za-z]|$)"',
+        'name__regex=r"\\bUSD\\b"',
+    ),
+    (
+        "DJX-007",
+        "take the lock the defect takes instead of one atomic UPDATE",
+        PQUERIES,
+        'return Item.objects.filter(sku=sku).update(name=Trim("name"))',
+        "item = Item.objects.select_for_update().get(sku=sku)\n"
+        "        item.name = item.name.strip()\n"
+        "        item.save()\n"
+        "        return item",
+    ),
+    (
+        "DJX-006",
+        "ask for a deferrable unique constraint instead of a plain one",
+        PMODELS,
+        'models.UniqueConstraint(fields=["sku"], name="warehouse_item_sku_unique")',
+        "models.UniqueConstraint(\n"
+        '                fields=["sku"],\n'
+        '                name="warehouse_item_sku_unique",\n'
+        "                deferrable=models.Deferrable.DEFERRED,\n"
+        "            )",
+    ),
+    (
+        "DJX-005",
+        "hold the tags in a Postgres array instead of a portable column",
+        PMODELS,
+        # The import and the declaration have to move together: an unresolvable
+        # `ArrayField` is not a Postgres field as far as the model graph is
+        # concerned, so either half alone un-fixes nothing.
+        "from django.db import models\n\n\nclass Item(models.Model):\n"
+        "    sku = models.CharField(max_length=32, unique=True)\n"
+        "    name = models.CharField(max_length=200)\n"
+        '    tags = models.TextField(default="")',
+        "from django.contrib.postgres.fields import ArrayField\n"
+        "from django.db import models\n\n\nclass Item(models.Model):\n"
+        "    sku = models.CharField(max_length=32, unique=True)\n"
+        "    name = models.CharField(max_length=200)\n"
+        "    tags = ArrayField(models.CharField(max_length=40), default=list)",
+    ),
+    (
+        "DJX-004",
+        "match a substring case-sensitively instead of asking for either case",
+        PQUERIES,
+        "return Item.objects.filter(name__icontains=term)",
+        "return Item.objects.filter(name__contains=term)",
+    ),
+    (
+        "DJX-002",
+        "ask JSON containment instead of asking whether the key is there",
+        PQUERIES,
+        "return Item.objects.filter(attributes__has_key=key)",
+        "return Item.objects.filter(attributes__contains={key: True})",
+    ),
+    (
+        "DJX-003",
+        "ask the per-group-latest question with DISTINCT ON instead of a subquery",
+        PQUERIES,
+        "    newest = (\n"
+        '        Item.objects.filter(sku=models.OuterRef("sku")).order_by("-id").values("pk")[:1]\n'
+        "    )\n"
+        "    return Item.objects.filter(pk__in=models.Subquery(newest))\n",
+        '    return Item.objects.order_by("sku", "-id").distinct("sku")\n',
+    ),
+)
+
 FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...], str], ...] = (
     ("orm_project", ORM, ORM_UNFIXES, "controls.py"),
     ("injection_project", INJECTION, INJECTION_UNFIXES, "controls.py"),
     # A migration cannot be called controls.py, so this fixture keeps its
     # controls in a whole app instead of a single file.
     ("migration_project", MIGRATION, MIGRATION_UNFIXES, "ledger/"),
+    # Nor can a settings module or a models module, so this fixture keeps the
+    # controls in a whole app too: `warehouse` is `catalog` written portably.
+    ("portability_project", PORTABILITY, PORTABILITY_UNFIXES, "warehouse/"),
 )
 
 

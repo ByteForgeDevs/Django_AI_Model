@@ -68,10 +68,18 @@ class TestLookup:
             get("DJS-999")
 
     def test_select_by_family(self):
+        """`select(families={Family.DJX}) == []` held here until `DJX-001`
+        shipped, and it was the same mistake `test_select_by_tier` records: a
+        fact about the catalogue wearing the clothes of a rule about the
+        filter. The filter's actual claim is that it partitions."""
         assert select(families={Family.DJS})
         assert select(families={Family.DJM})
-        # DJX has no rules yet, so it is what an empty selection looks like.
-        assert select(families={Family.DJX}) == []
+        every = select()
+        for family in Family:
+            chosen = select(families={family})
+            assert {r.meta.family for r in chosen} <= {family}
+            assert chosen == [r for r in every if r.meta.family is family]
+        assert sum(len(select(families={f})) for f in Family) == len(every)
 
     def test_select_by_tier(self):
         """`select(tiers={Tier.LIVE}) == []` held here until `DJM-010` shipped,

@@ -98,7 +98,10 @@ class TestGeneratedDoc:
         assert {p.stem for p in DOCS.glob("*.md")} <= families
 
     def test_an_orphaned_page_fails_the_check(self, tmp_path: Path) -> None:
-        orphan = DOCS / "DJX.md"
+        # Deliberately not a real family prefix. This was `DJX.md` while DJX
+        # had no rules, which made the test stop testing orphaning on the day
+        # DJX gained one -- the page was no longer an orphan.
+        orphan = DOCS / "DJZ.md"
         assert not orphan.exists()
         orphan.write_text("# DJX\n", encoding="utf-8")
         try:

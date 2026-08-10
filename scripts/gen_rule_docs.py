@@ -146,6 +146,30 @@ BLURBS: dict[Family, Blurb] = {
             "never a total."
         ),
     ),
+    Family.DJX: Blurb(
+        heading="cross-database portability",
+        summary=(
+            "{count} rules on the gap between the database a developer runs and the one\n"
+            "that serves requests. Nothing here is a vulnerability and nothing here fails\n"
+            "at import time. These are the defects that pass the whole test suite and then\n"
+            "fail on production data, because the test suite ran against the other engine."
+        ),
+        scope=(
+            "This family reports only what it can **read**. An `ENGINE` written as a literal\n"
+            "string is evidence; one computed at runtime, or set through a dict imported\n"
+            "from elsewhere, is not, and the difference decides whether a rule fires. Of the\n"
+            "three benchmark projects only Healthchecks states its engines outright --\n"
+            'SQLite by default, Postgres and MySQL behind `os.getenv("DB")` -- and it is the\n'
+            "only one this family reports on. pretix concatenates its backend name from a\n"
+            "config file and NetBox assigns `ENGINE` through a later `.update()`, so both\n"
+            "resolve as unreadable.\n"
+            "\n"
+            "That restraint is deliberate. Asking *could* this project be on SQLite, rather\n"
+            "than *is* it, answers yes for every project whose settings resist analysis, and\n"
+            "would turn two Postgres-only codebases into a page of portability findings\n"
+            "about a database neither of them runs."
+        ),
+    ),
     Family.DJM: Blurb(
         heading="migration safety",
         summary=(

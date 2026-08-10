@@ -9,7 +9,7 @@ from djaudit import engine
 from djaudit.baseline import Baseline
 from djaudit.context import ProjectContext
 from djaudit.models import Confidence, Family, Finding, Severity, Tier
-from djaudit.registry import Rule, RuleMeta
+from djaudit.registry import Rule, RuleMeta, select
 
 ONLY_DEBUG = {"DJS-001"}
 """These tests are about engine mechanics -- thresholds, baselines, isolation --
@@ -74,12 +74,14 @@ class TestThresholds:
 
 
 class TestSelection:
-    def test_selecting_an_unrelated_family_runs_nothing(self, vulnerable_project):
-        # DJX is the family with no rules yet. Naming a populated one here would
-        # make this pass for the wrong reason the moment its rules land.
-        result = engine.run(vulnerable_project, families={Family.DJX})
-        assert result.rules_run == 0
-        assert result.findings == []
+    def test_selecting_a_family_runs_only_that_family(self, vulnerable_project):
+        # This asserted `rules_run == 0` for DJX while DJX was empty, so it
+        # passed on the catalogue rather than on the filter and would have gone
+        # on passing had `families=` been ignored entirely.
+        result = engine.run(vulnerable_project, families={Family.DJX}, min_severity=Severity.INFO)
+        assert result.rules_run == len(select(families={Family.DJX}))
+        assert result.rules_run < len(select())
+        assert {f.family for f in result.findings} <= {Family.DJX}
 
     def test_ignoring_a_rule_silences_it(self, vulnerable_project):
         result = engine.run(vulnerable_project, exclude={"DJS-001"}, min_severity=Severity.INFO)

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from djaudit.dataflow.inventory import LoopSite
     from djaudit.dataflow.querysets import QuerysetValue
     from djaudit.dataflow.scopes import Scope
+    from djaudit.engines import Divergence
     from djaudit.graph.nodes import ModelGraph
     from djaudit.live.checks import Report
     from djaudit.live.checks import Unknown as ChecksUnknown
@@ -142,6 +143,7 @@ class ProjectContext:
     _source: dict[Path, str | None] = field(default_factory=dict, repr=False)
     _lines: dict[Path, list[str]] = field(default_factory=dict, repr=False)
     _model_graph: ModelGraph | None = field(default=None, repr=False)
+    _divergence: Divergence | None = field(default=None, repr=False)
     _api_surface: ApiSurface | None = field(default=None, repr=False)
     _loops: tuple[LoopSite, ...] | None = field(default=None, repr=False)
     _modules: dict[str, Path] | None = field(default=None, repr=False)
@@ -168,6 +170,26 @@ class ProjectContext:
 
             self._model_graph = build_model_graph(self)
         return self._model_graph
+
+    @property
+    def divergence(self) -> Divergence:
+        """Which database vendors this project can reach, decided once.
+
+        Every ``DJX`` rule is gated on the same question and none of them can
+        answer it from the file they are reading, so answering it per rule
+        would resolve every settings module once per rule -- 89ms on
+        Healthchecks and 147ms on pretix for eight identical answers.
+
+        Deferred import for the same reason :attr:`model_graph` defers its
+        own: the engine model is built on the settings resolver, which needs
+        this class. The cycle is real and deferring is the fix.
+        """
+        if self._divergence is None:
+            from djaudit.engines import portability  # noqa: PLC0415
+            from djaudit.settings import resolve_all  # noqa: PLC0415
+
+            self._divergence = portability(self, resolve_all(self))
+        return self._divergence
 
     @property
     def api_surface(self) -> ApiSurface:

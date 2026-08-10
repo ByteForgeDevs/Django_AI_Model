@@ -49,6 +49,18 @@ dev = [
     # that with subprocesses means sleeping and guessing, which is how a
     # concurrency test becomes flaky by construction.
     "psycopg[binary]>=3.2",
+    # The external tools of Step 5.3. Dev-only: djaudit never imports them and
+    # a missing one is an ordinary fact about a machine rather than an error,
+    # which `Availability` exists to express. They are pinned in here so the
+    # measurements the adapter layer is built on stay reproducible -- a claim
+    # about a tool's output that CI cannot re-run is a claim nobody is
+    # checking. bandit is here despite 5.3.3 declining to adapt it, and that is
+    # the point: the decline rests on bandit's own check inventory, which
+    # `scripts/check_bandit_subsumed.py` re-reads on every commit so that a
+    # Django-relevant check added in a later release reopens the decision
+    # instead of passing unnoticed.
+    "bandit>=1.9.4",
+    "pip-audit>=2.10.1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -104,6 +116,14 @@ ignore_missing_imports = true
 # base names against the real package rather than a transcription of them.
 [[tool.mypy.overrides]]
 module = "rest_framework.*"
+ignore_missing_imports = true
+
+# bandit ships no py.typed. It is imported in exactly one place -- the gate
+# that re-checks 5.3.3's decline by reading bandit's own check inventory --
+# and that gate reads two attributes off a registry, so stubs would document
+# nothing the script does not already assert about the shape it gets back.
+[[tool.mypy.overrides]]
+module = "bandit.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

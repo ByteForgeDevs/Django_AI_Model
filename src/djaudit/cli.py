@@ -26,7 +26,8 @@ from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
 
-from djaudit import __version__, engine
+from djaudit import __version__, adapters, engine
+from djaudit.adapters import Adapter
 from djaudit.baseline import Baseline, BaselineError
 from djaudit.context import ProjectContext
 from djaudit.discovery import build_context
@@ -138,6 +139,15 @@ def run(
             "manage.py. Off by default: this runs the audited project's code.",
         ),
     ] = False,
+    external: Annotated[
+        bool,
+        typer.Option(
+            "--external/--no-external",
+            help="Also report what ruff and pip-audit find, normalised into our "
+            "schema. Off by default: pip-audit queries a vulnerability database "
+            "over the network.",
+        ),
+    ] = False,
     write_baseline: Annotated[
         Path | None,
         typer.Option(
@@ -176,6 +186,7 @@ def run(
         min_severity=Severity.INFO if writing else min_severity,
         min_confidence=Confidence.TENTATIVE if writing else min_confidence,
         baseline=None if writing else baseline,
+        external=_with_external(external),
     )
 
     if write_baseline is not None:
@@ -192,6 +203,15 @@ def run(
     # A rule that crashed reported nothing, and nothing is what a clean project
     # also reports. Saying so on stderr keeps the two apart without corrupting
     # JSON or SARIF on stdout.
+    # Which tools ran, and what they could not read. On stderr for the same
+    # reason as the crash block below: stdout may be JSON or SARIF.
+    if result.external_notices or result.external_diagnostics:
+        stderr = Console(stderr=True)
+        for notice in result.external_notices:
+            stderr.print(f"[dim]external:[/dim] {notice}")
+        for diagnostic in result.external_diagnostics:
+            stderr.print(f"[yellow]external:[/yellow] {diagnostic}")
+
     if result.rule_errors:
         stderr = Console(stderr=True)
         for rule_id, message in sorted(result.rule_errors.items()):
@@ -214,6 +234,29 @@ def run(
     if worst is not None and worst.rank >= fail_on.rank:
         raise typer.Exit(EXIT_FINDINGS)
     raise typer.Exit(EXIT_OK)
+
+
+def _with_external(granted: bool) -> tuple[Adapter, ...]:
+    """Resolve `--external` into adapters, disclosing before anything runs.
+
+    The disclosure is printed here rather than alongside the results because a
+    notice that a vulnerability database was queried is worth nothing once the
+    query has been made. Which adapters reach the network is read from
+    `adapters.REACHES_THE_NETWORK`, so a new one that phones home cannot leave
+    this text describing the old set.
+    """
+    if not granted:
+        return ()
+    chosen = adapters.every()
+    remote = sorted(a.name for a in chosen if a.name in adapters.REACHES_THE_NETWORK)
+    if remote:
+        Console(stderr=True).print(
+            "[bold yellow]Running external tools: "
+            f"{', '.join(a.name for a in chosen)}. "
+            f"{', '.join(remote)} will query a vulnerability database over the "
+            "network.[/bold yellow]"
+        )
+    return chosen
 
 
 def _with_live(ctx: ProjectContext, granted: bool) -> ProjectContext:

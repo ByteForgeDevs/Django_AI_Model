@@ -6534,7 +6534,7 @@ rules come first; the live tier is then built for consumers that exist.
   chooses to do at import time happens with the file system and network access
   of whoever typed the command. The note states why that is worth doing at all
   — only Django can say what SQL a migration emits, and only Django can give a
-  second opinion on its own deployment checks, which is 2 of 78 rules — and
+  second opinion on its own deployment checks, which is 2 of 87 rules — and
   then states exactly what the subprocess is allowed: 10 environment variables
   in, 4 refused outright, a 30-second timeout enforced by killing the process
   group, 1 MiB captured per stream, stdin closed. It records the `PASSTHROUGH`
@@ -6575,34 +6575,1311 @@ supports both SQLite and Postgres; external findings normalised and deduplicated
 ### Step 5.1 — Database configuration model
 
 - **5.1.1** — Per-settings-module engine detection, using the settings resolver.
+
+  **Done, and it moved the ground under 5.1.2.** Built `src/djaudit/engines.py`:
+  a `Vendor` enum, `classify()`, `EngineChoice`, `module_engines()` and
+  `project_engines()`. Two premises in this step turned out to be wrong, both
+  found by measuring the corpus before writing.
+
+  **The engine is not one value per module — it is a set.** Healthchecks,
+  named below as the ideal target for this family, assigns `DATABASES` three
+  times in a single module: SQLite unconditionally at `hc/settings.py:207`,
+  Postgres inside `if os.getenv("DB") == "postgres":` at 221, MySQL inside
+  another `if` at 242. One module, one `SettingsRole`, three engines. pretix
+  computes its engine as `'django.db.backends.' + db_backend` from a config
+  file. NetBox builds `DATABASES` with `getattr` on an imported module and
+  sets `ENGINE` through a later `.update()`. **None of the three splits
+  engines across settings modules the way 5.1.2 assumed** — see that entry.
+  `rules/database.py` had already met this and solved it: `live_definitions()`
+  and `database_configs()` return every branch that can still decide the
+  value. Measured on the corpus, they recover Healthchecks' three engines
+  exactly, so `engines.py` builds on them rather than re-walking.
+
+  Those three helpers moved from `rules/database.py` into `engines.py`,
+  because a core module importing from a rules module had the dependency
+  backwards and every `DJX` rule needs them. Four importers, one of them a
+  test; `rules/database.py` now imports them back.
+
+  **`"sqlite" in engine` is wrong, and it was in the tree.** Django's GIS
+  backend for SQLite is `spatialite`, which contains no `sqlite` substring, so
+  `DatabaseConfig.is_sqlite` classified it as not-SQLite and `DJS-021` would
+  have reported a pointless `CONN_MAX_AGE` against it. Its mirror image is
+  `postgis`, which contains no `postgres`. Wrappers move the vendor out of the
+  leaf entirely — NetBox ships `django_prometheus.db.backends.postgresql`.
+  `classify()` is therefore a table keyed on the last dotted segment (after a
+  `_backend` suffix is stripped) plus a short whole-path table for backends
+  whose leaf names no vendor, and `is_sqlite` now delegates to it.
+
+  Anything unrecognised is `Vendor.UNKNOWN`, which is a real answer and not a
+  lookup failure: pretix's concatenated engine lands there, and a rule that
+  read it as "not SQLite, therefore fine" would go quiet on exactly the
+  projects that are hardest to analyse. NetBox produces no choices at all,
+  which is the honest result — its engine is genuinely unreadable statically —
+  and means an empty set must never be treated as "no divergence".
+
+  Mutation testing paid for itself three times. It found `removesuffix(
+  "backend")` was dead (the one package needing it is matched whole-path), the
+  `leaf in _LEAF` guard was redundant with the lookup two lines below it, and
+  the `is_assigned` guard in `module_engines` was unreachable — `database_configs`
+  already returns `{}` with no definitions, measured rather than assumed. All
+  three removed. It also showed the `Vendor` wire values were untested, which
+  matters because it is a `StrEnum` so a finding can interpolate it. 26 tests;
+  the survivors that remain are the `AnnAssign` value guard mypy requires for
+  narrowing, and `frozen=True`, which the tests now assert directly.
+
 - **5.1.2** — Divergence detection across roles — SQLite in development, Postgres in production.
-- **5.1.3** — `DJX-001` the meta-finding: development and production use different engines, which makes every rule below relevant.
+
+  **Done, with the premise corrected.** The step name says "across roles" and
+  no corpus project puts its engines in role-differentiated modules, so
+  `divergence()` compares the reachable engines **per alias, across the whole
+  project**. That subsumes the shape the plan described — two modules each
+  naming one engine still land in the same alias's vendor set — while catching
+  the one Healthchecks actually uses, which the role comparison would have
+  missed entirely.
+
+  `Portability` has four states, not a boolean: `SINGLE`, `DIVERGENT`,
+  `UNCERTAIN` (an engine we could not read, so a second vendor is not excluded)
+  and `UNREADABLE` (no engine found at all). Measured, the corpus needs all
+  four — Healthchecks is `DIVERGENT`, pretix `UNCERTAIN`, NetBox `UNREADABLE`.
+
+  **The decision that matters most here is what `reaches()` means.** Written
+  as "could this project be on SQLite?", it answers yes under both uncertain
+  states, and every `DJX` rule below would then fire on NetBox and pretix —
+  two projects at 100% precision whose engines simply cannot be read. So
+  `reaches()` is evidence and `could_reach()` is possibility, and a rule using
+  the latter owes its finding a `tentative` confidence. This is the difference
+  between the family being useful and it being the reason someone uninstalls.
+
+  Divergence is computed per alias, so a Postgres `default` beside a SQLite
+  `replica` is **not** reported as this defect. It is a real problem and a
+  different one; folding them together would report each as the other.
+
+  The finding also needed to be actionable, and "line 221 is conditional" is
+  not — it tells a reader to go and look. `guards()` recovers the `if` test
+  that selects each branch by walking the module once, so a finding can name
+  the lever: on Healthchecks it recovers `os.getenv('DB') == 'postgres'` and
+  `os.getenv('DB') in ['mysql', 'mariadb']` verbatim. Nested guards are joined
+  and an `else` is recorded negated, because a branch is reached on the whole
+  chain rather than the innermost test. Doing this in `engines.py` rather than
+  threading the guard through `_visit_if` keeps a change to every settings rule
+  out of a question only this family asks.
+
+  Mutation testing found five real gaps and they are now tested: `alternatives`
+  when no unconditional assignment exists (there is no default to compare
+  against), a conditional branch whose vendor *matches* the default's (the same
+  database again, not an alternative), `relevant`'s narrowing when a second
+  alias is present, and the `Portability` wire values. 82 mutants, 76 killed;
+  the six survivors are all in the moved `DatabaseConfig` code, killed by
+  `test_djs_021.py` under the other pairing, plus `frozen=True` and the
+  `AnnAssign` guard mypy requires for narrowing.
+
+- **5.1.3** — `DJX-001` the meta-finding: development and production use
+  different engines, which makes every rule below relevant. **Done.**
+  `src/djaudit/rules/portability.py`, `tests/rules/test_djx_001.py`.
+
+  It fires once on Healthchecks (`hc/settings.py:208`, medium/certain) and is
+  silent on NetBox and pretix, whose engines are genuinely unreadable. One
+  finding per project, not per branch: a project has one decision to make here,
+  and three findings would be three copies of the same sentence.
+
+  **It subclasses `Rule` directly rather than `SettingsRule`, which every other
+  settings rule in this project uses.** `SettingsRule.groups()` skips modules
+  whose role does not reach production, and that is correct for hardening — a
+  development module is *supposed* to have `DEBUG = True`, and reporting it is
+  how a tool teaches people to ignore it. This rule inverts the premise: the
+  development module is not an exception to the finding, it is one half of it.
+  Built on `SettingsRule` it would have silently dropped the
+  Postgres-in-prod / SQLite-in-dev shape — the exact shape Step 5.1 exists for.
+
+  The cross-module test caught a real bug in 5.1.2's `Divergence`.
+  `alternatives` required `not c.default`, which reads as "the alternatives are
+  the conditional branches" and is right *within* one module. Across two
+  modules both assignments are unconditional, so `alternatives` was empty and
+  the rule bailed on the plan's own headline case. `conditional` distinguishes
+  development from production inside a module and means nothing across modules;
+  the module's **role** is what carries that distinction, and `default` now
+  prefers a choice in a module that does not reach production. This is the one
+  place the role comparison the plan originally described is the right tool.
+
+  The message is built from how each database is actually reached, because
+  saying "with nothing set" about both halves of a cross-module divergence —
+  literally true of each within its own file — reads as a contradiction. An
+  alternative in another module is named by that module; an alternative in the
+  same module is named by its guard.
+
+  Adding the first rule of a new family broke seven tests, and three of them
+  were the interesting kind: `test_registry`, `test_engine` and `test_rule_docs`
+  each used `DJX` as their stand-in for "a family with no rules". Each therefore
+  passed on a fact about the catalogue while appearing to test a filter, and
+  each would have gone on passing had the filter been ignored entirely. They now
+  assert what they were always meant to: that selection **partitions** the
+  corpus, and that an orphaned page is detected by name rather than by DJX
+  happening to be empty. The other four are the corpus counts moving with the
+  35th reviewed Healthchecks finding.
+
+  Mutation: 23 of 26 killed. The three survivors are two reference URLs and one
+  measured equivalent — an alias whose value has no node of its own is one
+  djaudit resolved rather than read, so its `ENGINE` is unreadable too and it
+  never survives to the report with a vendor; the type still admits `None`.
+  Two mutants that survived at first were real: the guard for "every branch is
+  opt-in, so nothing is the default" had no test, and the test that would have
+  covered it asserted `findings == []` — which passes for a rule that **raises**,
+  because the engine records rule exceptions rather than propagating them. The
+  helper now asserts the rule did not crash before asserting it found nothing.
 
 ### Step 5.2 — Divergence rules
 
-- **5.2.1** — `DJX-002` `JSONField` querying with semantics that differ between backends.
-- **5.2.2** — `DJX-003` `distinct('field')`, which is Postgres-only.
-- **5.2.3** — `DJX-004` case-sensitivity and collation divergence in `iexact`, `icontains`, and ordering.
-- **5.2.4** — `DJX-005` Postgres-only fields (`ArrayField`, `HStoreField`, `JSONField` operators, ranges) in a project that runs SQLite in development.
-- **5.2.5** — `DJX-006` deferred constraint and transaction semantics differences.
-- **5.2.6** — `DJX-007` foreign keys unenforced by default under SQLite.
-- **5.2.7** — `DJX-008` date and time truncation with timezone handling that differs by backend.
+- **5.2.1** — `DJX-002` `JSONField` querying with semantics that differ between
+  backends. **Done.** `src/djaudit/rules/portability.py`,
+  `tests/rules/test_djx_002.py`.
+
+  "Semantics that differ" turned out to be too generous. Measured against a
+  real SQLite and the live Postgres before the rule was written: `contains` and
+  `contained_by` do not differ, they are *absent* -- Django gates both on
+  `supports_json_field_contains` and raises `NotSupportedError` on SQLite,
+  including when the lookup is written against a key inside the field
+  (`data__tags__contains`) and including under `exclude()` and inside `Q()`.
+  Everything else measured is portable: `filter(data={'n': 1})`,
+  `filter(data__n=1)` and `has_key` all return the row on both engines. That is
+  what makes the remediation real -- there is a portable way to ask the
+  question, so the rule is not telling anyone to give up.
+
+  This is the rule the family needed a model for. `name__contains` and
+  `data__contains` are the same nine characters and two different questions:
+  one is a substring match every database performs, the other is a containment
+  test SQLite has no operator for. Nothing in the keyword distinguishes them,
+  so `QueryRule.report` is now handed the model the tracker resolved for the
+  chain, and answers `None` when the column turns out not to be JSON. Getting
+  the model that far required `Frame.queryset_models`, a sibling of the
+  existing `queryset_calls` that keeps the resolved label instead of discarding
+  it -- the tracker keys a chain only at its outermost expression, so a
+  `filter()` written before an `order_by()` has to be recovered by peeling the
+  spine either way.
+
+  Two things the mutation run corrected rather than confirmed. The lookup
+  suffix was originally matched in `wanted` and then matched *again* where the
+  path was stripped, with the strip length spelled as a separate literal; the
+  suffix is now found once and returned, because two independent spellings of
+  the same constant is how a rule reports the right lookup and strips the wrong
+  number of characters off it. And the guards around `**kwargs` -- a keyword
+  whose `arg` is `None` -- were unreachable from any test, because the textual
+  prefilter means a file containing only `filter(**criteria)` is never parsed.
+  The shape that actually exercises them is a keyword expansion sitting in the
+  same file as a real containment lookup, which is now what the test writes.
+- **5.2.2** — `DJX-003` `distinct('field')`, which is Postgres-only. **Done.**
+  `src/djaudit/rules/portability.py`, `tests/rules/test_djx_003.py`.
+
+  Before writing it, the corpus was measured for every construct Step 5.2
+  targets, and the result reshaped the step. Healthchecks is the **only**
+  benchmark project that passes the divergence gate, and it contains almost
+  none of these constructs: zero `JSONField`, zero `ArrayField`, zero
+  `icontains`, zero `Trunc`, and two `.distinct()` calls that are both the
+  portable no-argument form. NetBox and pretix are full of them — NetBox writes
+  three genuine `distinct('field')` calls — and both are excluded by the gate
+  because their `ENGINE` is computed and cannot be read.
+
+  So **the corpus can measure this family's precision and cannot measure its
+  recall even in principle.** That is not a defect in the corpus; it is what
+  the family is about. It does mean `tests/fixtures/portability_project` is not
+  a closing task but a prerequisite, and it was therefore built first, ahead of
+  its position at 5.4.1. Its `config/settings.py` carries the divergence and
+  everything else in it is hardened, so deleting one `if` silences the entire
+  family there — which is the difference between a portability rule and a
+  style rule.
+
+  Two shared bases came out of this substep. `DivergenceRule` gates on
+  `reaches`, not `could_reach`: a possibility-based gate would fire every rule
+  in the family on NetBox and pretix, which have never run SQLite, and that is
+  how a family earns a permanent place in someone's ignore list. `QueryRule`
+  adds the file walk, the textual prefilter and — importantly — the check that
+  the call sits on a chain the queryset tracker recognises, so a project's own
+  `Report.distinct('sku')` helper is not reported. A rule matching the method
+  name alone would be a rule about spelling.
+
+  `ProjectContext.divergence` was added alongside, following `model_graph`'s
+  existing lazy-property-with-deferred-import pattern. Eight rules asking the
+  same project-wide question independently would resolve every settings module
+  eight times: 89ms on Healthchecks and 147ms on pretix, measured, for eight
+  identical answers.
+- **5.2.3** — `DJX-004` case-sensitivity divergence in text lookups. **Done.**
+
+  The plan named `iexact`, `icontains` and ordering. Two of those three turned
+  out to be wrong, and the third was out of reach, so the substep was built
+  against a measurement instead of against the sentence. Against a row holding
+  `'Hello'` on a real SQLite and the live Postgres:
+
+  | lookup | sqlite | postgres |
+  |---|---|---|
+  | `contains='hello'` | 1 | 0 |
+  | `startswith='hello'` | 1 | 0 |
+  | `endswith='LLO'` | 1 | 0 |
+  | `exact='hello'` | 0 | 0 |
+  | `regex='hello'` | 0 | 0 |
+
+  `iexact` and `icontains` ask for case-insensitivity out loud and get it on
+  both backends — they are the *remediation*, and a rule reporting them would
+  be complaining about the fix. The three that diverge are the case-*sensitive*
+  spellings, because SQLite's `LIKE` folds ASCII case and Postgres' does not
+  (`has_case_insensitive_like`). `exact` and `regex` were candidates until the
+  measurement removed them: `=` is not `LIKE`, and Django implements `REGEXP`
+  for SQLite in Python without folding. Ordering was dropped for a different
+  reason — collation is a per-column property we cannot read from source, and a
+  rule that reported every `order_by` on a text column would report almost
+  every queryset in the corpus.
+
+  The same probe recorded the limitation the rule now ships with: against
+  `'ÉCOLE'`, `contains='école'` matched on *neither* engine. The folding is
+  ASCII-only, so a column of non-ASCII text diverges less than the finding
+  implies. That is in `limitations`, not in a comment.
+
+  Only Django's own string fields are recognised — `CharField`, `TextField`,
+  `EmailField`, `SlugField`, `URLField`, `FilePathField`. A lookup on a
+  subclass is not reported, because a subclass may have changed `db_type` or
+  the lookup itself. `JSONField` is deliberately excluded: `data__contains` on
+  one is containment rather than a substring match, and SQLite raises instead
+  of answering differently. That is `DJX-002`, and giving one query two
+  findings that contradict each other helps nobody.
+
+  `field_at()` was extracted from `json_field()` here, because the two callers
+  need opposite things from the same walk. `DJX-002` shortens the lookup path a
+  segment at a time until the model graph recognises something, since
+  `data__tags__contains` names a key inside a column; `DJX-004` must *not*,
+  since shortening without an exact match is a licence to attribute a lookup to
+  whatever column happens to share its first segment. Mutation testing found
+  that distinction unguarded — flipping the default to shorten survived — and
+  it is now pinned by `sku__lower__contains` staying silent with `sku__contains`
+  beside it as the presence control.
+
+  On Healthchecks the rule finds three sites, all read and all true positives:
+  two API-key prefix lookups (`Project.api_key`, `api_key_readonly`) and the
+  tag filter behind the status badge. The badge one is the family's thesis in
+  one line — a badge for tag `prod` matches a check tagged `PROD` in
+  development and not in production, and nothing anywhere reports it. A fourth,
+  near-identical site at `hc/api/views.py:423` is *not* reported: it rebinds
+  the queryset inside a `for` loop, which leaves the name two live definitions
+  and makes the tracker decline to resolve a model. Five probes confirmed the
+  shape, it is shared with `DJP` and `DJI`, and it was left alone — guessing
+  there would cost precision across every rule built on the tracker, not just
+  this one. It is recorded in the triage note and pinned by two tests with a
+  single-rebinding presence control.
+- **5.2.4** — `DJX-005` Postgres-only field types in a project that runs SQLite
+  in development. **Done.**
+
+  Measured first, one model per field type against a real SQLite, and the
+  measurement is why the rule says three different things instead of one:
+
+  | field | what SQLite does |
+  |---|---|
+  | `ArrayField` | `migrate` fails — `near "[]": syntax error`, no table |
+  | `HStoreField` | table created, first write: `type 'dict' is not supported` |
+  | range fields | table created, first write fails on the range literal |
+  | `SearchVectorField` | table created, NULL round-trips; only a search fails |
+
+  The same models on the live Postgres created, wrote, read back and filtered
+  without complaint. The three outcomes matter to whoever reads the finding:
+  one breaks the migration, one breaks the first write, and one looks healthy
+  until the search feature is switched on. Django does not refuse any of them —
+  it renders the Postgres type verbatim and lets the database complain, which
+  is how `hstore` becomes a column type SQLite happily accepts.
+
+  The rule gates on the **package**, `django.contrib.postgres.`, resolved
+  through the module's imports rather than on a list of class names. A list
+  goes stale the first time Django adds a field and reports nothing while still
+  looking like it works; the package boundary is Django's own statement about
+  which fields need Postgres and cannot drift. It also gets the two directions
+  right for free: a project's own class called `ArrayField` is not reported,
+  and `django.contrib.postgres.fields.ArrayField` imported under an alias still
+  is. The per-type effects table only decides *how precisely* the failure is
+  described; a type absent from it is still reported, in general terms, because
+  describing a failure we have not measured is how a rule starts inventing.
+
+  Reported per field rather than per model, because the replacement differs by
+  type — an `ArrayField` becomes a `JSONField`, a range becomes two nullable
+  columns and a `CheckConstraint` — and one finding naming four fields would
+  have four different fixes.
+
+  What the divergence gate buys was measured rather than assumed: NetBox
+  declares **23** of these fields on its models, and `DJX-005` reports none of
+  them, because NetBox has never run SQLite. Healthchecks, the only corpus
+  project that passes the gate, declares none. That is the family's precision
+  argument in one number, and it is now in the rule's `limitations`.
+
+  **`DJX-001`'s rationale was corrected in the same substep.** It claimed
+  "foreign keys are unenforced under SQLite unless explicitly switched on",
+  which substep 5.2.6 had already withdrawn as false — Django has executed
+  `PRAGMA foreign_keys = ON` on every SQLite connection since 2.0, and
+  `PRAGMA foreign_keys` reads `1`, measured. It also claimed `iexact`
+  diverges; measured, `iexact` returns the same rows on both engines, because
+  it is the *case-sensitive* spellings that diverge. Both were replaced with
+  what was measured, including the one divergence the plan named for 5.2.3 and
+  the rule family does not report: default collation genuinely differs —
+  SQLite orders `Apple, Banana, apple` and Postgres orders `apple, Apple,
+  Banana` — but it is a per-column property invisible from source, and a rule
+  that flagged every `order_by` on a text column would flag almost every
+  queryset in the corpus. A false claim inside a rationale is worse than a
+  missing rule: it is the tool teaching a developer something untrue.
+- **5.2.5** — `DJX-006` a constraint is declared that SQLite does not enforce.
+  **Done.** The most dangerous rule in the family, because it is the only one
+  whose consequence is *data*. Every other `DJX` rule makes a query answer
+  differently or a migration fail loudly. This one lets a developer's database
+  hold rows that production would have refused, and nothing about the local
+  database looks wrong until that data is loaded somewhere real.
+
+  The plan called it "deferred constraint and transaction semantics
+  differences", which understates it. Measured on a real SQLite and the live
+  Postgres before a line was written — the same model, one argument apart:
+
+  ```
+  UniqueConstraint(fields=["sku"], name="x")
+      sqlite   CREATE TABLE ... , CONSTRAINT "x" UNIQUE ("sku"))
+  UniqueConstraint(fields=["sku"], name="x", deferrable=DEFERRED)
+      sqlite   CREATE TABLE ... "sku" varchar(32) NOT NULL)
+  ```
+
+  SQLite does not decline the *deferral*; it drops the **constraint**. Inserting
+  the same value twice confirms the consequence rather than inferring it:
+  deferred → SQLite accepts two rows, Postgres raises `IntegrityError`;
+  immediate → identical; no `deferrable=` → both reject. `DEFERRED` and
+  `IMMEDIATE` are indistinguishable on SQLite, which is why the rule reads
+  `deferrable=` as present or absent and never as a mode. A rule that reported
+  only `DEFERRED` would be a rule about Postgres semantics wearing a
+  portability rule's name.
+
+  `ExclusionConstraint` fails earlier and louder: `manage.py check` returns
+  clean and `migrate` then stops at `near "EXCLUDE": syntax error`. Both are
+  reported, with different messages, because a silent failure that produces
+  data and a loud failure that produces nothing are not the same advice.
+
+  **The framework already covers half of it, and the rule says so.** Django
+  emits `models.W038` for the deferrable case. It is reported anyway for two
+  reasons written into `limitations`: `W038` is a warning that does not fail
+  `manage.py check`, and it only fires when the command happens to be pointed
+  at SQLite — a developer or a CI job running the same check against Postgres
+  sees nothing. Nothing at all warns about `ExclusionConstraint`. A rule that
+  quietly re-reports what the framework already told you, without saying that
+  is what it is doing, is how a tool loses the reader's trust on everything
+  else it says.
+
+  Reading it needed `ConstraintNode` to carry two new fields. `dotted` and
+  `deferrable` came from threading `record.bindings` down through `read_meta`
+  → `read_constraints`, so the class is resolved through the module's imports
+  rather than matched by name: a project's own `ExclusionConstraint` is not
+  Django's, and a name match would report someone else's portable constraint.
+  A test asserts that silence, and a presence control proves the silence is
+  aimed. An explicit `deferrable=None` — the default written out — reads as
+  absent.
+
+  `end_lineno` was the third field, and it came from a failing assertion rather
+  than from foresight. The first evidence snippet read `models.UniqueConstraint(`
+  and stopped: a five-line constraint, quoted up to the opening parenthesis,
+  showing everything except the argument the finding is about. Evidence that
+  does not contain the thing it is evidence of is decoration.
+
+  **Mutation: 167/173, then 173/173 after reading the survivors.** Four were
+  real and all four were about what the finding *says* rather than when it
+  fires — two message-template fragments and the config evidence's content and
+  source, none of which any test read. The substring assertions each checked
+  one clause and left the joins between them unchecked, so blanking `" is a "`
+  survived every one of them; the fix was to assert the whole string once per
+  branch. The remaining two survivors are the documented textual cost
+  prefilter, unchanged from 5.2.1.
+
+  Reading the fourth survivor found a real defect rather than a missing test:
+  every finding cited `supports_deferrable_unique_constraints = False` as its
+  config evidence, including the `ExclusionConstraint` ones, where it is a true
+  statement that explains nothing. The flag was read out of Django rather than
+  recalled (`sqlite3` → `False`, `postgresql` → `True`) and now appears only on
+  the deferrable branch; the exclusion branch cites the measured `migrate`
+  failure instead.
+
+  **Mutating `meta.py` separately found a real defect in the new reader.** The
+  `and/or` mutant in `_deferrable` survived, and the reason it survived was
+  that it was very nearly correct. Django was read rather than recalled:
+  `deferrable` must be `None` or a `Deferrable` member, and `False`, `0` and
+  `"deferred"` all raise `TypeError` when the class is defined. So *no* literal
+  can produce a deferrable constraint — `None` is the default written out and
+  the rest are code that does not run. The predicate collapsed to "a literal is
+  never deferrable", which is shorter, matches Django's own
+  `self.deferrable is not None` test, and has no boolean operator left to
+  mutate.
+
+  A second survivor, `dotted_name(item.func) or kind`, took two attempts to
+  kill and the first attempt is the more useful lesson. A test asserting
+  `dotted` on `models.UniqueConstraint` looked like it separated the two
+  branches and did not: the test helper's own header imports
+  `UniqueConstraint` by name, so the written path and the bare tail resolve to
+  the same string and the mutant passed. Switching to `models.CheckConstraint`
+  — a class that file does not import by name — made the branches disagree,
+  and the mutant was then applied by hand to watch the test fail before
+  believing it.
+
+  **The corpus proves nothing here, and that is recorded rather than dressed
+  up.** All three projects stayed exactly where they were — hc 38, nb 76, px
+  151, 100% precision — but grep says Healthchecks, NetBox and pretix contain
+  **zero** `deferrable=` and **zero** `ExclusionConstraint` between them, across
+  3,091 files. A rule with nothing to fire on cannot demonstrate precision by
+  not firing. The recall evidence is the fixture and the un-fix control, which
+  turns the `warehouse` twin's plain `UniqueConstraint` into a deferrable one
+  and is proven load-bearing at `warehouse/models.py:21`.
+- **5.2.6** — ~~`DJX-007` foreign keys unenforced by default under SQLite.~~
+  **Withdrawn: the premise is false on every Django this tool supports.**
+  Django's SQLite backend executes `PRAGMA foreign_keys = ON` on every
+  connection it opens (`django/db/backends/sqlite3/base.py:208`), and has since
+  Django 2.0. Foreign keys *are* enforced under SQLite. The rule as planned
+  would have reported a defect that does not exist — on a family whose entire
+  claim is that a divergence is a thing you can point at.
+
+  It is replaced by `DJX-007` **`select_for_update()` is silently discarded on
+  SQLite**, which is the same defect class stated about something that is
+  actually true. Measured, not recalled: `has_select_for_update` is `False` on
+  SQLite, and the compiler gates the clause on it
+  (`django/db/models/sql/compiler.py:840`), so no `FOR UPDATE` is emitted and
+  **nothing is raised**. Row locking a developer wrote and tested under SQLite
+  is a no-op, their tests for it pass vacuously, and the contention it was
+  written to prevent appears only in production.
+
+  **Done, and the measurement went further than the premise.** The compiled
+  SQL, same model, same call:
+
+  ```
+  sqlite    SELECT "t_item"."id", "t_item"."sku" FROM "t_item"
+  postgres  SELECT "t_item"."id", "t_item"."sku" FROM "t_item" FOR UPDATE
+  ```
+
+  `nowait`, `skip_locked` and `of=("self",)` are discarded identically — all
+  four spellings produce that same bare SELECT on SQLite and four different
+  clauses on Postgres (`FOR UPDATE`, `... NOWAIT`, `... SKIP LOCKED`,
+  `... OF "t_item"`). The message names whichever was asked for, because a
+  developer who wrote `skip_locked` has a more specific expectation than one
+  who wrote a plain lock.
+
+  **A second divergence turned up while measuring the first, and it is the
+  worse one.** Django's whole select-for-update block is gated on
+  `has_select_for_update`, and that block contains the guard that rejects the
+  call outside a transaction. So `select_for_update()` outside `atomic()`
+  returns rows on SQLite and raises `TransactionManagementError` on Postgres:
+  the engine that never complains in development is the one that cannot crash.
+  The rule states it in the rationale and, because it does not read whether the
+  call sits inside `atomic()`, states it as a possibility rather than a fact —
+  the first divergence, the missing lock, holds either way.
+
+  **Healthchecks supplied the recall evidence the last two substeps could not.**
+  Two findings, both true positives, and both projects' own comments make the
+  argument better than the rule does. At `hc/api/models.py:510` the line above
+  the call reads *"Acquire a lock. Without locking, on MariaDB, concurrent
+  pings can lead to a deadlock"*, with a block comment above the `atomic()`
+  naming the exact race being closed. At `hc/api/views.py:515` it reads *"in
+  case another concurrent request has \*just\* deleted this check"*. These are
+  not incidental locks; they are locks added to fix concurrency bugs the
+  authors had already hit, and on the engine `manage.py runserver` gives you by
+  default they are not there. Corpus 38 → 40 on Healthchecks at 100% precision.
+
+  **Mutation: 191/195.** Four survivors, one real. The unnamed-model fallback
+  (`"these rows"`) had no test, and finding a shape to exercise it took a probe
+  rather than a guess: an unresolvable import, a loop rebinding, a double
+  rebinding and a bare parameter all produce *no finding at all* rather than a
+  finding without a model. The shape that reaches it is `self.get_queryset()`
+  — `Origin.UNKNOWN` carries the chain but no model — which is also the
+  commonest spelling in any CBV or DRF codebase, so the branch that cannot name
+  a model is not a corner case. The mutant was then applied by hand to watch
+  the new test fail. The other three survivors are the two documented textual
+  cost prefilters and `DJX-007`'s own, which is the same guard for the same
+  reason: blanking it leaves every finding identical and moves only the clock.
+- **5.2.7** — ~~`DJX-008` date and time truncation with timezone handling that
+  differs by backend.~~ **Withdrawn: measured on both engines, and it does not
+  differ.** This is the second `DJX` premise to fall to measurement, and it
+  fell harder than the first — the foreign-key premise was merely out of date,
+  whereas this one is contradicted by a feature flag that appears to support it.
+
+  `supports_timezones` is `False` on the SQLite backend and `True` on Postgres,
+  which reads like a statement that timezone-aware truncation must diverge. It
+  is not. Django registers Python implementations on every SQLite connection it
+  opens — `django_datetime_trunc`, `django_datetime_extract`, `django_datetime_cast_date`
+  and their siblings, in `django/db/backends/sqlite3/_functions.py` — and those
+  helpers call `zoneinfo.ZoneInfo` and `timezone.localtime` to do in Python
+  exactly what Postgres does in C. The flag means "the engine has no native
+  timezone type, so we compensate", not "the answers differ".
+
+  Twenty-eight substantive comparisons, run against a real SQLite file and the
+  live Postgres, all agreeing exactly: `TruncDate`, `TruncDay`, `TruncHour`,
+  `TruncWeek`, `TruncQuarter` and `TruncSecond`; `ExtractHour`, `ExtractWeek`,
+  `ExtractIsoYear`, `ExtractIsoWeekDay` and `ExtractSecond`; the `__date`
+  lookup; each across the DST spring-forward gap and the fall-back fold, a
+  half-hour-offset zone (`Asia/Kathmandu`, +05:45), a fixed offset, and three
+  legacy zone aliases (`US/Eastern`, `Asia/Calcutta`, `Europe/Kyiv`); plus a
+  per-database `DATABASES['default']['TIME_ZONE']`. Not one pair differed.
+  Shipping the planned rule would have meant telling users to rewrite correct
+  code.
+
+  It is replaced by `DJX-008` **a regex lookup whose pattern means different
+  things to the two engines**, which is the same defect class stated about
+  something that is true. `__regex` and `__iregex` compile to different engines
+  entirely: on SQLite Django registers Python's `re.search` as the `REGEXP`
+  operator, and on Postgres the lookup becomes the `~` operator, which is POSIX
+  ARE. These are not two implementations of one syntax; they are two syntaxes
+  that overlap.
+
+  **Done, and the shape of the rule came from the measurement rather than the
+  other way round.** Twenty-seven constructs were run against the same eleven
+  rows on both engines. Twenty agree and are deliberately silent — `\d`, `\w`,
+  `\s`, `\S`, `\A`, `\Z`, backreferences, all four inline flags, lookahead,
+  negative lookahead, lookbehind, `a{2,}`, alternation, anchors and negated
+  character sets. Seven diverge, and they fall into three classes that a
+  developer needs told apart:
+
+  ```
+  \bUSD\b        sqlite 1    postgres 0      silent
+  \BSD           sqlite 1    postgres 0      silent
+  [[:digit:]]+   sqlite 0    postgres 6      silent
+  [[:alpha:]]+   sqlite 0    postgres 11     silent
+  \y555\y        sqlite ERR  postgres 1      crashes on sqlite
+  \mUSD          sqlite ERR  postgres 1      crashes on sqlite
+  (?P<w>abc)     sqlite 1    postgres ERR    crashes on postgres
+  ```
+
+  The first four are the reason this rule exists. `\b` is the single commonest
+  construct in the whole matrix and one of the few that is genuinely dangerous:
+  Python reads it as a word boundary, POSIX ARE reads it as a literal backspace
+  character, and *neither engine complains*. A whole-word search written and
+  tested under SQLite silently becomes a search for a control character in
+  production. `[[:digit:]]` is the same failure mirrored — Python's `re` reads
+  it as a nested set and matches nothing where Postgres matches six rows.
+
+  **`\z`, `\Q...\E` and `\h` were measured to fail on both engines and are
+  deliberately not reported.** A pattern that is broken everywhere is a bug, not
+  a portability defect, and filing it under `DJX` would tell the reader the
+  wrong thing about why it is broken and what fixing it involves. Likewise
+  `[:alpha:]` with a single bracket agrees on both — the rule matches on `[[:`,
+  not `[:`, and there is a test whose only job is that distinction.
+
+  The remediation admits what it cannot offer. `[[:digit:]]` has a portable
+  spelling (`[0-9]`), and `(?P<name>)` has one (drop the name). **`\b` does
+  not.** The fixture's twin writes the same whole-word question as
+  `(^|[^0-9A-Za-z])USD([^0-9A-Za-z]|$)`, which was measured to return the same
+  six rows on both engines — longer, uglier, and correct. A rule that claimed
+  otherwise would be selling a fix it does not have.
+
+  The rule reads only patterns written as literal strings. A pattern held in a
+  name or built by concatenation could be anything, and guessing would be the
+  one thing this family cannot afford; the limitation says so rather than the
+  rule pretending. That is a real cost — the fixture defect was written with
+  concatenation first, and the rule correctly said nothing about it.
+
+  **The corpus moved by zero, and the reason was measured rather than assumed.**
+  Across all 3,091 files, eight mention a regex lookup at all: five in NetBox
+  and three in pretix, none in Healthchecks. NetBox and pretix both compute
+  `ENGINE` at import time, so the divergence gate excludes them from every
+  `DJX` rule regardless of content; Healthchecks is the only corpus project
+  that passes the gate and it has none. So this rule's corpus silence is
+  vacuous as recall evidence, exactly as `DJX-006`'s was, and the fixture is
+  again the only place it has a known answer. What the corpus *can* say is
+  smaller but not nothing: every literal pattern in those eight files —
+  pretix's `(^|,)`, NetBox's `[^X]$` and `^ABC.*` — is built from anchors,
+  alternation and negated sets, all of which were measured to agree, so the
+  rule would be silent on all of them for the right reason rather than by
+  accident.
+
+  **Mutation: 231/242**, after two rounds that each found a defect rather than
+  a missing test. The first round's survivors showed `wanted()` re-implementing
+  the whole of `report()`, and that duplication was not merely redundant — it
+  *shielded* `report`'s own guards, so the test for a non-literal pattern was
+  passing through a prefilter and never reaching the code it was written to
+  exercise. Cutting `wanted()` back to the cheap syntactic check the other
+  rules use exposed them. A second survivor showed that
+  `assert " and " in message` proved nothing about the conjunction, because the
+  `[[:` clause contains its own "and" — and reading the joined message showed
+  it was an unreadable run-on for exactly that reason. The separator is now
+  "; " and the tests assert whole messages. The eleven remaining survivors are
+  the three documented cost prefilters, three widening mutants of this rule's
+  own prefilter, which `report` re-validates, and five table-prose blanks now
+  covered by whole-message assertions.
+
+  **Correction, made while finishing 5.2.8.** That last sentence was wrong, and
+  the DJX-009 mutation run is what exposed it. `report` does *not* re-validate
+  the method name, so those three survivors were not cost mutants at all — they
+  were an untested correctness guard, and one of them was a crash. Measured:
+  reordering the guard's two halves so `node.func.attr` is read before the
+  `isinstance` check raises `AttributeError: 'Name' object has no attribute
+  'attr'` on any plain function call carrying a `__regex` keyword, and because
+  the engine abandons a raising rule wholesale it silently drops every real
+  DJX-008 finding in the process. Removing the guard entirely was measured to
+  report `.annotate`, `.values`, `.order_by` and a project's own queryset method
+  — four false positives. Two tests now close all three, each verified to fail
+  on the mutant it was written for. The lesson is not about this rule: a
+  survivor filed under "the authoritative check re-validates it" is a claim
+  about code, and it needs measuring like any other.
+
+  Two further defects came out of re-reading the shipped prose rather than the
+  code. The counts did not add up — the rationale said twenty of twenty-seven
+  constructs agreed and named seven that did not, which leaves three
+  unaccounted for; it is sixteen that agree, eight that diverge across seven
+  tokens, and three that fail on both. And the remediation offered
+  `(^|[^[:alnum:]])USD([^[:alnum:]]|$)` as the portable spelling of a word
+  boundary, which is self-contradictory: `[[:alnum:]]` is one of the constructs
+  this very rule reports. It now recommends `[^0-9A-Za-z]`, the form the
+  fixture twin uses and the one that was actually measured to return the same
+  six rows on both engines.
 - **5.2.8** — `DJX-009` `max_length` enforced by Postgres but not SQLite.
+  **Done, and for once the premise survived — it was only too narrow.** After
+  two withdrawn premises in a row this one measured true on the first attempt,
+  and then measuring around it found the rule was about something larger than
+  one keyword. SQLite has type *affinity* where Postgres has type
+  *constraints*, so `max_length` is one instance of a general fact rather than
+  a special case.
+
+  Measured on a real SQLite and the live Postgres, writing through `create()`,
+  `save()`, `bulk_create()` and `update()` — all four diverge, because not one
+  of them calls `full_clean()`:
+
+  ```
+  CharField(max_length=10)   <- "x"*50    sqlite stores it, reads back 50 chars
+                                          postgres DataError: value too long for
+                                                   type character varying(10)
+  IntegerField               <- 2**31     sqlite stores 2147483648
+                                          postgres DataError: integer out of range
+  SmallIntegerField          <- 2**15     postgres DataError: smallint out of range
+  DecimalField(max_digits=4) <- 12345.67  postgres DataError: numeric field overflow
+  SlugField/EmailField/URLField           varchar(50)/(254)/(200), same failure
+  ```
+
+  **The value is not truncated on SQLite — it is stored whole and handed back
+  at full length.** "Truncates" is the intuitive guess, and it sends a reader
+  looking for the wrong symptom, so the rationale says so explicitly. It also
+  turned out that `DJX-001`'s shipped rationale had been making exactly that
+  wrong claim since Phase 5 began: *"a value that truncates in one and raises
+  in the other"*. Corrected in the same commit — a rule that misdescribes a
+  divergence is worse than one that omits it.
+
+  **Three shapes were measured to agree and are excluded, and each would have
+  been a false positive.** `TextField(max_length=10)` is the trap: the argument
+  reads exactly like `CharField`'s and produces no column constraint at all, so
+  a fifty-character value was accepted by *both* engines. `BigIntegerField`
+  holds everything SQLite will. And `PositiveIntegerField` given `-1` raises on
+  both, because Django emits the `>= 0` check constraint on each engine — so
+  the `Positive` variants are in the table for their *ceiling* (2**31 diverges)
+  and explicitly not for their sign. A rule keyed on "has a `max_length`" would
+  have reported the first, and one keyed on "is a positive field" would have
+  reported the third.
+
+  **Reported once for the whole project.** Per-field would be one finding per
+  `CharField` in the codebase — 57 on Healthchecks alone, over two thousand
+  across the corpus — which is precisely the "4,000 alerts and an uninstall"
+  outcome the adoptability principle exists to prevent. The finding carries the
+  count per column class, a six-column sample with `file:line`, and points at
+  the settings that diverge, because the decision a reader can actually take is
+  about the engine pair. To keep it from being a restatement of `DJX-001` it is
+  gated on there being such a column at all: a project whose models are all
+  `TextField` gets nothing.
+
+  Like `DJX-001`, and alone in this family besides it, `DJX-009` has no twin in
+  `warehouse` and therefore no un-fix. It cannot have one — `warehouse`'s
+  `CharField`s are exactly as unenforced as `catalog`'s, which is the finding's
+  point. Its control is the settings file that gates the whole family.
+
+  **Healthchecks is genuine recall evidence, and the strongest part of it is an
+  absence: `full_clean` does not appear anywhere in the project.** It defaults
+  to SQLite and ships Postgres and MySQL, its views call `.save()` directly,
+  and `Model.save()` validates nothing. 57 columns, one finding, triaged true
+  positive; corpus 40 → 41.
+
+  **Mutation: 308/311**, and the survivors it produced were worth more than the
+  score. Four sat in this rule. Two were plural nouns — "integer columns" and
+  "decimal columns" — that no assertion had ever seen, because the only plural
+  test used text columns and each kind carries its own noun pair. One was
+  `default.node or default.definition.node`, invisible because the fixture
+  writes `DATABASES` on a single line, which makes the alias dict and the
+  assignment statement share a line number; spread over several lines they are
+  measured to be line 6 and line 5, and the test now asserts the alias. The
+  fourth was dead code rather than a missing test: `Definition.node` is an
+  `ast.stmt` and is never `None`, so `node is not None` could not be false
+  unless `default` already was. It is gone. The remaining three are the
+  documented cost prefilters — the `WORDS` scan and the two literal substring
+  guards — each of which changes only the clock.
+
+  This figure was re-measured in 5.3.1 after a bug was found in the harness
+  that could report a mutant as surviving without ever running it. It came
+  back 308/311 with the same three survivors: the defect needs two adjacent
+  mutants of identical length written inside the same second, and at roughly
+  five seconds a mutant on a file this size that had not happened here.
 
 ### Step 5.3 — External tool adapters
 
 - **5.3.1** — Adapter interface and availability probing.
-- **5.3.2** — ruff adapter: run with Django-relevant rule sets, map into our schema.
+  **Done, and the measurement inverted the design.** The plan's phrasing —
+  "map into our schema" — describes a translator: run the tool, rename the
+  fields, append. Running `ruff --select DJ,S` over the benchmark corpus shows
+  what that would ship:
+
+  | project | ruff | djaudit |
+  | --- | --- | --- |
+  | healthchecks | 958 | 41 |
+  | netbox | 210 | 76 |
+  | pretix | **12,220** | 151 |
+
+  Twelve thousand two hundred and twenty findings on pretix. That is not a
+  larger audit, it is the "4,000 alerts and an uninstall" outcome the
+  adoptability principle exists to prevent, delivered under our name. So the
+  interface is built around the question of *what to refuse*, and the mapping
+  is the trivial part.
+
+  Three measurements set the shape.
+
+  **Most of the volume is test code.** 850 of healthchecks' 958 and 11,857 of
+  pretix's 12,220 sit under `tests/`, and `S101` — bare `assert` — is what
+  pytest is made of. Excluding test paths removes 89% before any judgement is
+  needed and removes nothing a deployment can be harmed by. The exclusion is
+  syntactic and lives in one place, so no individual claim ever has to reason
+  about it.
+
+  **Some of it would silently overrule a decision we already published.**
+  ruff's `DJ001` reports a nullable string field; so does our `DJD-002` —
+  except that `DJD-002` exempts `blank=True`, because the project has then
+  stated that empty is permitted input, and exempts columns spanned by a
+  uniqueness rule, because Django documents `null` as the way to allow more
+  than one row with no value. Measured: **151 of the 179** `DJ001` hits outside
+  test code carry `blank=True`, and on healthchecks and netbox it is all of
+  them. Importing `DJ001` would add no coverage and would reverse a documented
+  precision decision 151 times.
+
+  **Where we both fire, ours is the better answer.** `DJD-002` reports once per
+  model and names every affected column, because pretix's `Invoice` declares
+  fifteen and they are one migration to fix, not fifteen. Its eight pretix
+  findings cover all 28 columns `DJ001` finds outside tests.
+
+  So no external code reaches a report without a written claim: `ADOPT` (no
+  rule of ours covers this and it is worth having), `SUBSUMED` (we own this
+  ground and say it better — must name the rule) or `REJECTED` (measured noise
+  — may not name one of our rules, because that is a subsumption whose author
+  changed their mind mid-line). Each invariant is a `ValueError` rather than a
+  convention, in the same spirit as `ResponseSchema.validate`: a claim without
+  a reason, a subsumption naming nothing, and an adopted code with no severity
+  are all unconstructible.
+
+  **The fourth state is the one that matters: unclaimed.** A tool that adds a
+  check in a point release emits a code nobody has ruled on, and both silent
+  outcomes are wrong — dropping it makes our coverage depend on a version pin,
+  adopting it ships a finding nobody read. An unclaimed code is therefore
+  neither: it is surfaced by name as a task. This is `provenance.py`'s argument
+  about labels applied to rule codes — silence must never be readable as a
+  judgement.
+
+  Availability is a value, never an exception, modelled directly on
+  `NullProvider`: djaudit works without any of these tools, and making "absent"
+  an ordinary answer every caller must handle is what keeps degradation the
+  tested path. bandit and pip-audit were genuinely absent from this machine
+  while the interface was written, which is the best possible condition for
+  building one. Version parsing is measured rather than assumed — `ruff 0.16.1`
+  and `pip-audit 2.10.1` are one line, `bandit 1.9.4` prints a second naming
+  its Python, and reading past the first line would have put `(main)` in the
+  evidence of every bandit finding.
+
+  The subprocess machinery is reused from `djaudit.live.runner` rather than
+  rewritten, and the module says why: these tools read the target's source as
+  text and never import it, so the "assume the target is hostile" framing does
+  not apply — but killing by process group and refusing to hand a CI job's
+  deployment tokens to a subprocess apply to any child process at all, and two
+  copies of code whose failure mode is a hang is one too many. The
+  `Interpreter` machinery is deliberately *not* reused: these tools run from
+  our environment, and asking the target's virtualenv for its `ruff` would mean
+  executing a binary the target chose.
+
+  **Mutation: 76 of 76.** Getting there took two rounds and turned up a bug in
+  the harness itself. The first run reported 24 survivors, and one of them —
+  the flip of the duplicate-code guard from `> 1` to `<= 1` — was impossible,
+  because nine tests construct a `ClaimTable` and that mutant makes every
+  single-claim table raise. Run by hand with the harness's own command line it
+  died immediately. The harness was not executing it: CPython treats cached
+  bytecode as current when the source's size and its whole-second mtime both
+  match, mutants of one module are frequently the same length as each other,
+  and two written inside the same second are indistinguishable to that check,
+  so the second silently runs the first one's code and its tests pass. Forcing
+  the two to share an mtime reproduces the skip exactly. Fixed in
+  `scripts/mutate.py`, with `tests/test_mutate.py` — which the script had never
+  had — keeping the hazard itself as a control.
+
+  The remaining 23 were all genuine, and three are worth recording. Every
+  path in the test-directory fixture also had a `test_`-shaped *filename*, so
+  the filename check alone satisfied all of them and `TEST_DIRECTORIES` was
+  never the thing deciding — a file called `tests/helpers.py` is what makes
+  that constant load-bearing. The `', '` in each error message needed a case
+  supplying *two* names, because a joiner between one item and nothing else
+  leaves no trace. And the `Claim` values are a `StrEnum`'s serialized form,
+  so they are asserted as literals rather than read back off the enum, which
+  would agree with whatever the enum happened to say.
+- **5.3.2** — ruff adapter: run with Django-relevant rule sets, map into our
+  schema. **Done.** `src/djaudit/adapters/ruff.py` with `tests/adapters/test_ruff.py`
+  (30 tests, **92/93 mutation**).
+
+  The measurement came before the design. `ruff --select DJ,S` on the three
+  benchmark projects emits 958 / 210 / 12,220 findings, which is 13,388 against
+  djaudit's 268 and is the whole problem in one line. Outside test code it is
+  617 across 25 codes, and every one of those 25 was read and decided
+  individually rather than by rule family.
+
+  | corpus | ruff `DJ,S` | outside tests | djaudit |
+  |---|---|---|---|
+  | healthchecks | 958 | 108 | 41 |
+  | netbox | 210 | 146 | 76 |
+  | pretix | 12,220 | 363 | 151 |
+
+  Four codes adopted, one subsumed, twenty rejected — 41 findings kept from 617,
+  and none of them duplicates anything we already say. That was measured, not
+  assumed: comparing file *and line* against djaudit's own output, the overlap
+  is **zero for every code except `DJ001`**, whose 8 same-line hits are all
+  `DJD-002`. The reason is structural and worth stating once. Our `DJI` rules
+  are dataflow claims — *this* value reached *that* sink — while ruff's `S`
+  rules are shape claims about a single line. Two tools looking at the same file
+  for different kinds of evidence land in different places, so "overlaps with
+  ruff" was never the interesting question; "says something we cannot" is.
+
+  Adopted: `S113` (a `requests` call with no timeout — pretix calls its own
+  update endpoint, Stripe's OAuth endpoint and two currency services this way,
+  and no djaudit rule looks at outbound HTTP at all), `S324` (weak hash;
+  **tentative**, because the tool cannot see whether the digest is
+  security-bearing and both kinds are present — healthchecks hashes API keys,
+  pretix builds cache keys and PDF filenames), and `DJ007` / `DJ006`. The last
+  two are the clearest case in the table: they make **exactly** `DJA-008` and
+  `DJA-009`'s argument — an allowlist stays correct when the model grows, a
+  denylist does not — about `ModelForm`, a class djaudit does not parse. Two of
+  the three `DJ006` hits exclude `user`, which is the field `DJA-011` exists
+  for. Adopting them extends a published claim to a class we cannot reach
+  rather than importing a foreign opinion.
+
+  `DJ001` is subsumed rather than rejected because `DJD-002` already reports it,
+  and rejecting it would say we disagree. What justifies our narrower version is
+  in the numbers: **151 of the 179 `DJ001` findings outside test code carry
+  `blank=True`**, including every one in healthchecks and netbox, and a
+  `null=True, blank=True` char field is a deliberate tri-state, not a defect.
+
+  The twenty rejections each carry their measurement, because a rejection is the
+  one decision with no visible consequence and its reason is all that stands
+  between it and a shrug. Reading the flagged lines is what settled most of
+  them. `S105` is almost pure false positive — `CENSOR_TOKEN = '********'`, a
+  charset constant, `email_password_status = "success"`. `S603` flags the *list*
+  form of `subprocess.run`, which is the form we would recommend. `S104`'s
+  single hit is inside an argparse **help string**. `S101` outside tests is
+  internal invariants and mypy narrowing. `S608` and `S310` are `DJI`'s
+  territory, and `DJI` reads dataflow where these read shape.
+
+  `--isolated` is load-bearing rather than tidiness: without it a target
+  silences our audit by editing its own `pyproject.toml`, which is the wrong way
+  round.
+
+  Two defects surfaced, both invisible to unit tests and both found by running
+  the thing on real projects.
+
+  **pretix returned zero findings.** `live/runner.py` caps each captured stream
+  at 1 MiB so a runaway subprocess cannot exhaust memory, and pretix's ruff JSON
+  is larger — truncated mid-object at exactly 1,048,576 bytes, which `json` then
+  rejects, so the largest project in the corpus reported nothing and said only
+  that its output could not be read. The cap is correct; the fix is to stop
+  using the pipe. ruff writes to `--output-file` in a temporary directory we
+  own, so a read-only checkout still works and nothing is left in the target
+  tree. The regression test drives a stub ruff that writes 4,000 findings,
+  with a stub that prints to stdout instead as the control that proves the
+  findings came out of the file.
+
+  **A tool run by path was named by its path.** `probe_tool` used one string as
+  both the executable and the tool's name, and `ClaimTable.as_finding` builds
+  rule ids out of that name — so probing a resolved path produced findings
+  called `/HOME/…/.VENV/BIN/RUFF-S324`, and rule ids are what fingerprints and
+  baselines are keyed on. It degraded the version string too, since
+  `read_version` could no longer recognise the tool's own name in `ruff 0.16.1`.
+  `probe_tool` now takes `name` separately from `executable`.
+
+  The mutation run found three real gaps and one equivalent mutant. Blanking the
+  `remediation` of any of the four adopted claims survived — an adopted finding
+  is one we put our name on, and ruff's message is a description rather than an
+  instruction, so each is now asserted for the specific fix it names. Dropping
+  the "tool is absent" guard survived because the absent-tool test never checked
+  that a machine without ruff gains **no diagnostic**. And `RuffAdapter`'s
+  `frozen`/`slots` had no test. The survivor left at 92/93 is the
+  `djaudit-ruff-` prefix on a temporary directory we create and delete
+  ourselves, which is a label for a human reading `ls /tmp` and nothing else.
 - **5.3.3** — bandit adapter, with the Django-specific noise filtered out.
-- **5.3.4** — pip-audit adapter for dependency CVEs against the resolved requirements.
-- **5.3.5** — Deduplication: same file, same line, same underlying issue reported by two tools collapses to one finding with both as evidence.
-- **5.3.6** — `--with-external` / `--without-external` flags; external tools never block a run when absent.
+  **Declined by measurement.** No adapter was built, and
+  `scripts/check_bandit_subsumed.py` re-checks the reason on every commit.
+
+  The premise was that bandit says things ruff does not. It does not, because
+  ruff's `S` rules *are* a port of bandit, and the port is essentially complete.
+  Two independent measurements agree.
+
+  By inventory: bandit registers **75 checks** across its plugins and its
+  blacklist, and ruff has an `S` equivalent for **71**. The four without are
+  `B614` (PyTorch) and `B615` (HuggingFace), neither of which a Django audit
+  reaches; `B613` trojansource, which ruff has as `PLE2502` outside the `S`
+  family and which fires nowhere in the corpus; and `B703` `django_mark_safe`.
+
+  By output, on the same 3,091 files: 987 / 236 / 12,245 findings, which is
+  13,468 against ruff's 13,388. Outside test code it is 469, of which 312 sit at
+  the *identical file, line and check number* as a ruff finding.
+
+  `B703` deserved the closest look, being the one Django-specific check ruff
+  lacks, and it turned out to be the weakest. All **101** of its findings share
+  a line with a `B308` — none stands alone — so bandit reports the same
+  `mark_safe` call twice under two ids. `B308` is ruff's `S308`, which 5.3.2
+  rejected because `DJI-011` makes the claim that matters and makes it about
+  *where the string came from*, which is the only thing separating
+  `mark_safe(escape(s))` from a real one.
+
+  What bandit reported and ruff did not was noise in every case read. `B404`
+  flags `import subprocess` — the import, not any use of it. `B405` and `B406`
+  flag importing an XML module, and `B406`'s single hit is
+  `from xml.sax.saxutils import escape`, a quoting helper that parses nothing;
+  bandit matched the module name and ignored the name imported from it. `B413`
+  reports the "no longer maintained" pyCrypto in pretix, which pins
+  `pycryptodome==3.23.*` — the maintained fork, sharing the `Crypto` import
+  namespace.
+
+  The one place the two disagreed on a code we had *adopted* settled it. bandit
+  reports `B113` (no request timeout) at `netbox/extras/dashboard/widgets.py:380`
+  where ruff does not, and the call reads
+  `timeout=self.config.get('request_timeout', 3)`. bandit is wrong and ruff is
+  right: the timeout is there, just not a literal. So on the single code where
+  bandit offered extra recall, the extra was a false positive.
+
+  Cost decided nothing but is worth recording: bandit takes 3.7s / 23.9s / 26.7s
+  where ruff takes 0.06s / 0.25s / 0.26s, roughly 100×. An adapter adopting zero
+  codes would have added 54 seconds to a run to report nothing.
+
+  A decline is a decision that stops being re-examined the moment it is written
+  down, and bandit gains checks between releases, so the structural half of the
+  argument is now a gate. `check_bandit_subsumed.py` reads both tools' own
+  inventories — under a second, no corpus — and fails if any bandit check has
+  neither a ruff counterpart nor a recorded reason. It was verified to fail by
+  removing one of the four exceptions. The empirical half stays here, because
+  re-running it costs a minute per project and would buy nothing per commit.
+- **5.3.4** — pip-audit adapter for dependency CVEs, in
+  `src/djaudit/adapters/pip_audit.py`. The opposite outcome to 5.3.3: nothing
+  else in the project knows what a published advisory is, so every finding here
+  is one djaudit could not have produced alone.
+
+  The input was already built. `manifest.py` finds dependency declarations and
+  separates development from production, so the adapter asks about what the
+  deployment installs and stays quiet about test tooling. Its dependency counts
+  turned out to match pip-audit's own reading of the same files exactly —
+  netbox 46, healthchecks 15 — which is an independent check on a parser we
+  wrote for another purpose.
+
+  **`--no-deps` is not the flag it sounds like.** It only *permits* dependency
+  resolution to be disabled; `--disable-pip` is what actually disables it. That
+  was read out of pip-audit's own `requirement.py` rather than guessed, and the
+  guess would have been expensive in two ways. Without `--disable-pip`,
+  pip-audit builds a virtualenv and runs `pip install --dry-run` against the
+  target's requirements — which reaches the network, and which executes package
+  build backends. The static tier's promise is that it never runs the code it
+  audits, and a resolver that builds sdists from an untrusted requirements file
+  breaks that promise regardless of how good its findings are. It is also 5×
+  slower: netbox 102s resolving against 19s frozen.
+
+  The cost is real and is recorded rather than hidden. Frozen, pip-audit sees
+  only direct exact pins, so netbox's one genuine vulnerability — `pyjwt
+  2.12.1`, five advisories, arriving through `social-auth-core` — is invisible
+  to us. A transitive-dependency audit belongs to the live tier, where the
+  target's environment is already installed and no resolution is needed. The
+  finding schema loses nothing by waiting.
+
+  `--disable-pip` refuses the whole file if a single requirement is unpinned,
+  and pretix pins 12 of 76 exactly, so one `babel` would have silently cost the
+  other 75 their audit. The adapter therefore selects the exactly-pinned lines
+  itself, writes them to a scratch file of its own — which also means a
+  read-only checkout works — and reports the rest as a diagnostic naming three
+  and counting the remainder. What was *not* audited is part of the answer.
+
+  `--vulnerability-service osv` because the default PyPI service timed out at
+  82s where OSV answered the same file in 21s. OSV returns duplicate advisory
+  entries — 52 of the probe's 114 were repeats — so deduplication by
+  `(package, id)` is not tidiness, it is correctness.
+
+  Two structural decisions. Runs are grouped **by file** rather than by manifest
+  because netbox's `pyproject.toml` declares ten optional groups: per-manifest
+  it was thirteen subprocess invocations and eleven near-identical diagnostics,
+  by file it is two. And `ClaimTable.as_finding` is deliberately unused. It
+  gives every finding of a code one title, one message and one rule id, which is
+  right for a linter — every `S324` is the same observation — and wrong for a
+  vulnerability, where the title *is* the content and five advisories against
+  one pinned line would share a fingerprint and collapse to a single baseline
+  entry. The claim table still rules, but on advisory *databases*: an id is
+  minted daily and no table could rule on one, while a source is a small stable
+  set and the decision is real.
+
+  Output goes to a file rather than stdout, for the reason 5.3.2 found the hard
+  way — `live.runner` caps a captured stream at 1 MiB and a JSON report
+  truncated mid-object parses as nothing at all.
+
+  The corpus reports **zero** findings, because healthchecks, netbox and pretix
+  all pin current versions. That means the corpus cannot test the finding path
+  at all, and a green run there is not evidence. It was exercised against
+  deliberately old pins (`django==3.2.0`, `requests==2.19.0`, `jinja2==2.10`):
+  50 findings, 50 distinct rule ids, correct line numbers, 114 raw entries
+  deduplicated to 50. Every advisory-id form seen was checked to resolve at
+  `osv.dev` before being shipped as a reference. Tests read recorded output and
+  drive `collect` through a stub on disk, so nothing in the suite touches the
+  network. 56 tests, 86/87 mutation — the one survivor is the scratch
+  directory's name prefix.
+- **5.3.5** — Deduplication, in `src/djaudit/adapters/merge.py`, and the gate
+  that turned out to matter more, `scripts/check_subsumption.py`.
+
+  The substep was planned as "same file, same line, same underlying issue
+  reported by two tools collapses to one finding with both as evidence". The
+  corpus says that situation does not arise, and that manufacturing it would
+  destroy real findings. Both halves were measured before anything was written.
+
+  **Across tools there is nothing to collapse.** Over healthchecks, netbox and
+  pretix — 268 findings of ours against the 41 the ruff adapter adopts — not one
+  external finding lands on a file *and* line that any djaudit finding also
+  names. Twelve share a file; none share a line. That is structural rather than
+  lucky: overlap is settled a layer earlier by the claim table, which rules on a
+  tool's rule *codes* before any of them become findings, so a code we cover
+  never reaches the merge. Deciding once per code, in writing, with a reason,
+  beats re-guessing per location on every run. The two shipped adapters cannot
+  collide with each other either — ruff reads Python source, pip-audit reads
+  dependency manifests, and the file sets are disjoint.
+
+  **Within a run, a shared location is usually not a duplicate.** Nine corpus
+  locations carry more than one finding and every one is two different problems:
+  `serializers/order.py:1393` carries two `DJP-001`s because `cp.variation` and
+  `cp.item` are two unprefetched attributes on one line; `views/order.py:1057`
+  carries two `DJA-014`s because one `Meta` is shared by two viewsets;
+  `settings.py:1` carries five `DJS` findings because a settings module's
+  problems all attach to the module. Collapsing by location would have deleted a
+  finding at every one. So identity here is the **fingerprint**, which is what
+  identity already means everywhere else in djaudit — it is what a baseline
+  matches on — and location is deliberately not part of it.
+
+  Writing the tests found a real defect in the design. Adapters do not
+  fingerprint what they build, so every external finding arrives with an empty
+  one, and a merge keyed on fingerprint would have collapsed all 41 of ruff's
+  into a single finding. Assignment therefore happens in the merge, **per
+  group**: a tool reporting the same text twice keeps two findings, two tools
+  reporting one thing keep one. Findings that already carry a fingerprint are
+  never re-derived, because re-deriving over a different set can change an
+  occurrence index and silently invalidate every baseline entry written for it;
+  a half-identified set is refused rather than guessed at.
+
+  **The gate is the more valuable half.** A `SUBSUMED` claim deletes every
+  finding an external code would have produced, and the decision is global —
+  it applies at the locations where our rule does *not* fire just as much as
+  where it does. Nothing could check it. A precision gate cannot: a finding that
+  was never made cannot be a false positive. So `check_subsumption.py` runs ruff
+  restricted to the subsumed codes and compares where it reports against where
+  the rule named in the claim reports, matching on grouped evidence as well as
+  the headline location because `DJD-002` reports once per model and names the
+  remaining columns in its evidence.
+
+  Measured on the corpus, `DJ001 → DJD-002` covers 179 locations: 24 our rule
+  reports, 148 exempt because the column carries `blank=True`, 2 exempt under a
+  uniqueness rule — both documented `limitations` of `DJD-002`, and both the
+  reason our version is worth having — and **5 in `WebAuthnDevice`, a model
+  absent from our graph entirely because it inherits from `django_otp`'s
+  `Device` rather than from `models.Model`.** Two of those five (`ukey`,
+  `pub_key`) are genuine `DJD-002` material that the subsumption silently
+  deleted. That is a model-graph gap rather than an adapter one, so it is
+  recorded here and left to the graph rather than patched from an adapter
+  substep — but it was invisible until this gate existed.
+
+  The shortfall is recorded per target in `benchmarks/subsumption/` and the gate
+  fails on any drift in either direction. It is deliberately not asserted to be
+  zero. It was proved load-bearing the only way that means anything: narrowing
+  `DJD-002` to skip three columns of pretix produced three failures naming the
+  exact lines, while every other gate in the project stayed green.
+- **5.3.6** — `--external` / `--no-external` on `djaudit run`, default off.
+
+  **DONE.** Shipped as one flag rather than the planned pair of long-form
+  names, because `typer` renders a boolean option as `--external/--no-external`
+  and a second spelling of the same switch is a second thing to keep true.
+
+  **The default is off, and it is load-bearing twice.** Every precision number
+  this project records — healthchecks 35 findings from 41 raw, netbox 66 from
+  76, pretix 141 from 151 — was measured without external tools. A flag that
+  leaked findings into a default run would silently invalidate the benchmarks,
+  the triage priors and the recorded subsumption shortfall all at once. And
+  `pip-audit` queries a vulnerability database over the network, which is not
+  something a static analyser should do because somebody typed its name. Both
+  counts were re-measured after the change and are unchanged.
+
+  **The fold happens inside the engine, not in the CLI.** `engine.run` gained
+  an `external: Sequence[Adapter] = ()` parameter, and external findings are
+  merged in at exactly one point: *after* our own findings are fingerprinted,
+  and *before* the baseline and the thresholds. That position is the substep.
+  Folding later — which is the obvious place, since the adapters are a CLI
+  concern — would mean `--external` bypassed `--min-severity`,
+  `--min-confidence`, `--baseline` and `# djaudit: ignore`, turning the flag
+  into a way to defeat the user's own filters. Moving the fold after the
+  threshold filter as a control fails five tests; after the baseline, two.
+
+  Inline suppression is applied to merged findings as well as to ours, using
+  the same predicate, so `# djaudit: ignore[RUFF-S324]` works on a linter's
+  finding exactly as it does on one of ours.
+
+  **Absent tools degrade, and this was checked for real.** Hiding both
+  executables from the venv and re-running produced
+  `external: ruff unavailable: \`ruff\` is not on PATH` on stderr and the same
+  35 findings, exit code unchanged. An adapter that raises anyway — `collect`
+  promises not to, but the promise is somebody else's object's — is caught and
+  recorded in `rule_errors` under the tool's name, under the same isolation
+  rule as a rule that crashes, and the other adapters are still asked.
+
+  **Notices and diagnostics go to stderr.** `RunResult` gained
+  `external_notices`, `external_diagnostics` and `external_duplicates`. A
+  report that is short because a linter was missing looks exactly like a report
+  that is short because a project is clean, so every tool asked for is named
+  whether or not it found anything. They are printed alongside the existing
+  `rule_errors` block and never on stdout, because stdout may be JSON or SARIF.
+
+  **The disclosure is printed before anything runs**, in `_with_live`'s spirit:
+  a notice that a vulnerability database was queried is worth nothing once the
+  query has been made. Which adapters reach the network is read from
+  `adapters.REACHES_THE_NETWORK` rather than written into the message, so
+  adding a third adapter that phones home cannot leave the text describing the
+  old set.
+
+  *Verified:* 37 tests in `tests/test_external_flag.py`, none of which runs a
+  real external tool — `pip-audit` reaches the network and `ruff` is not
+  guaranteed anywhere this suite runs, so both are replaced by adapters that
+  answer from memory. Nine un-fix controls, each targeting one behaviour, are
+  all caught. Two earlier control attempts were non-controls and were rewritten:
+  one asserted an ordering the test itself performed, and one "moved" the
+  disclosure without moving it.
+
 
 ### Step 5.4 — Benchmark and document
 
-- **5.4.1** — Dual-database fixture project.
-- **5.4.2** — Validate against Healthchecks, which is the ideal target for this family.
-- **5.4.3** — `docs/rules/DJX.md` and `docs/adapters.md`.
+- **5.4.1** — Dual-database fixture project. **DONE**, built incrementally
+  alongside the rules rather than up front, and first committed with `DJX-003`.
+
+  `tests/fixtures/portability_project` is the only place any `DJX` rule has a
+  known answer, and the reason is recorded in the manifest: this family cannot
+  be measured for recall on the corpus even in principle. Every rule is gated
+  on `Divergence.reaches`, and of the three benchmark projects only Healthchecks
+  passes that gate — NetBox and pretix compute their `ENGINE` at import time and
+  cannot be read statically at all. Healthchecks then contains almost none of
+  the constructs: zero `JSONField`, zero `ArrayField`, zero `icontains`, zero
+  `Trunc`, and two `.distinct()` calls that are both the portable form.
+
+  9 expected findings, one per rule, and 10 `must_not_report` twins in a second
+  app that differ only in the thing each rule is about. The project-wide control
+  is the settings file: deleting the one `if` that introduces the second engine
+  silences the entire family, which is the difference between a portability rule
+  and a style rule.
+
+- **5.4.2** — Validate against Healthchecks. **DONE**, and the substep turned
+  out to be a gap rather than a confirmation.
+
+  Healthchecks was already at 100% precision with all 7 `DJX` findings triaged
+  in long form, so the obvious reading of this substep — run it and look — was
+  already true before it started. The gap is one layer down. **Every `DJX` rule
+  is a claim that two engines disagree, and nothing in this suite had ever made
+  them disagree.** The static tests prove we report a construct; the triage
+  proves the construct is really in Healthchecks; neither touches a database.
+  The belief in the middle had been carried on reading alone since the family
+  was written.
+
+  `tests/live/test_pairs.py` had already solved this shape for `DJM`: a rule
+  predicts what PostgreSQL will do with a migration, and `TestPostgresAgrees`
+  makes PostgreSQL do it. `tests/live/divergence.py` is that applied to
+  portability — one project reaching PostgreSQL and SQLite through two aliases
+  in one settings module, so a difference in the answers cannot be a difference
+  between two differently-configured projects.
+
+  The columns are Healthchecks' own (`api_key` and `api_key_readonly` as
+  `CharField(max_length=128, blank=True)`, `tags` as `CharField(max_length=500,
+  blank=True)`) and the expressions are transcribed from the four flagged lines,
+  because a fixture asking a *similar* question would be evidence about the
+  fixture. Measured on PostgreSQL 18.1 and CPython 3.13's SQLite, over one
+  `Project` holding `ABCDEFGHij` and one `Check` tagged `PROD staging`:
+
+  | expression | flagged at | sqlite | postgres |
+  |---|---|---|---|
+  | `filter(api_key__startswith='abcdefgh')` | `accounts/models.py:411` | 1 | **0** |
+  | `filter(api_key_readonly__startswith='abcdefgh')` | `accounts/models.py:417` | 1 | **0** |
+  | `filter(tags__contains='prod')` | `api/views.py:750` | 1 | **0** |
+  | `filter(api_key__startswith='ABCDEFGH')` | control | 1 | 1 |
+  | `filter(tags__contains='PROD')` | control | 1 | 1 |
+
+  `select_for_update()`, flagged at `api/models.py:510` and `api/views.py:515`,
+  compiles to SQL ending `FOR UPDATE` on PostgreSQL and to the identical
+  statement with no locking clause of any name on SQLite — accepted silently
+  rather than refused, which is what makes it a rule instead of a bug somebody
+  would have found. Both sites sit inside `transaction.atomic()` and both carry
+  a comment naming the concurrent write they mean to serialise.
+
+  **The last two rows are the substep.** A harness that reported a divergence
+  for every pair would produce the first three rows and be indistinguishable
+  from a correct one. Three controls confirm it: pointing both aliases at
+  PostgreSQL fails 14 tests, both at SQLite fails 12, and storing the row
+  lower-case fails 5 — so the tests read the engines and the data, not
+  constants.
+
+  One assertion was written, failed, and was inverted rather than fixed.
+  `DJX-001` is not reported on this fixture, and that is correct: it reports
+  development and production running *different* engines, which Healthchecks
+  does by branching on a `DB` environment variable, whereas this fixture reaches
+  both engines through two aliases because the probe has to open both
+  connections in one process to compare answers over the same rows. Two aliases
+  are not two environments. Reshaping the fixture around the rule would have
+  meant reshaping it away from the measurement, so the absence is asserted with
+  its reason instead.
+
+  *Verified:* 25 tests in `tests/live/test_divergence.py`, taking the live tier
+  to 662. No CI change: the live job already runs `tests/live` wholesale and
+  `scripts/live_gate.py` already fails on a skip.
+- **5.4.3** — `docs/rules/DJX.md` and the adapters note. **DONE**, and half of
+  it was already true. `docs/rules/DJX.md` is *generated* from `RuleMeta` by
+  `scripts/gen_rule_docs.py` and has been checked by `--check` in CI since
+  Phase 2, so all nine `DJX` rules have had a reference page since the day they
+  were registered; writing one by hand would have created a second, worse copy
+  that drifts. What was missing is the half no generator can produce: why this
+  layer exists at all.
+
+  The note landed at `docs/architecture/adapters.md` rather than
+  `docs/adapters.md`, next to `live-tier.md` and `llm-layer.md`, because it is
+  the same kind of document — a decision record for a subsystem, not a
+  reference for a user. It records the two adapters and which one reaches the
+  network, the three verdicts and why a fourth ("no opinion") is not one, the
+  25 ruff claims and pip-audit's 1, the measured subsumption shortfall, the
+  fold position that makes external findings obey `--min-severity`, the
+  baseline and `# djaudit: ignore`, and the bandit adapter that step 5.3.3
+  planned and measurement declined.
+
+  *The gate is the substep.* Every claim in that list rots silently: a count
+  in a table, a verdict on a code, a flag in an argument tuple. None of them
+  breaks a test when it changes, which is exactly the condition under which a
+  reader keeps believing a document that has stopped being true. So
+  `scripts/check_adapters_doc.py` re-derives each one from the code —
+  `adapters.every()`, `REACHES_THE_NETWORK`, both `ClaimTable`s, `Claim`,
+  `pip_audit.ARGUMENTS`, `engine.run`'s signature, and the recorded shortfall
+  in `benchmarks/subsumption/*.json` — and fails on any disagreement. It found
+  one on its first run: the note wrote `` `--vulnerability-service osv` `` and
+  the check looked for the flag alone.
+
+  Two defects in the gate were found by controlling it rather than by reading
+  it. The subsumption pairing was first checked by asking whether `DJ001` and
+  `DJD-002` both appeared *somewhere* in the note — and the note states that
+  pairing twice, once in prose and once as a table header, so rewriting either
+  one to name a different rule left the note contradicting itself and the gate
+  green. It now looks at every place the external code is mentioned and
+  requires each nearby rule id to be one the table actually claims. The other
+  was a control of mine, not the gate's: three "misses" turned out to be
+  un-fixes that changed one of two statements of the same fact, which is a
+  test-design defect and not a gate defect, and it is the same shape as risk
+  12: a control that changes one of two statements of a fact leaves the fact
+  true, so it reports MISSED and reads as a weak gate.
+
+  *Verified:* 34 tests in `tests/test_adapters_doc.py`. Twenty of them edit the
+  note — a wrong adapter count, a cleared network column, a wrong claim total,
+  a pairing that names the wrong rule, a measured row that overstates coverage,
+  arithmetic that no longer adds up, a renamed cited path — and each asserts
+  the gate's own complaint rather than merely a non-zero exit, because several
+  of these defects make the note inconsistent in more than one way and a test
+  that accepts any failure cannot tell one check from its neighbour. Eight
+  leave the note untouched and move the *code* instead: a third adapter
+  shipping, an adapter starting to reach the network, `REACHES_THE_NETWORK`
+  emptied (which would make the network check vacuously true), a claim added,
+  the subsumption reversed, `--disable-pip` dropped, the vulnerability service
+  swapped. Five un-fixes of the gate itself — each of its four check groups
+  disconnected in turn, plus `problems` collected and never acted on — are all
+  caught. Wired into the fast CI job beside `check_live_doc.py`.
 
 ---
 
@@ -7478,7 +8755,7 @@ conversation.
 | 9 | LLM layer erodes determinism | Medium | High | Model may never create or suppress a finding; all output labelled |
 | 10 | Benchmark repositories drift | Low | Low | Pinned by commit SHA; updated deliberately |
 | 11 | A project djaudit cannot read scores as a clean one | Medium | High | Discovery emits a blocking diagnostic rather than returning quietly, and `run`, `eval` and `benchmark` all refuse to exit 0 on one. Pinned by tests using a class-configured project, which is the shape we detect and cannot yet parse |
-| 12 | A gate passes because what it checks is absent | High | High | Three found and fixed in Phase 2 alone — a doc generator hardcoded to one family, a triage citation nothing verified, a plan checker that only read the plan. Two more in Phase 3: the timing-gate test that asserted a result was dead by end of loop, which rebinding achieves anyway, and 3.1.2's reachability test, which put an unconditional rebind after the branch and so passed with the reachability filter deleted. Every new gate must be shown failing on the defect it exists to catch, in the commit that adds it |
+| 12 | A gate passes because what it checks is absent | High | High | Three found and fixed in Phase 2 alone — a doc generator hardcoded to one family, a triage citation nothing verified, a plan checker that only read the plan. Two more in Phase 3: the timing-gate test that asserted a result was dead by end of loop, which rebinding achieves anyway, and 3.1.2's reachability test, which put an unconditional rebind after the branch and so passed with the reachability filter deleted. Every new gate must be shown failing on the defect it exists to catch, in the commit that adds it. Phase 5 adds two more: `check_adapters_doc.py` compared a subsumption pairing by asking whether both rule names appeared anywhere in the note, and the note states that pairing twice — so rewriting one of the two left the note self-contradictory and the gate green; and three of the controls written against it changed one of two statements of the same fact, which leaves the fact true and makes a working gate look weak. **A control must remove every statement of what it is testing** |
 | 13 | A detector is measured only where it fires, so its noise floor is never seen | Medium | High | **Run the detector with its real signal removed and count what survives.** 3.1.3's queryset tracker was first measured by accident against an empty model graph, where every remaining detection was by construction spurious — which is how a rule claiming `self.get(...)` on a DRF view and `self.update()` on a form as querysets was caught, 33× over-detection on a 12-model project. Precision measured only on a populated graph would have buried it in true positives. The empty-input control is cheap, is now a test, and is run deliberately for each new detector |
 | 14 | A local timing number is quoted as the budget position | High | Medium | The dev box runs at load ~7 on 8 cores, and the same unchanged commit measures NetBox at 7.40 s and 8.96 s an hour apart — a 21% swing from load alone, verified by stashing the working tree and re-running. CI measured the same commit at 5.05 s. **Local timings are only ever valid as a same-session A/B against a stashed tree; CI is the only authoritative budget position.** Commit messages before `3.1.3` quote local figures as though they were the gate's, which overstates the deficit by up to 75% |
 
@@ -7492,18 +8769,19 @@ conversation.
 | 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
 | 2 | Model graph and DRF authorization | 7 | 37 | **Complete** (PR #3) — `DJA-001`…`DJA-015`, `DJD-001`…`DJD-003`, 100% precision on three real targets |
 | 3 | Performance and injection | 6 | 36 | **Complete** (PR #5) — `DJP-001`…`DJP-010`, `DJI-001`…`DJI-012`, 100% precision on three real targets |
-| 4 | Migration safety and live tier | 6 | 28 | In progress — steps 4.2 and 4.3 under way, **runs after Phase 6**, see the amendment there |
-| 5 | Portability and external adapters | 4 | 20 | Not started — **runs after Phase 6** |
-| 6 | LLM layer | 5 | 19 | In progress — **pulled forward, runs after Phase 3** |
+| 4 | Migration safety and live tier | 6 | 28 | **Complete** (PR #7) — `DJM-001`…`DJM-010`, the live tier, and lock classification measured against a real `pg_locks` |
+| 5 | Portability and external adapters | 4 | 20 | **Complete** — `DJX-001`…`DJX-009`, two external adapters behind `--external`, 100% precision on three real targets |
+| 6 | LLM layer | 5 | 19 | **Complete** (PR #6) — **pulled forward, ran after Phase 3** |
 | 7 | Distribution | 3 | 10 | Not started |
 | | **Total** | **52** | **235** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
-document specifies, and most of it is still only specified: **78 rules are
+document specifies, and most of it is still only specified: **87 rules are
 implemented** and registered today — every rule introduced by phases 0 through
 2, plus the first ten of Phase 3's, the first twelve of its injection family,
-all ten of Phase 4's migration rules, and its deployment-check gap rule.
+all ten of Phase 4's migration rules, its deployment-check gap rule, and all
+nine of Phase 5's portability family.
 `DJM-010` is the first **live** rule: the first that reads the SQL a migration
 emits rather than predicting it from the operation. `DJS-028` is the first rule
 whose subject is this tool rather than the project it is auditing.

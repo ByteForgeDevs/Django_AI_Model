@@ -7,6 +7,16 @@
   "max_false_positive_rate": 0.1,
   "findings": [
     {
+      "fingerprint": "76f922ab13fbce3e",
+      "rule_id": "DJM-002",
+      "verdict": "accepted_risk",
+      "file": "hc/payments/migrations/0009_alter_subscription_user.py",
+      "line": 15,
+      "note": "Verified against the source rather than assumed: payments/0001_initial declares subscription.user as OneToOneField(null=True), and 0009 re-declares it without null, so this really is a SET NOT NULL. Postgres scans the whole table to prove the constraint holds and holds ACCESS EXCLUSIVE while it does. Accepted rather than wrong: the table is a subscription table on a small deployment, the scan is brief at that size, and the constraint is the correct end state. What the static tier cannot see is the row count, which is what decides whether this is a blip or an outage -- the live tier's reltuples sizing is what answers it.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
       "fingerprint": "e875fb9e04429f72",
       "rule_id": "DJP-001",
       "verdict": "true_positive",
@@ -47,6 +57,16 @@
       "reviewer": "Zambagarrah"
     },
     {
+      "fingerprint": "66e95d6067c87af5",
+      "rule_id": "DJP-001",
+      "verdict": "true_positive",
+      "file": "hc/accounts/management/commands/sendinactivitynotices.py",
+      "line": 73,
+      "note": "sendinactivitynotices.py:73. The queryset is Profile.objects.order_by('id') narrowed by five exclude() calls, four of which span the user relation (user__last_login, user__date_joined, user__subscription). Filtering across a relation emits a JOIN but selects no columns from it, so nothing is cached: the three reads of profile.user.email in the body each hit the User table once per surviving profile. select_related('user') would make it one query for the run. Found only after the reassigned() fix stopped discarding loops that write to their rows -- this body does profile.deletion_notice_date = now(), which previously hid the whole loop.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
       "fingerprint": "63b67051b63cbb2d",
       "rule_id": "DJP-004",
       "verdict": "true_positive",
@@ -57,13 +77,43 @@
       "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "66e95d6067c87af5",
-      "rule_id": "DJP-001",
+      "fingerprint": "9bc5fc3cbc67dddf",
+      "rule_id": "DJP-004",
+      "verdict": "accepted_risk",
+      "file": "hc/api/management/commands/prunepingsslow.py",
+      "line": 26,
+      "note": "The query is genuinely one per iteration, but the four lines of comment directly above it explain why: pruning every check is a long operation, checks can be deleted while it runs, and re-reading existence immediately before each prune is how the command avoids `DoesNotExist`. Hoisting it would defeat the purpose, because the whole point is that the answer must be fresh at the moment of use. A correct detection of a deliberate design decision, so it is recorded rather than suppressed.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "a7e4e0be5657b2a9",
+      "rule_id": "DJP-004",
       "verdict": "true_positive",
-      "file": "hc/accounts/management/commands/sendinactivitynotices.py",
-      "line": 73,
-      "note": "sendinactivitynotices.py:73. The queryset is Profile.objects.order_by('id') narrowed by five exclude() calls, four of which span the user relation (user__last_login, user__date_joined, user__subscription). Filtering across a relation emits a JOIN but selects no columns from it, so nothing is cached: the three reads of profile.user.email in the body each hit the User table once per surviving profile. select_related('user') would make it one query for the run. Found only after the reassigned() fix stopped discarding loops that write to their rows -- this body does profile.deletion_notice_date = now(), which previously hid the whole loop.",
-      "reviewed": "2026-08-04",
+      "file": "hc/api/migrations/0067_last_error_values.py",
+      "line": 17,
+      "note": "Data migration 0067 walks every `Channel` and calls `Notification.objects.filter(channel=ch).latest()` inside the loop, which is one query per channel against a table that grows with every notification ever sent. Demoted to medium because the file is a migration: it runs once, and Django will not let you edit it after it has been applied, so the fix would have to be a second migration. Reported because a migration that issues one query per row is exactly how a deploy times out.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "4fe5403287b25f81",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "hc/api/migrations/0082_fill_last_notify.py",
+      "line": 16,
+      "note": "Migration 0082 has the same shape as 0067 -- `Notification.objects.filter(channel=channel).latest()` once per channel -- and the same reasoning applies. Both could be a single query annotating each channel with its most recent notification. Recorded at the demoted severity that the migrations scope assigns, since the cost is bounded by one execution rather than by request volume.",
+      "reviewed": "2026-08-07",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "0acb848a2815cb1b",
+      "rule_id": "DJP-004",
+      "verdict": "true_positive",
+      "file": "hc/integrations/webhook/tests/test_add.py",
+      "line": 118,
+      "note": "`Channel.objects.count()` is asserted inside a loop over a list of invalid URLs, so the test issues one count per case. True by mechanism and demoted to medium by the tests scope: the loop runs over a handful of literals against an empty test database, so the practical cost is a few milliseconds. Kept as a true positive because the detection is correct and test-suite runtime is a real complaint.",
+      "reviewed": "2026-08-07",
       "reviewer": "Zambagarrah"
     },
     {
@@ -107,16 +157,6 @@
       "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "9bc5fc3cbc67dddf",
-      "rule_id": "DJP-004",
-      "verdict": "accepted_risk",
-      "file": "hc/api/management/commands/prunepingsslow.py",
-      "line": 26,
-      "note": "The query is genuinely one per iteration, but the four lines of comment directly above it explain why: pruning every check is a long operation, checks can be deleted while it runs, and re-reading existence immediately before each prune is how the command avoids `DoesNotExist`. Hoisting it would defeat the purpose, because the whole point is that the answer must be fresh at the moment of use. A correct detection of a deliberate design decision, so it is recorded rather than suppressed.",
-      "reviewed": "2026-08-07",
-      "reviewer": "Zambagarrah"
-    },
-    {
       "fingerprint": "fa7b5d593d600e05",
       "rule_id": "DJP-007",
       "verdict": "true_positive",
@@ -147,16 +187,6 @@
       "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "a7e4e0be5657b2a9",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "hc/api/migrations/0067_last_error_values.py",
-      "line": 17,
-      "note": "Data migration 0067 walks every `Channel` and calls `Notification.objects.filter(channel=ch).latest()` inside the loop, which is one query per channel against a table that grows with every notification ever sent. Demoted to medium because the file is a migration: it runs once, and Django will not let you edit it after it has been applied, so the fix would have to be a second migration. Reported because a migration that issues one query per row is exactly how a deploy times out.",
-      "reviewed": "2026-08-07",
-      "reviewer": "Zambagarrah"
-    },
-    {
       "fingerprint": "910cde6eb6002d4d",
       "rule_id": "DJP-007",
       "verdict": "true_positive",
@@ -174,16 +204,6 @@
       "line": 22,
       "note": "A RunPython data migration walking api.Channel and calling save() on every row. The historical model apps.get_model() returns carries no save() override and no connected signals by construction, so bulk_update is exactly equivalent here and the loop is the textbook case it exists for: on a table of any size this is one round trip per row during a deploy, which is where a migration stops being slow and starts being an outage. Every matched row is written, so the list is the whole queryset.",
       "reviewed": "2026-08-04",
-      "reviewer": "Zambagarrah"
-    },
-    {
-      "fingerprint": "4fe5403287b25f81",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "hc/api/migrations/0082_fill_last_notify.py",
-      "line": 16,
-      "note": "Migration 0082 has the same shape as 0067 -- `Notification.objects.filter(channel=channel).latest()` once per channel -- and the same reasoning applies. Both could be a single query annotating each channel with its most recent notification. Recorded at the demoted severity that the migrations scope assigns, since the cost is bounded by one execution rather than by request volume.",
-      "reviewed": "2026-08-07",
       "reviewer": "Zambagarrah"
     },
     {
@@ -227,23 +247,23 @@
       "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "0acb848a2815cb1b",
-      "rule_id": "DJP-004",
-      "verdict": "true_positive",
-      "file": "hc/integrations/webhook/tests/test_add.py",
-      "line": 118,
-      "note": "`Channel.objects.count()` is asserted inside a loop over a list of invalid URLs, so the test issues one count per case. True by mechanism and demoted to medium by the tests scope: the loop runs over a handful of literals against an empty test database, so the practical cost is a few milliseconds. Kept as a true positive because the detection is correct and test-suite runtime is a real complaint.",
-      "reviewed": "2026-08-07",
+      "fingerprint": "204f74697636c950",
+      "rule_id": "DJS-001",
+      "verdict": "accepted_risk",
+      "file": "hc/settings.py",
+      "line": 70,
+      "note": "Real and deliberate. hc/settings.py:70 is `DEBUG = envbool(\"DEBUG\", \"True\")`, so a deployment that does not set the DEBUG environment variable runs with DEBUG on. Healthchecks knows this: its own production checklist in README.md tells operators to 'make sure it is set to False'. Convenient for local development, a hazard for anyone who deploys without reading the checklist, which is exactly what this rule is for. Reported at tentative because the environment can override it.",
+      "reviewed": "2026-08-02",
       "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "76f922ab13fbce3e",
-      "rule_id": "DJM-002",
+      "fingerprint": "9f80d4e589623281",
+      "rule_id": "DJS-003",
       "verdict": "accepted_risk",
-      "file": "hc/payments/migrations/0009_alter_subscription_user.py",
-      "line": 15,
-      "note": "Verified against the source rather than assumed: payments/0001_initial declares subscription.user as OneToOneField(null=True), and 0009 re-declares it without null, so this really is a SET NOT NULL. Postgres scans the whole table to prove the constraint holds and holds ACCESS EXCLUSIVE while it does. Accepted rather than wrong: the table is a subscription table on a small deployment, the scan is brief at that size, and the constraint is the correct end state. What the static tier cannot see is the row count, which is what decides whether this is a blip or an outage -- the live tier's reltuples sizing is what answers it.",
-      "reviewed": "2026-08-04",
+      "file": "hc/settings.py",
+      "line": 68,
+      "note": "Real and deliberate. hc/settings.py:68 is `SECRET_KEY = envsecret(\"SECRET_KEY\", \"---\")`, so an instance deployed without the SECRET_KEY environment variable signs its sessions with three hyphens. That is not a key an attacker has to steal -- healthchecks publishes it, as `Default: ---`, in its own configuration documentation, so anyone can forge a session for any user on such an instance without ever seeing the source. Healthchecks also documents that the value 'should be set to a unique, unpredictable value', which makes this a knowing convenience for local development rather than an oversight. Firm rather than certain because a real deployment normally does supply the variable.",
+      "reviewed": "2026-08-02",
       "reviewer": "Zambagarrah"
     },
     {
@@ -297,26 +317,6 @@
       "reviewer": "Zambagarrah"
     },
     {
-      "fingerprint": "9f80d4e589623281",
-      "rule_id": "DJS-003",
-      "verdict": "accepted_risk",
-      "file": "hc/settings.py",
-      "line": 68,
-      "note": "Real and deliberate. hc/settings.py:68 is `SECRET_KEY = envsecret(\"SECRET_KEY\", \"---\")`, so an instance deployed without the SECRET_KEY environment variable signs its sessions with three hyphens. That is not a key an attacker has to steal -- healthchecks publishes it, as `Default: ---`, in its own configuration documentation, so anyone can forge a session for any user on such an instance without ever seeing the source. Healthchecks also documents that the value 'should be set to a unique, unpredictable value', which makes this a knowing convenience for local development rather than an oversight. Firm rather than certain because a real deployment normally does supply the variable.",
-      "reviewed": "2026-08-02",
-      "reviewer": "Zambagarrah"
-    },
-    {
-      "fingerprint": "204f74697636c950",
-      "rule_id": "DJS-001",
-      "verdict": "accepted_risk",
-      "file": "hc/settings.py",
-      "line": 70,
-      "note": "Real and deliberate. hc/settings.py:70 is `DEBUG = envbool(\"DEBUG\", \"True\")`, so a deployment that does not set the DEBUG environment variable runs with DEBUG on. Healthchecks knows this: its own production checklist in README.md tells operators to 'make sure it is set to False'. Convenient for local development, a hazard for anyone who deploys without reading the checklist, which is exactly what this rule is for. Reported at tentative because the environment can override it.",
-      "reviewed": "2026-08-02",
-      "reviewer": "Zambagarrah"
-    },
-    {
       "fingerprint": "1c91c02f9536ee0e",
       "rule_id": "DJS-021",
       "verdict": "accepted_risk",
@@ -344,6 +344,76 @@
       "line": 17,
       "note": "path(f'{prefix}admin/', admin.site.urls) at hc/urls.py:17. The prefix comes from the path component of SITE_ROOT (urls.py:11-13), which is empty for the default SITE_ROOT and empty for any deployment served from the root of a domain -- so for effectively every instance the admin is at /admin/, which is what the rule says, hedged to tentative precisely because that prefix cannot be read statically. None of the suppressors apply: hc/settings.py installs no django-axes, no django-otp and no two-factor package, and the line above (urls.py:16) routes admin/login/ to the project's own login view, which is a usability choice rather than a rate limit. True positive rather than accepted risk because there is a concrete change available and it is not a costly one, and because the finding is info severity and tentative confidence, so it is hidden at both default thresholds and costs a reader nothing unless they go looking. Recorded here so that the day Healthchecks adds a lockout package the rule goes quiet and the benchmark notices.",
       "reviewed": "2026-08-03",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "cdc81ac2eefb302b",
+      "rule_id": "DJX-001",
+      "verdict": "true_positive",
+      "file": "hc/settings.py",
+      "line": 208,
+      "note": "Verified against source, and Healthchecks states it itself. The comment above line 206 reads \"Default database engine is SQLite. So one can just check out code, install requirements.txt and do manage.py runserver and it works\", and the one above line 220 reads \"You can switch database engine to postgres or mysql using environment variable 'DB'. Travis CI does this.\" The three assignments at 207, 221 and 242 are literal and unambiguous: sqlite3 unconditionally, postgresql under `os.getenv(\"DB\") == \"postgres\"`, mysql under `os.getenv(\"DB\") in [\"mysql\", \"mariadb\"]`. Reported once rather than once per branch, and pointed at the SQLite alias because that is the half a developer gets by doing nothing. Worth noting the assignment is annotated (`DATABASES: Mapping[str, Any] = ...`), so this also exercises the AnnAssign path -- reading only bare `Assign` would have found no database here at all.",
+      "reviewed": "2026-08-04",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "e9bcbb5357c9441c",
+      "rule_id": "DJX-004",
+      "verdict": "true_positive",
+      "file": "hc/accounts/models.py",
+      "line": 411,
+      "note": "Verified against source. `Project.api_key` is a CharField (accounts/models.py:447) and the lookup is a prefix search over the random part of a hashed API key, so SQLite's case folding makes it a strictly wider search than Postgres runs: on SQLite a request presenting `hcw_ABCDEFGH...` would also select the project whose stored prefix is `abcdefgh`. It is not exploitable here -- `compare_api_key` re-checks the whole key inside the loop, which is what makes this a divergence rather than a DJS finding -- but the set of rows the two engines consider is genuinely different, and that is what the rule claims. Healthchecks does run both engines (DJX-001 fires on hc/settings.py), so the divergence gate is satisfied by evidence and not by assumption.",
+      "reviewed": "2026-08-09",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "879a7d44259c815d",
+      "rule_id": "DJX-004",
+      "verdict": "true_positive",
+      "file": "hc/accounts/models.py",
+      "line": 417,
+      "note": "The read-only twin of the finding at line 411, on `api_key_readonly`, also a CharField. Kept as a separate finding rather than deduplicated because they are two independent call sites over two different columns; a fix applied to one does not touch the other.",
+      "reviewed": "2026-08-09",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "6632b717e64caff2",
+      "rule_id": "DJX-004",
+      "verdict": "true_positive",
+      "file": "hc/api/views.py",
+      "line": 750,
+      "note": "Verified against source. `Check.tags` is a CharField (api/models.py:194) holding space-separated tags, and the comment two frames up in the sibling call site calls this 'approximate filtering by tags' -- the code already knows the substring match is a prefilter. It is still a divergence: a badge for tag `prod` matches a check tagged `PROD` on SQLite and not on Postgres, so the badge is populated in development and empty in production. Note the near-identical call at hc/api/views.py:423 is NOT reported, and that is a known tracker limitation rather than a judgement about the code: `q = q.filter(...)` inside a `for` loop leaves the name with two live definitions and the queryset tracker declines to pick one. Recorded in DJX-004's limitations and tested in tests/rules/test_djx_004.py.",
+      "reviewed": "2026-08-09",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "dcb831ab0ef5e623",
+      "rule_id": "DJX-007",
+      "verdict": "true_positive",
+      "file": "hc/api/models.py",
+      "line": 510,
+      "note": "Verified against source, and Healthchecks states the intent itself. The comment directly above the call reads \"Acquire a lock. Without locking, on MariaDB, concurrent pings can lead to a deadlock\", and the block comment above the `atomic()` describes the exact race it is closing: sendalerts seeing the updated Check before the Ping exists. So this is not an incidental `select_for_update()` -- it is a lock a developer deliberately added to fix a concurrency bug they had hit. Measured, SQLite emits no FOR UPDATE at all, so on the engine `manage.py runserver` gives you by default the lock is absent and the race it closes is open again. Healthchecks does run both engines (DJX-001 fires on hc/settings.py:208, and settings.py names sqlite3 as the default and postgresql under DB=postgres), so the divergence gate is satisfied by evidence rather than assumption. The call is inside `transaction.atomic()`, so only the first of the rule's two divergences applies here.",
+      "reviewed": "2026-08-09",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "17f3a192fced44f1",
+      "rule_id": "DJX-007",
+      "verdict": "true_positive",
+      "file": "hc/api/views.py",
+      "line": 515,
+      "note": "Verified against source. The comment above reads \"Start a transaction, select for update, update. Use get_object_or_404 here again, in case another concurrent request has *just* deleted this check\" -- the author is explicitly reasoning about a concurrent request racing this one, and the lock is the mechanism chosen to serialise them. `_update()` then writes the check inside the same block. Under SQLite no FOR UPDATE is emitted, so two concurrent update_check requests are not serialised at the row and the last writer wins silently. Same divergence evidence as hc/api/models.py:510; also inside `atomic()`, so the TransactionManagementError half of the rule does not apply.",
+      "reviewed": "2026-08-09",
+      "reviewer": "Zambagarrah"
+    },
+    {
+      "fingerprint": "50849aa19911eb9e",
+      "rule_id": "DJX-009",
+      "verdict": "true_positive",
+      "file": "hc/settings.py",
+      "line": 208,
+      "note": "Verified against source, and the strongest evidence is an absence: `full_clean` does not appear anywhere in Healthchecks. The project defaults to SQLite (hc/settings.py:209) and ships Postgres (223) and MySQL (244) for deployment, so it is the one corpus project that genuinely runs the divergence this family is gated on. Views save models directly -- hc/accounts/views.py:80, 86, 91, 97 are four bare `.save()` calls -- and `Model.save()` does not validate `max_length`, so nothing between a request and the column checks the width on either engine. The 57 counted columns are real `varchar(N)` and narrow integer columns; the six sampled were confirmed by reading hc/accounts/models.py (Profile.reports varchar(10) at :80, Profile.token varchar(128) at :85, Profile.tz varchar(36) at :103). Counted once for the project rather than 57 times, which is the reported shape.",
+      "reviewed": "2026-08-09",
       "reviewer": "Zambagarrah"
     }
   ]

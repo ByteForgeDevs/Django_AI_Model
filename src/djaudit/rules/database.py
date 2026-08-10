@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Iterator
-from dataclasses import dataclass
 
 from djaudit.context import ProjectContext
+from djaudit.engines import DatabaseConfig, database_configs
 from djaudit.models import Confidence, Evidence, EvidenceKind, Family, Finding, Severity, Tier
 from djaudit.registry import RuleMeta, register
 from djaudit.rules._base import (
@@ -28,107 +28,12 @@ from djaudit.rules._base import (
     SettingsRule,
 )
 from djaudit.settings import (
-    Definition,
     Entry,
-    ResolvedSetting,
     SettingsView,
-    entries,
     literal_text,
 )
 
 _DATABASES_DOCS = "https://docs.djangoproject.com/en/stable/ref/settings/#databases"
-
-SQLITE = "sqlite"
-
-
-@dataclass(frozen=True)
-class DatabaseConfig:
-    """One alias's mapping, as written by one assignment."""
-
-    alias: str
-    settings: dict[str, Entry]
-    node: ast.expr | None
-    definition: Definition
-    conditional: bool
-    """Whether the assignment that wrote it sits inside an ``if``.
-
-    A conditional block is one deployment shape among several rather than the
-    configuration, which is worth saying in a finding and worth knowing when
-    deciding whether a sibling branch has already answered the question.
-    """
-
-    def get(self, key: str) -> Entry | None:
-        return self.settings.get(key)
-
-    def text(self, key: str) -> str | None:
-        """A key's value as a string, if it is one."""
-        entry = self.settings.get(key)
-        return None if entry is None else literal_text(entry.value)
-
-    def options(self, view: SettingsView) -> dict[str, Entry]:
-        """The nested ``OPTIONS`` mapping, read one key at a time."""
-        entry = self.settings.get("OPTIONS")
-        if entry is None:
-            return {}
-        return entries(view, entry.node, entry.value)
-
-    @property
-    def engine(self) -> str | None:
-        return self.text("ENGINE")
-
-    @property
-    def is_sqlite(self) -> bool:
-        engine = self.engine
-        return engine is not None and SQLITE in engine
-
-    def at(self) -> ast.expr | None:
-        """Where to point a finding that is about the alias as a whole."""
-        return self.node
-
-
-def live_definitions(resolved: ResolvedSetting) -> tuple[Definition, ...]:
-    """The assignments that can still decide the value.
-
-    An unconditional assignment replaces everything before it outright, so
-    anything earlier is dead code and reporting it would be reporting a value
-    that never reaches a connection. Everything from the last unconditional
-    assignment onward is live: the unconditional one is the fallback and each
-    conditional one after it is a deployment that overrides it.
-    """
-    definitions = resolved.definitions
-    last_plain = 0
-    for index, definition in enumerate(definitions):
-        if not definition.conditional:
-            last_plain = index
-    return definitions[last_plain:]
-
-
-def database_configs(
-    view: SettingsView, resolved: ResolvedSetting
-) -> dict[str, tuple[DatabaseConfig, ...]]:
-    """Every configuration each alias could have, in source order.
-
-    Keyed by alias because an alias is a separate server with separate
-    settings, and grouped rather than flattened because the rules here have to
-    answer "did *any* branch get this right", which is not a question a single
-    branch can answer.
-    """
-    found: dict[str, list[DatabaseConfig]] = {}
-    for definition in live_definitions(resolved):
-        node = definition.node
-        if not isinstance(node, ast.Assign | ast.AnnAssign) or node.value is None:
-            continue
-        for alias, entry in entries(view, node.value).items():
-            found.setdefault(alias, []).append(
-                DatabaseConfig(
-                    alias=alias,
-                    settings=entries(view, entry.node, entry.value),
-                    node=entry.node,
-                    definition=definition,
-                    conditional=definition.conditional,
-                )
-            )
-    return {alias: tuple(configs) for alias, configs in found.items()}
 
 
 class DatabaseAliasRule(SettingsRule):

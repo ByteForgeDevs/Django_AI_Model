@@ -1,0 +1,110 @@
+{
+  "description": "The cross-database portability recall fixture, and the only place any `DJX` rule has a known answer. Measuring this family on the benchmark corpus is not merely inconvenient, it is impossible: every `DJX` rule is gated on `Divergence.reaches`, which requires evidence that the project runs two engines, and of the three benchmark projects only Healthchecks passes that gate -- NetBox and pretix both compute their `ENGINE` at import time and cannot be read statically at all. Healthchecks then turns out to contain almost none of the constructs this family is about: zero `JSONField`, zero `ArrayField`, zero `icontains`, zero `Trunc`, and two `.distinct()` calls that are both the portable no-argument form. So the corpus can measure this family's precision and cannot measure its recall even in principle, which is why the recall evidence has to be built here.\n\n`config/settings.py` carries the divergence and is what makes every other file in this project reportable: SQLite unconditionally, Postgres behind `DB=postgres`, which is the shape Healthchecks uses. Deleting that `if` should silence the entire family here, and that is worth more than any single pair -- it is the difference between a portability rule and a style rule.\n\n`catalog` holds the defects and `warehouse` holds their correctly-written twins. Each pair differs only in the thing its rule is about. `latest_per_supplier` uses `distinct('sku')` and its twin expresses the same per-group-latest question with a subquery, rather than asking a weaker question -- a control that simply dropped the requirement would not be the same query and would not show that the requirement can be met portably. `warehouse` is not a general improvement on `catalog` anywhere: it keeps the same columns, the same unique constraint and the same `JSONField`, because a control that fixed two things at once would leave one rule's claim untested.\n\n`DJX-001` and `DJX-009` are the two rules here with no twin in `warehouse`, because both are reported once for the whole project rather than once per site. `DJX-009` counts every column whose declared width or range SQLite ignores, and `warehouse` cannot be the portable half of that -- its `CharField`s are as unenforced as `catalog`'s, which is the finding's whole point. Their control is the settings file: removing the `if` that introduces the second engine silences them along with the rest of the family.",
+  "expected": [
+    {
+      "rule_id": "DJX-001",
+      "file": "config/settings.py",
+      "line": 47,
+      "severity": "medium",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJX-002",
+      "file": "catalog/queries.py",
+      "line": 21,
+      "severity": "high",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJX-003",
+      "file": "catalog/queries.py",
+      "line": 10,
+      "severity": "high",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJX-004",
+      "file": "catalog/queries.py",
+      "line": 16,
+      "severity": "medium",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJX-005",
+      "file": "catalog/models.py",
+      "line": 10,
+      "severity": "high",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJX-006",
+      "file": "catalog/models.py",
+      "line": 15,
+      "severity": "high",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJX-007",
+      "file": "catalog/queries.py",
+      "line": 28,
+      "severity": "high",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJX-008",
+      "file": "catalog/queries.py",
+      "line": 38,
+      "severity": "high",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJX-009",
+      "file": "config/settings.py",
+      "line": 47,
+      "severity": "medium",
+      "confidence": "certain"
+    }
+  ],
+  "must_not_report": [
+    {
+      "rule_id": "DJX-002",
+      "file": "warehouse/models.py"
+    },
+    {
+      "rule_id": "DJX-002",
+      "file": "warehouse/queries.py"
+    },
+    {
+      "rule_id": "DJX-003",
+      "file": "warehouse/models.py"
+    },
+    {
+      "rule_id": "DJX-003",
+      "file": "warehouse/queries.py"
+    },
+    {
+      "rule_id": "DJX-004",
+      "file": "warehouse/models.py"
+    },
+    {
+      "rule_id": "DJX-004",
+      "file": "warehouse/queries.py"
+    },
+    {
+      "rule_id": "DJX-005",
+      "file": "warehouse/models.py"
+    },
+    {
+      "rule_id": "DJX-006",
+      "file": "warehouse/models.py"
+    },
+    {
+      "rule_id": "DJX-007",
+      "file": "warehouse/queries.py"
+    },
+    {
+      "rule_id": "DJX-008",
+      "file": "warehouse/queries.py"
+    }
+  ]
+}
