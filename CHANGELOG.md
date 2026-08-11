@@ -215,6 +215,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Documentation
 
+- **plan:** record the release-loop defects and correct the phase 7 status (b26abb49)
 - **plan:** build the configuration Phase 7 assumed it could document (8a95c618)
 - **adapters:** write down what we take from other tools, and gate it (b149e7a9)
 - **live:** write the live tier's security model, and gate it (01c66a26)
