@@ -182,6 +182,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Fixed
 
+- **docs:** gate the versions the docs tell people to install (aa150376)
 - **changelog:** read an absent tag the same way twice (f07521a1)
 - **adapters:** call a tool by its name, not by the path it lives at (0550e926)
 - **scripts:** run the mutant the harness says it ran (59144fe8)
