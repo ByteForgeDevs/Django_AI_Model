@@ -8943,7 +8943,56 @@ conversation.
   wrong name, a missing `shell:`, a default outside the choices, the verdict
   step deleted) all caught by both the gate and the tests; five controls
   against the documentation gate all caught.
-- **7.2.2** — `pre-commit` hook definition.
+- **7.2.2** — `pre-commit` hook definition. **Done.**
+
+  pre-commit's default contract is to hand a hook the changed files, and that
+  contract does not fit this tool. djaudit's unit of analysis is the project:
+  it resolves the settings modules, builds a model graph and a DRF route
+  graph, and follows taint between files. DJA-004 needs the viewset, the
+  serializer and the model, which are rarely in one commit.
+
+  Both ways of getting this wrong were measured rather than assumed, and they
+  fail very differently:
+
+  - **`pass_filenames: true` fails loudly.** `djaudit run` takes one directory,
+    so pre-commit's file list arrives as "Got unexpected extra argument(s)",
+    and a single changed file exits 2 with "path is not a directory".
+  - **Narrowing to a subdirectory fails silently.** An app package contains no
+    settings module, so djaudit resolves nothing, reports nothing and exits 0.
+    Measured on `vulnerable_project`: 29 findings from the root, **0 from its
+    `app/` subtree, exit 0**. That is the trap, and it is the one a reader
+    would have called the safe option.
+
+  So the hooks set `pass_filenames: false` and audit the repository root, with
+  `types: [python]` so a templates-only commit is not audited. Two are
+  published: `djaudit`, and `djaudit-security` restricted to `DJS`/`DJI`/`DJA`
+  for repositories that want a fast local signal and leave the rest to CI.
+
+  `scripts/check_pre_commit.py` checks the manifest against the real CLI —
+  every hook invokes a command that exists, every flag exists on it, every
+  value handed to a choice option is one of its choices, `pass_filenames` is
+  false, and the documented hook list is exactly the published one. The family
+  check is the one that earns its keep: renaming a family would leave a hook
+  silently auditing nothing.
+
+  A manifest nobody has run is a guess, so `tests/test_pre_commit.py` runs the
+  real `pre-commit` binary against throwaway git repositories that consume this
+  checkout, and confirms it installs the hook, fails a dirty tree and passes a
+  clean one. Those tests are opt-in through `DJAUDIT_TEST_PRE_COMMIT=1`,
+  following the Postgres convention — and because an opt-in that quietly does
+  nothing is the exact failure it exists to prevent, asking for them without
+  `pre-commit` installed raises rather than skips, and the CI step fails if the
+  run reports any skip at all. That guard needed its own correction: the first
+  version grepped for `SKIPPED`, which `-q` in `addopts` never prints, so it
+  could not have fired. It now matches the summary line, checked against a run
+  that skips and a run that does not.
+
+  *Verified:* 16 tests, 3 of them driving real pre-commit; ten un-fix controls
+  against the gate (filenames passed, a flag the CLI rejects, a severity it
+  rejects, a renamed family, a command that does not exist, the `types`
+  restriction removed, a hook renamed but not documented, a documented hook
+  that does not exist, a non-python language, the manifest deleted) all caught,
+  each with the message that names the actual defect.
 - **7.2.3** — Container image for non-Python CI environments.
 
 ### Step 7.3 — Configuration

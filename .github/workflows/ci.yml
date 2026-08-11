@@ -159,6 +159,11 @@ jobs:
       - name: the action still matches the CLI it wraps
         run: uv run python scripts/check_action.py
 
+      # Same reasoning as the action: the hook manifest is executed inside
+      # someone else's repository by a tool that builds its own environment.
+      - name: the pre-commit hooks still match the CLI they invoke
+        run: uv run python scripts/check_pre_commit.py
+
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch
       # cache. Every other method clones the queryset and re-queries, so the
@@ -481,3 +486,37 @@ jobs:
 
       - name: a clean tree passes
         run: test "${{ steps.clean.outputs.exit-code }}" = "0"
+
+  pre_commit:
+    name: pre-commit hooks (with the real tool)
+    runs-on: ubuntu-latest
+    steps:
+      # pre-commit clones this repository at a revision, so the checkout needs
+      # the history the consumer config points at.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install pre-commit
+        run: pip install pre-commit
+
+      # These tests are opt-in, and an opt-in that silently does nothing is
+      # exactly what it exists to prevent -- so the run is required to report
+      # no skips.
+      - name: the hooks install and run under pre-commit
+        env:
+          DJAUDIT_TEST_PRE_COMMIT: "1"
+        run: |
+          # `-q` is in addopts, so it wins over -v and no "SKIPPED" line is ever
+          # printed. The summary line is the signal that survives it.
+          uv run pytest tests/test_pre_commit.py --no-header | tee /tmp/hooks.txt
+          if grep -qE '[0-9]+ skipped' /tmp/hooks.txt; then
+            echo "::error::a pre-commit test skipped, so the hooks were not actually exercised"
+            exit 1
+          fi
