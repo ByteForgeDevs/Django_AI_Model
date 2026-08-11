@@ -12,6 +12,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Added
 
+- **pre-commit:** audit the project, because auditing the diff finds nothing (715df392)
 - **action:** upload the findings before failing the job on them (c75af97f)
 - **changelog:** derive the release notes from the trail that already exists (0ad7e0c4)
 - **schema:** make the published contract something you cannot change quietly (8204c650)
