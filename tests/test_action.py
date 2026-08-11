@@ -15,6 +15,7 @@ builds is one djaudit accepts".
 
 from __future__ import annotations
 
+import inspect
 import os
 import re
 import subprocess
@@ -346,3 +347,21 @@ class TestTheDocumentedInterface:
         assert re.search(r"uses: [\w-]+/[\w-]+@v\d+\.\d+\.\d+", document), (
             "an unpinned example teaches callers to track a moving branch"
         )
+
+    def test_the_pin_is_this_version_not_merely_a_version(self) -> None:
+        """The test above passed throughout the whole time the pin said v0.1.0.
+
+        Checking the shape of a version cannot see a wrong one, and a caller
+        copying the example gets whatever it names, not what the prose around
+        it describes.
+        """
+        document = (ROOT / "docs/github-action.md").read_text()
+        assert check_action._check_pins(document, Path("docs/github-action.md")) == []
+
+    def test_a_stale_pin_is_caught(self) -> None:
+        stale = "      - uses: ByteForgeDevs/Django_AI_Model@v0.0.1\n"
+        assert check_action._check_pins(stale, Path("d.md")), "a wrong pin passed"
+
+    def test_the_gate_still_consults_the_pin_check(self) -> None:
+        """A check nothing calls is not a check."""
+        assert "_check_pins" in inspect.getsource(check_action._check_doc)

@@ -13,7 +13,9 @@ The checks below are the ones that can be made without running pre-commit:
   choice option is one of its choices;
 * `pass_filenames` is false, because djaudit takes one directory and pre-commit
   would otherwise append the changed files to it;
-* every hook id is documented, and every documented id exists.
+* every hook id is documented, and every documented id exists;
+* every documented `rev:` names this release, since a stale one is copied
+  straight into someone else's config.
 
 `tests/test_pre_commit.py` runs the real `pre-commit` against a fixture
 repository, which is what proves the manifest is one the tool accepts.
@@ -22,17 +24,20 @@ repository, which is what proves the manifest is one the tool accepts.
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 from typing import Any
 
 import typer.main
 import yaml
 
+from djaudit import __version__
 from djaudit.cli import app
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / ".pre-commit-hooks.yaml"
 DOC = ROOT / "docs/pre-commit.md"
+REV = re.compile(r"^\s*rev:\s*(\S+)", re.MULTILINE)
 
 
 def _commands() -> dict[str, Any]:
@@ -92,12 +97,32 @@ def _check_args(hook: dict[str, Any], commands: dict[str, Any]) -> list[str]:
     return problems
 
 
+def _check_rev(text: str, where: pathlib.Path) -> list[str]:
+    """Every documented `rev:` must name this release.
+
+    A `rev` is copied verbatim into someone else's `.pre-commit-config.yaml`,
+    so a stale one either resolves to an older djaudit than the docs describe
+    or, before the first tag exists, does not resolve at all. Nothing kept it
+    in step with `__version__`: the version moved to 0.2.0 with both revs here
+    still reading v0.1.0, and every gate passed.
+    """
+    problems = []
+    for found in sorted(set(REV.findall(text))):
+        if found != f"v{__version__}":
+            problems.append(
+                f"{where} documents `rev: {found}` but this is version "
+                f"{__version__}; a copied config would install something else"
+            )
+    return problems
+
+
 def _check_doc(ids: list[str]) -> list[str]:
     if not DOC.exists():
         return [f"{DOC.relative_to(ROOT)} is missing"]
     text = DOC.read_text()
     where = DOC.relative_to(ROOT)
     problems = [f"hook {name!r} is not documented in {where}" for name in ids if name not in text]
+    problems += _check_rev(text, where)
 
     # Only the "The hooks" section is the catalogue. Elsewhere `- id:` appears
     # inside configuration examples, where a trailing comment is legitimate and

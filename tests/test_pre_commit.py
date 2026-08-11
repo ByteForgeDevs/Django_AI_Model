@@ -15,6 +15,7 @@ mode the opt-in exists to prevent.
 
 from __future__ import annotations
 
+import inspect
 import os
 import shutil
 import subprocess
@@ -247,3 +248,21 @@ class TestWhatTheManifestPromises:
         args = [str(a) for a in security["args"]]
         for family in [args[i + 1] for i, a in enumerate(args) if a == "--family"]:
             assert family in text, f"{family} is restricted to but never mentioned"
+
+    def test_the_documented_rev_is_this_version(self) -> None:
+        """A `rev` is copied into someone else's config, so a stale one ships.
+
+        Nothing checked this until 0.2.0 arrived with the doc still saying
+        v0.1.0 and every gate passing.
+        """
+        text = (ROOT / "docs/pre-commit.md").read_text()
+        assert check_pre_commit._check_rev(text, Path("docs/pre-commit.md")) == []
+
+    def test_a_stale_rev_is_caught(self) -> None:
+        assert check_pre_commit._check_rev("    rev: v0.0.1\n", Path("d.md")), (
+            "a rev naming another release passed"
+        )
+
+    def test_the_gate_still_consults_the_rev_check(self) -> None:
+        """A check nothing calls is not a check."""
+        assert "_check_rev" in inspect.getsource(check_pre_commit._check_doc)

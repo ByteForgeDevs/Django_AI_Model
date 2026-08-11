@@ -29,11 +29,13 @@ from typing import Any
 import typer.main
 import yaml
 
+from djaudit import __version__
 from djaudit.cli import app
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ACTION = ROOT / "action.yml"
 DOC = ROOT / "docs/github-action.md"
+USES = re.compile(r"uses:\s*ByteForgeDevs/Django_AI_Model@(\S+)")
 
 # Inputs whose value is passed straight to an option that only accepts certain
 # words. A typo here is a runtime failure on the caller's runner.
@@ -103,13 +105,31 @@ def _table(text: str, header: str) -> set[str]:
     return set()
 
 
+def _check_pins(text: str, where: pathlib.Path) -> list[str]:
+    """Every documented `uses:` of this action must name this release.
+
+    The doc's `uses:` line is copied verbatim into someone else's workflow, so
+    a stale tag pins them to an older djaudit than the surrounding prose
+    describes. Nothing kept it in step with `__version__`: the version moved to
+    0.2.0 with both examples still reading v0.1.0, and every gate passed.
+    """
+    problems = []
+    for found in sorted(set(USES.findall(text))):
+        if found != f"v{__version__}":
+            problems.append(
+                f"{where} documents `uses: ...@{found}` but this is version "
+                f"{__version__}; a copied workflow would run something else"
+            )
+    return problems
+
+
 def _check_doc(inputs: dict[str, Any], outputs: dict[str, Any]) -> list[str]:
     """Require the documented interface to be exactly the real one."""
     if not DOC.exists():
         return [f"{DOC.relative_to(ROOT)} is missing"]
     text = DOC.read_text()
     where = DOC.relative_to(ROOT)
-    found: list[str] = []
+    found: list[str] = _check_pins(text, where)
     for kind, declared in (("input", set(inputs)), ("output", set(outputs))):
         documented = _table(text, kind.capitalize())
         for name in sorted(declared - documented):
