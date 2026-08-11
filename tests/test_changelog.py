@@ -110,7 +110,10 @@ class TestWhatGetsIncluded:
     def test_a_changelog_only_commit_is_dropped(self, repo: Path) -> None:
         """Otherwise writing the changelog is a change the changelog must describe."""
         commit(repo, "docs(changelog): regenerate", touch="CHANGELOG.md")
-        assert "regenerate" not in gen_changelog.build()
+        sha = git(repo, "rev-parse", "HEAD").strip()
+        assert sha[:8] not in gen_changelog.build(), "the commit was listed"
+        subjects = [c.subject for c in gen_changelog.commits(None, "HEAD")]
+        assert "docs(changelog): regenerate" not in subjects
 
     def test_a_commit_touching_the_changelog_and_code_survives(self, repo: Path) -> None:
         """The exclusion is for changelog-*only* commits, not any commit near one."""
@@ -222,6 +225,41 @@ class TestTheContractGate:
         ledger(repo, ["1"], ["djaudit/v1", "djaudit/v2"])
         commit(repo, "chore(misc): tidy up", touch=None)
         assert any("djaudit/v2" in n for n in gen_changelog.contract_changes("v0.1.0"))
+
+    def test_before_any_release_every_contract_version_is_new(self, repo: Path) -> None:
+        """No tag means nothing shipped, so nobody already has schema 1.
+
+        This is the case the real repository is in, and it was the one case
+        these tests skipped -- every other test here tags first. Comparing the
+        ledger against itself made the notes empty until the first tag, which
+        is precisely the window in which people install from git and a schema
+        bump reaches them with no release notes to explain it.
+        """
+        ledger(repo, ["1", "2"], ["djaudit/v1"])
+        commit(repo, "feat(core): a second schema", touch=None)
+        assert gen_changelog.tags() == [], "this test is only meaningful untagged"
+        notes = gen_changelog.contract_changes(None)
+        assert any("Report schema 2" in n for n in notes), notes
+        assert any("djaudit/v1" in n for n in notes), notes
+
+    def test_the_untagged_reading_matches_how_commits_reads_it(self, repo: Path) -> None:
+        """One argument cannot mean two things.
+
+        ``commits(None, ...)`` treats an absent tag as "nothing has shipped"
+        and returns the entire history. The contract notes have to agree, or
+        the same section claims every commit is unreleased while claiming the
+        contract it ships is not new.
+        """
+        ledger(repo, ["1", "2"], ["djaudit/v1"])
+        commit(repo, "feat(core): a second schema", touch=None)
+        assert len(gen_changelog.commits(None, "HEAD")) == 2
+        assert gen_changelog.contract_changes(None) != []
+
+    def test_an_untagged_schema_bump_reaches_the_changelog(self, repo: Path) -> None:
+        """The note is worthless if it stops at the function that builds it."""
+        ledger(repo, ["1", "2"], ["djaudit/v1"])
+        commit(repo, "feat(core): a second schema", touch=None)
+        assert "Report schema 2" in gen_changelog.build()
 
 
 class TestStaleness:

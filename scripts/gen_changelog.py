@@ -147,8 +147,16 @@ def contract_changes(since: str | None) -> list[str]:
 
     Read from the ledger rather than from commit subjects, because the ledger
     is what actually shipped and a subject is what somebody remembered to type.
+
+    ``since`` of ``None`` means nothing has been released, so the comparison is
+    against an empty ledger and every contract version counts as new. Reading
+    it as "the current tree" instead would make this return nothing until the
+    first tag exists, and ``commits`` already reads an absent tag the other way
+    -- it lists the entire history as unreleased. One argument cannot mean both.
     """
-    before, after = _ledger_at(since), _ledger_at(None)
+    empty: dict[str, list[str]] = {"schemas": [], "fingerprints": []}
+    before = empty if since is None else _ledger_at(since)
+    after = _ledger_at(None)
     notes = []
     for added in sorted(set(after["schemas"]) - set(before["schemas"])):
         notes.append(
