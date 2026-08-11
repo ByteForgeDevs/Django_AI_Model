@@ -12,6 +12,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Added
 
+- **action:** upload the findings before failing the job on them (c75af97f)
 - **changelog:** derive the release notes from the trail that already exists (0ad7e0c4)
 - **schema:** make the published contract something you cannot change quietly (8204c650)
 - **cli:** let a run ask for the external tools, and never by default (b80af89d)
