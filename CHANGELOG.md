@@ -8,10 +8,17 @@ caveat that the minor carries breakage below `1.0.0`. `docs/versioning.md`
 explains what counts as a breaking change to the report schema and to
 fingerprints, and therefore to any baseline you have committed.
 
-## Unreleased (0.1.0)
+## Unreleased (0.2.0)
+
+### Upgrading
+
+- **Report schema 1.** The JSON report shape or its enum vocabularies changed; see `docs/versioning.md`.
+- **Report schema 2.** The JSON report shape or its enum vocabularies changed; see `docs/versioning.md`.
+- **Fingerprints are now `djaudit/v1`.** Finding identity changed, so existing baseline files no longer match and must be regenerated with `djaudit run --write-baseline`, or every finding they held will be reported as new.
 
 ### Added
 
+- **BREAKING** **container:** build the image from source, so a tag cannot publish other code (e3228744)
 - **pre-commit:** audit the project, because auditing the diff finds nothing (715df392)
 - **action:** upload the findings before failing the job on them (c75af97f)
 - **changelog:** derive the release notes from the trail that already exists (0ad7e0c4)
@@ -175,6 +182,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Fixed
 
+- **changelog:** read an absent tag the same way twice (f07521a1)
 - **adapters:** call a tool by its name, not by the path it lives at (0550e926)
 - **scripts:** run the mutant the harness says it ran (59144fe8)
 - **live:** use -E -s -B -u, because -I made manage.py unrunnable (ad5db6e6)
