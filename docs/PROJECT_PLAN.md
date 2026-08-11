@@ -8898,7 +8898,51 @@ conversation.
 
 ### Step 7.2 — Integrations
 
-- **7.2.1** — A composite GitHub Action wrapping the CLI with SARIF upload.
+- **7.2.1** — A composite GitHub Action wrapping the CLI with SARIF upload. **Done.**
+
+  The ordering is the design. A composite action stops at its first failing
+  step, so an audit that failed the step directly would skip the upload, and
+  the findings would be missing from code scanning in precisely the case where
+  someone needed to see them. The audit therefore records its exit code
+  instead of acting on it, the upload runs next, and a final step fails the
+  job. A crash is separated from a finding: exiting non-zero *without* writing
+  a report means djaudit failed to run, and the action stops rather than
+  uploading nothing. Verified that a report is written before the non-zero
+  exit, and that a project with no findings still produces a valid SARIF file
+  with an empty `results` array — otherwise the upload would have nothing to
+  send on a clean run.
+
+  An action is a string executed on someone else's runner, so a mistake is
+  reported against *their* repository. `scripts/check_action.py` therefore
+  checks everything reachable without a runner: every `${{ inputs.x }}` names
+  a declared input (an undeclared one expands to the empty string rather than
+  erroring), every declared input is used, every `--flag` handed to `djaudit
+  run` exists on `djaudit run`, every default that names a CLI choice is one of
+  that option's choices, and the upload sits between the audit and the failure.
+  The flag and choice checks read the real CLI through typer, so renaming an
+  option breaks the gate rather than the caller.
+
+  Structural checks are not enough, so the tests render the action's own shell
+  scripts — substituting the workflow expressions, and refusing to run if any
+  expression is one the renderer does not understand — and execute them
+  against fixture projects. CI goes further and runs the action itself with
+  `uses: ./`, once against a fixture full of findings (asserting the action
+  fails *and* left a report behind) and once against `near_miss_project` with
+  the upload enabled. That second run is the only way to learn that code
+  scanning accepts the shape of what we emit, and because the report has zero
+  results it creates no alerts.
+
+  Two things are true and worth stating: the action's default `install: true`
+  installs a pinned release that does not exist until 7.1.1's workflow
+  publishes it, which is why every CI run passes `install: false`; and the
+  upload is unavailable to pull requests from forks, which is recorded in the
+  documentation rather than worked around.
+
+  *Verified:* 21 tests; six un-fix controls against the action (the audit
+  failing the step, a flag the CLI does not have, an input referenced by the
+  wrong name, a missing `shell:`, a default outside the choices, the verdict
+  step deleted) all caught by both the gate and the tests; five controls
+  against the documentation gate all caught.
 - **7.2.2** — `pre-commit` hook definition.
 - **7.2.3** — Container image for non-Python CI environments.
 

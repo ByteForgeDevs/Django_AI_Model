@@ -153,6 +153,12 @@ jobs:
       - name: the changelog matches the commit trail
         run: uv run python scripts/gen_changelog.py --check
 
+      # The composite action is a string executed on someone else's runner, so
+      # a renamed CLI flag or a mistyped input surfaces as a failure in their
+      # repository rather than ours. This checks it against the real CLI.
+      - name: the action still matches the CLI it wraps
+        run: uv run python scripts/check_action.py
+
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch
       # cache. Every other method clones the queryset and re-queries, so the
@@ -415,3 +421,63 @@ jobs:
         with:
           name: report-${{ matrix.target.name }}
           path: report.json
+
+  action:
+    name: composite action (on a runner)
+    runs-on: ubuntu-latest
+    # The clean-tree audit below uploads a SARIF report with zero results. It
+    # creates no alerts, and it is the only way to learn that code scanning
+    # accepts the shape of what we emit.
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # `install: false` throughout: the action's default installs a pinned
+      # release from PyPI, and testing that here would test the last release
+      # rather than this commit.
+      - name: install this commit
+        run: pip install .
+
+      - name: audit a fixture that has findings
+        id: dirty
+        continue-on-error: true
+        uses: ./
+        with:
+          path: tests/fixtures/vulnerable_project
+          install: "false"
+          upload-sarif: "false"
+          sarif-file: dirty.sarif
+          min-severity: info
+          min-confidence: tentative
+
+      # The action must fail on findings, and must have written the report
+      # before doing so -- that ordering is the whole design, and it is not
+      # observable anywhere but here.
+      - name: findings failed the action, after the report was written
+        run: |
+          test "${{ steps.dirty.outcome }}" = "failure" \
+            || { echo "::error::the action passed on a project full of findings"; exit 1; }
+          test -f dirty.sarif \
+            || { echo "::error::the action failed without writing a report"; exit 1; }
+          python -c "import json,sys; r=json.load(open('dirty.sarif'))['runs'][0]['results']; \
+            sys.exit(0 if r else 'the report is empty')"
+          test "${{ steps.dirty.outputs.exit-code }}" = "1"
+
+      # near_miss_project exists to prove we do not flag things that merely
+      # look wrong, so it is genuinely clean at the default thresholds.
+      - name: audit a clean tree, and upload it for real
+        id: clean
+        uses: ./
+        with:
+          path: tests/fixtures/near_miss_project
+          install: "false"
+          sarif-file: clean.sarif
+
+      - name: a clean tree passes
+        run: test "${{ steps.clean.outputs.exit-code }}" = "0"
