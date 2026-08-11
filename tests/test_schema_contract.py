@@ -22,8 +22,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import gen_schema
 
+from djaudit import __version__
 from djaudit import fingerprint as fp
 from djaudit.models import SCHEMA_VERSION
+
+
+def _next_series(version: str) -> str:
+    """The next version a breaking change would be allowed to ship under.
+
+    Mirrors `gen_schema._release_series`: below 1.0 the minor carries breakage,
+    at and above it the major does.
+    """
+    parts = [int(p) for p in version.split(".")]
+    if parts[0] > 0:
+        return f"{parts[0] + 1}.0.0"
+    return f"{parts[0]}.{parts[1] + 1}.0"
+
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -313,16 +327,22 @@ class TestPublishedEntriesAreAppendOnly:
     def test_a_new_version_with_a_release_bump_passes(
         self, repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The contrast: the same change is fine once the release moves."""
+        """The contrast: the same change is fine once the release moves.
+
+        The bumped version has to be ahead of the *live* one, not a literal, or
+        the day the project reaches that literal this stops being a contrast and
+        starts passing for the same reason as its opposite.
+        """
+        ahead = _next_series(__version__)
 
         def bend(d: dict[str, Any]) -> None:
             entry = dict(d["schemas"][str(SCHEMA_VERSION)])
-            entry["tool_version"] = "0.2.0"
+            entry["tool_version"] = ahead
             d["schemas"][str(SCHEMA_VERSION + 1)] = entry
 
         tamper(repo, bend)
         monkeypatch.setattr(gen_schema, "SCHEMA_VERSION", SCHEMA_VERSION + 1)
-        monkeypatch.setattr(gen_schema, "__version__", "0.2.0")
+        monkeypatch.setattr(gen_schema, "__version__", ahead)
         assert gen_schema.check() == 0
 
     def test_an_untracked_ledger_is_not_treated_as_tampering(

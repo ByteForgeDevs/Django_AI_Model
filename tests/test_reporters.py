@@ -1,6 +1,7 @@
 """SARIF is the CI integration; malformed output silently breaks code scanning."""
 
 import json
+from dataclasses import replace
 
 from djaudit import engine, registry
 from djaudit.fingerprint import FINGERPRINT_VERSION
@@ -114,7 +115,40 @@ class TestInvocations:
     def test_clean_run_reports_success(self, vulnerable_project):
         invocation = sarif.build(run(vulnerable_project))["runs"][0]["invocations"][0]
         assert invocation["executionSuccessful"] is True
-        assert invocation["toolExecutionNotifications"] == []
+        assert [n for n in invocation["toolExecutionNotifications"] if n["level"] == "error"] == []
+
+    def test_a_static_run_notes_what_it_could_not_check(self, vulnerable_project):
+        """Fewer findings look exactly like a cleaner codebase, so say so."""
+        invocation = sarif.build(run(vulnerable_project))["runs"][0]["invocations"][0]
+
+        (notice,) = [
+            n
+            for n in invocation["toolExecutionNotifications"]
+            if n.get("descriptor", {}).get("id") == "djaudit/degraded"
+        ]
+        assert notice["level"] == "note"
+        assert "live-tier" in notice["message"]["text"]
+        # The invocation is still a success: narrower is not broken.
+        assert invocation["executionSuccessful"] is True
+
+    def test_a_failed_live_request_warns_rather_than_notes(self, vulnerable_project):
+        """The contrast. Asking for the live tier and not getting it is actionable.
+
+        Without this, the level could be hardcoded to `note` and the test above
+        would not notice -- an alarm that never rises is the failure the
+        distinction exists to prevent.
+        """
+        result = run(vulnerable_project)
+        result.context = replace(result.context, live_problem="no virtualenv was found")
+
+        invocation = sarif.build(result)["runs"][0]["invocations"][0]
+
+        (notice,) = [
+            n
+            for n in invocation["toolExecutionNotifications"]
+            if n.get("descriptor", {}).get("id") == "djaudit/degraded"
+        ]
+        assert notice["level"] == "warning"
 
     def test_rule_failures_are_surfaced_in_the_sarif(self, vulnerable_project):
         result = run(vulnerable_project)
@@ -181,3 +215,42 @@ class TestJsonReporter:
 
     def test_output_is_valid_json(self, vulnerable_project):
         assert json.loads(json_reporter.render(run(vulnerable_project)))
+
+    def test_the_report_says_what_the_run_could_not_check(self, vulnerable_project):
+        """A consumer that never sees the terminal still has to learn this.
+
+        The block is what lets a pipeline tell a clean project from an
+        unreachable one; without it a static-only run and a fully-checked run
+        are byte-identical apart from the findings they happen to contain.
+        """
+        degraded = json_reporter.build(run(vulnerable_project))["degraded"]
+
+        assert degraded is not None
+        assert "live tier" in degraded["reason"]
+        assert degraded["skipped"], "live rules were skipped but none were named"
+        for item in degraded["skipped"]:
+            assert item["rule_id"] and item["fallback"], item
+
+    def test_a_covering_fallback_is_named(self, vulnerable_project):
+        """The fallback is the actionable half: what still covers the gap."""
+        degraded = json_reporter.build(run(vulnerable_project))["degraded"]
+
+        covered = {s["rule_id"]: s["covered_by"] for s in degraded["skipped"]}
+        assert any(covered.values()), f"no skipped rule named a fallback that ran: {covered}"
+
+    def test_a_complete_run_says_so_rather_than_going_quiet(self, vulnerable_project):
+        """The contrast, and the reason the block is not omitted when empty.
+
+        An absent key would be ambiguous -- old djaudit, or nothing skipped? --
+        so a run with nothing to report still states the reason and an empty
+        list. Without this, `_degraded` could return `None` whenever `skipped`
+        was empty and every other test here would still pass.
+        """
+        result = run(vulnerable_project)
+        result.degraded = result.degraded._replace(skipped=())
+
+        degraded = json_reporter.build(result)["degraded"]
+
+        assert degraded is not None, "a complete run must still say it was complete"
+        assert degraded["skipped"] == []
+        assert degraded["reason"]

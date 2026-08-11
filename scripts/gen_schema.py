@@ -46,6 +46,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from djaudit import __version__  # noqa: E402
 from djaudit import fingerprint as fp  # noqa: E402
 from djaudit.context import Diagnostic, ProjectContext, SettingsModule, SettingsRole  # noqa: E402
+from djaudit.degradation import Degradation, Skipped  # noqa: E402
 from djaudit.engine import RunResult  # noqa: E402
 from djaudit.models import (  # noqa: E402
     SCHEMA_VERSION,
@@ -181,6 +182,17 @@ def _specimen() -> RunResult:
         total_raw=1,
         rules_run=1,
         rule_errors={"DJS-001": "boom"},
+        degraded=Degradation(
+            reason="the live tier was not requested",
+            skipped=(
+                Skipped(
+                    rule_id="DJM-010",
+                    title="title",
+                    fallback="fallback",
+                    covered_by=("DJM-003",),
+                ),
+            ),
+        ),
     )
 
 
@@ -386,7 +398,14 @@ def _check_history(ledger: dict[str, Any], problems: list[str]) -> None:
         if current in was.get(section, {}):
             continue
         prior = [e.get("tool_version", "0.0.0") for e in was.get(section, {}).values()]
-        if prior and all(_release_series(p) == live for p in prior):
+        # `any`, not `all`: the evidence that this version did not get its own
+        # release is that *some* already-published entry shares the current one.
+        # Requiring every prior entry to match made the check fire exactly once,
+        # at the first bump, and go quiet forever after -- from the second entry
+        # onwards there is always an older series to make `all` false, so a third
+        # schema version could ride along on a release that had already shipped a
+        # second.
+        if any(_release_series(p) == live for p in prior):
             problems.append(
                 f"{section} gained entry {current!r} without a release bump: still "
                 f"{__version__}. A new {section[:-1]} version is a breaking change for "

@@ -8993,7 +8993,109 @@ conversation.
   restriction removed, a hook renamed but not documented, a documented hook
   that does not exist, a non-python language, the manifest deleted) all caught,
   each with the message that names the actual defect.
-- **7.2.3** — Container image for non-Python CI environments.
+- **7.2.3** — Container image for non-Python CI environments. **Done.**
+
+  For runners that have docker and nothing else. If you can `pip install`, the
+  image buys nothing but isolation and a pinned interpreter; it costs a mount
+  and the live tier.
+
+  **The image is built from this checkout, not installed from PyPI.** A tag
+  names a version and the report stamps `tool.version` into every finding, so
+  an image that installed `djaudit==<n>` could publish findings labelled with
+  code it does not contain. Two stages: build a wheel, install it, discard the
+  toolchain.
+
+  `ENTRYPOINT ["djaudit"]` with `CMD ["run", "/src"]`, and both halves matter.
+  Naming the bare CLI keeps every subcommand reachable — `docker run ... rules`
+  works, which `ENTRYPOINT ["djaudit", "run"]` would break. `WORKDIR /src` and
+  the `CMD` path agree so a bare `docker run -v "$PWD:/src:ro"` does the
+  obvious thing; a `CMD` pointing anywhere else would audit an empty directory,
+  report nothing and **exit 0**, which is indistinguishable from a clean
+  project. The gate checks that agreement for exactly that reason.
+
+  **No container runtime exists on this machine** — no docker, podman, buildah
+  or nerdctl, and no socket — so *the image has never been built here.* That is
+  stated plainly rather than papered over, and it shaped the work: CI builds it
+  and runs it, and the CI job compares the image's finding count against the
+  CLI's on the same fixture, because a build that succeeds proves nothing about
+  what the image does. It also asserts a bare run exits 1, a non-`run`
+  subcommand still works, the user is not root, and a read-only mount is
+  enough.
+
+  Locally, the testable half is the build *context*. `COPY pyproject.toml
+  README.md ./` plus `COPY src ./src` is a claim that those paths suffice to
+  build a wheel — a claim that breaks the day packaging metadata reads a file
+  nobody copied. `tests/test_container.py` copies exactly what the Dockerfile
+  copies into an empty directory and builds there, which reproduces that
+  failure in seconds. The wheel it produced was installed into a clean venv and
+  audited Healthchecks: **35 findings, stamped with this tree's version**.
+
+  `scripts/check_dockerfile.py` gates what a successful build would not reveal:
+  the base is pinned, both stages agree on it, it satisfies `requires-python`,
+  every copied path exists, the image drops privileges *after* installing, the
+  entrypoint names a real command, `CMD`'s flags exist, and `docs/container.md`
+  documents the same mount point.
+
+  **Two defects the controls found, both in the tests rather than the subject.**
+  The suite reimplemented the copied-path loop and the doc check instead of
+  calling the gate, so deleting either check from `check_dockerfile.py` left
+  everything green — the copy in the test file had quietly become the thing
+  under test. Both are now extracted as functions the tests call, with a
+  reflection assertion that `check` still calls them. A third control was
+  itself imprecise: it stripped one mention of `--live` from the doc and left
+  the others, so the fact it meant to remove was still stated.
+
+  *Verified:* 24 tests; 19/19 un-fix controls caught, covering every gate
+  branch and the Dockerfile, `.dockerignore` and doc it reads.
+
+  *Not verified anywhere but CI:* that `docker build` succeeds, and everything
+  downstream of it.
+
+  **Amended — a reporting gap the container exposed, fixed here.** Writing the
+  "what does not work in the image" section forced the question of how a reader
+  learns the live tier did not run. Measurement: the warning goes to *stderr*,
+  and `RunResult.degraded` reached only the terminal reporter. So a pipeline
+  uploading SARIF got a static-only report with nothing in the artifact saying
+  so — and fewer findings look exactly like a cleaner codebase, which is the
+  precise confusion `djaudit/degradation.py` was written to prevent. Its own
+  docstring says a tool that quietly checks less is worse than one that fails;
+  two of the three reporters did not honour it.
+
+  JSON now carries a `degraded` block (reason, and each skipped rule with its
+  fallback and which fallbacks actually ran), and SARIF carries a
+  `toolExecutionNotifications` entry. The SARIF level distinguishes the two
+  cases: `note` when the live tier was never requested, which is the ordinary
+  state of affairs, and `warning` when it was requested and could not run,
+  which is the actionable one. Raising a warning on every static run would be
+  an alarm that is always on. `executionSuccessful` stays true — the tool did
+  reach everything it could, and a narrower report is not an unusable one. The
+  block is emitted even when nothing was skipped, because an absent key cannot
+  be told apart from an older djaudit.
+
+  This is a report-shape change, so the contract gate demanded — correctly — a
+  new schema version, and the versioning policy makes a `SCHEMA_VERSION` bump a
+  breaking release. Hence **schema 2** and **0.2.0**, with schema 1's ledger
+  entry untouched. The specimen was extended to populate `degraded` so its
+  nested shape is under contract rather than recorded as a bare `null`.
+
+  **Three tests were found to be passing for the wrong reason**, all by the
+  bump rather than by review:
+
+  - `test_a_new_version_without_a_release_bump_is_caught` went green because
+    the gate required *every* prior entry to share the current release series.
+    That fires exactly once, at the first bump, and never again — from the
+    second entry onwards there is always an older series to make `all` false,
+    so a third schema version could have ridden along on an already-shipped
+    release. Now `any`.
+  - Its contrast asserted against the literal `"0.2.0"`, which stopped being a
+    contrast the moment the project reached it. Now derived from the live
+    version.
+  - The action's end-to-end test ran the install step and passed only because
+    an editable install's recorded metadata still read the previous version —
+    `djaudit` is not on PyPI at all, so that step could never have succeeded on
+    its own terms. The test now honours the step's `if:` condition and runs
+    with `install: false`, with a contrast proving the condition evaluator is
+    not simply skipping everything.
 
 ### Step 7.3 — Configuration
 

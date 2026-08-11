@@ -164,6 +164,13 @@ jobs:
       - name: the pre-commit hooks still match the CLI they invoke
         run: uv run python scripts/check_pre_commit.py
 
+      # The image is built in its own job; this reads the Dockerfile as data
+      # and checks the parts a successful build would not reveal -- an
+      # entrypoint naming a command that has been renamed, a CMD auditing a
+      # directory nobody mounts into.
+      - name: the container's interface still matches the CLI
+        run: uv run python scripts/check_dockerfile.py
+
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch
       # cache. Every other method clones the queryset and re-queries, so the
@@ -520,3 +527,89 @@ jobs:
             echo "::error::a pre-commit test skipped, so the hooks were not actually exercised"
             exit 1
           fi
+
+  container:
+    name: container image (built and run)
+    runs-on: ubuntu-latest
+    # Nothing here can be verified on a developer machine without a container
+    # runtime, and the machine this was written on has none. So this job is not
+    # a formality: it is the only evidence that the image builds at all, and
+    # the only place the entrypoint is ever executed.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: build the image
+        run: docker build -t djaudit:ci .
+
+      # A build that succeeds proves nothing about what the image does. An
+      # image whose CMD points at the wrong directory audits an empty tree,
+      # reports nothing and exits 0 -- which is indistinguishable from a clean
+      # project unless the count is compared against a known one.
+      - name: the same findings as the CLI, from the same fixture
+        run: |
+          pip install .
+          djaudit run tests/fixtures/vulnerable_project --format json -o host.json \
+            --min-severity info --min-confidence tentative || true
+          host=$(python -c "import json;print(len(json.load(open('host.json'))['findings']))")
+
+          docker run --rm -v "$PWD/tests/fixtures/vulnerable_project:/src:ro" djaudit:ci \
+            run /src --format json --min-severity info --min-confidence tentative \
+            > image.json || true
+          image=$(python -c "import json;print(len(json.load(open('image.json'))['findings']))")
+
+          echo "host=$host image=$image"
+          if [ "$host" != "$image" ]; then
+            echo "::error::the image found $image findings where the CLI found $host"
+            exit 1
+          fi
+          if [ "$image" -eq 0 ]; then
+            echo "::error::the fixture produced no findings, so this comparison proves nothing"
+            exit 1
+          fi
+
+      # The bare form is what the documentation tells people to run, and it
+      # exercises CMD rather than an argument list that replaces it.
+      - name: a bare run audits the mount and fails on findings
+        run: |
+          set +e
+          docker run --rm -v "$PWD/tests/fixtures/vulnerable_project:/src:ro" djaudit:ci
+          code=$?
+          set -e
+          if [ "$code" -ne 1 ]; then
+            echo "::error::expected exit 1 on a fixture with findings, got $code"
+            exit 1
+          fi
+
+      - name: a subcommand other than run is still reachable
+        run: docker run --rm djaudit:ci rules | grep -q DJS-001
+
+      - name: the image does not run as root
+        run: |
+          who=$(docker run --rm --entrypoint id djaudit:ci -un)
+          if [ "$who" = "root" ]; then
+            echo "::error::the image runs as root"
+            exit 1
+          fi
+          echo "runs as $who"
+
+      # The mount is documented as read-only, so prove the audit needs nothing
+      # writable in it. A rule that wrote a cache beside the source would pass
+      # every test above and fail on a user's first read-only run.
+      - name: a read-only mount is enough
+        run: |
+          set +e
+          docker run --rm -v "$PWD/tests/fixtures/orm_project:/src:ro" djaudit:ci \
+            run /src --format json > ro.json
+          code=$?
+          set -e
+          # 0 or 1 are both audits that ran. 2 is djaudit failing to run, which
+          # is what a write to a read-only mount would produce.
+          if [ "$code" -gt 1 ]; then
+            echo "::error::the audit could not run against a read-only mount (exit $code)"
+            exit 1
+          fi
+          python -c "import json; json.load(open('ro.json'))"

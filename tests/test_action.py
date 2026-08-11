@@ -57,6 +57,29 @@ def step(name: str) -> dict[str, Any]:
     raise AssertionError(f"no step named {name!r}")
 
 
+CONDITION = re.compile(r"^\s*inputs\.([a-z0-9-]+)\s*==\s*'([^']*)'\s*$")
+
+
+def selected(candidate: dict[str, Any], inputs: dict[str, str]) -> bool:
+    """Whether a runner would execute this step, given these inputs.
+
+    A composite action's `if:` is what makes `install: false` mean anything, so
+    a test that ran every step regardless would be testing a workflow nobody
+    can request. Raises on any condition it does not understand, rather than
+    defaulting to true: a silently-misread condition would put the step back
+    and the reason would not be obvious.
+    """
+    if "if" not in candidate:
+        return True
+    match = CONDITION.match(str(candidate["if"]))
+    if not match:
+        raise AssertionError(f"unhandled step condition: {candidate['if']!r}")
+    name, expected = match.groups()
+    if name not in inputs:
+        raise AssertionError(f"step condition names undeclared input {name!r}")
+    return inputs[name] == expected
+
+
 def render(script: str, inputs: dict[str, str], outputs: dict[str, str] | None = None) -> str:
     """Substitute the workflow expressions this action actually uses.
 
@@ -244,17 +267,25 @@ class TestTheActionEndToEnd:
 
     The `uses:` upload step needs a runner and is skipped here; CI runs the
     real thing against a clean fixture so that path is not left unexercised.
+
+    `install` is off, which is how the action is used before there is anything
+    to install and how CI invokes it today. It is also the honest setting: the
+    install step resolves `djaudit==<version>` from PyPI, and while that is
+    unpublished the step can only ever succeed by finding a local copy that
+    happens to match -- which is exactly how it used to pass here, through an
+    editable install whose recorded metadata still read the previous version.
     """
 
     def test_findings_produce_a_report_and_then_a_failure(self, tmp_path: Path) -> None:
         inputs = defaults() | {
             "path": str(ROOT / "tests/fixtures/vulnerable_project"),
             "sarif-file": "out.sarif",
+            "install": "false",
         }
         outputs: dict[str, str] = {}
         results = []
         for candidate in action()["runs"]["steps"]:
-            if "run" not in candidate:
+            if "run" not in candidate or not selected(candidate, inputs):
                 continue
             done = subprocess.run(
                 ["bash", "-c", render(candidate["run"], inputs, outputs)],
@@ -272,11 +303,28 @@ class TestTheActionEndToEnd:
                     outputs[key] = value
             results.append((candidate["name"], done.returncode))
 
+        ran = [name for name, _ in results]
+        assert "install djaudit" not in ran, f"install was requested off but ran: {ran}"
         assert (tmp_path / "out.sarif").exists(), "the report must exist by the end"
         assert results[-1][1] == 1, f"the last step must fail on findings: {results}"
         assert all(code == 0 for _, code in results[:-1]), (
             f"nothing before the verdict may fail, or the upload is skipped: {results}"
         )
+
+    def test_install_is_selected_when_it_is_asked_for(self) -> None:
+        """The contrast, so `selected` cannot be quietly always-false.
+
+        Without this the previous test would pass just as happily against a
+        condition evaluator that skipped every step it was shown.
+        """
+        install = step("install djaudit")
+
+        assert selected(install, defaults() | {"install": "true"})
+        assert not selected(install, defaults() | {"install": "false"})
+
+    def test_the_audit_step_is_not_conditional(self) -> None:
+        """A skipped audit would leave the verdict reading a stale report."""
+        assert selected(step("audit"), defaults() | {"install": "false"})
 
 
 class TestTheDocumentedInterface:

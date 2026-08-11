@@ -139,8 +139,10 @@ class TestTheVersionHasOneSource:
     def test_a_version_we_would_not_know_how_to_tag(
         self, tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        edit(tree / MODULE, '__version__ = "0.1.0"', '__version__ = "0.1.0+local"')
-        monkeypatch.setattr(check_release, "__version__", "0.1.0+local")
+        edit(
+            tree / MODULE, f'__version__ = "{__version__}"', f'__version__ = "{__version__}+local"'
+        )
+        monkeypatch.setattr(check_release, "__version__", f"{__version__}+local")
         assert "is not a release version we know how to tag" in complaint(capsys)
 
 
