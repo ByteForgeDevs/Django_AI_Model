@@ -9097,6 +9097,38 @@ conversation.
     with `install: false`, with a contrast proving the condition evaluator is
     not simply skipping everything.
 
+  **Two further defects surfaced while closing the release loop**, both of the
+  same kind: a documented or generated version with nothing holding it to
+  `__version__`.
+
+  - **The changelog could not report a contract change in this repository.**
+    `contract_changes(None)` compared the ledger against itself, so it always
+    returned nothing, and the gate demanding those notes appear could never
+    fire. Both were dead code that read as working — the schema 2 bump above
+    produced no upgrade note at all. The cause was one argument meaning two
+    things: `commits(None, ...)` reads a missing tag as "nothing has shipped"
+    and returns the entire history, so the same section claimed all 228 commits
+    were unreleased while claiming the contract they ship was not new. `None`
+    now compares against an empty ledger. This is the window in which people
+    install from git, which is exactly when a schema bump needs explaining.
+
+  - **The docs told people to install a version that no longer exists.**
+    `docs/github-action.md` pinned `@v0.1.0` twice and `docs/pre-commit.md`
+    `rev: v0.1.0`, at version 0.2.0. Those strings are copied verbatim into
+    someone else's workflow, so they decide which djaudit that person runs.
+    All ten gate scripts passed with them wrong; replacing both with `v9.9.9`
+    and rerunning left both gates green. `test_the_example_pins_a_version`
+    looked like coverage and was not — it asserts the example matches
+    `@v\d+\.\d+\.\d+`, so a *wrong* version satisfies it, which it did for the
+    whole life of 0.1.0. Both gates now compare every documented rev against
+    `__version__`.
+
+  *Verified:* 5299 tests; ruff and mypy clean; ten fixture evals passing; 100%
+  precision on all three corpora with zero regressions; five un-fix controls
+  across the three changed scripts, all caught. The timing gate reads 3.69s
+  against its 3.5s budget on this machine — `main` measures 3.72s under the
+  same load, so the overrun is the shared machine, not this branch.
+
 ### Step 7.3 — Configuration
 
 **Amended.** This step did not exist. The original 7.3.4 promised a
@@ -9167,7 +9199,7 @@ codebase the honest answer involves exclusions.
 | 4 | Migration safety and live tier | 6 | 28 | **Complete** (PR #7) — `DJM-001`…`DJM-010`, the live tier, and lock classification measured against a real `pg_locks` |
 | 5 | Portability and external adapters | 4 | 20 | **Complete** — `DJX-001`…`DJX-009`, two external adapters behind `--external`, 100% precision on three real targets |
 | 6 | LLM layer | 5 | 19 | **Complete** (PR #6) — **pulled forward, ran after Phase 3** |
-| 7 | Distribution | 4 | 13 | In progress — step 7.1 under way |
+| 7 | Distribution | 4 | 13 | In progress — steps 7.1 and 7.2 complete (release workflow, GitHub Action, pre-commit hooks, changelog, container image); 7.3 next |
 | | **Total** | **53** | **238** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
