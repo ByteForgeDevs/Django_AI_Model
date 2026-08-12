@@ -1,0 +1,44 @@
+{
+  "note": "Provenance: no vendor API was called to produce this corpus. tests/fixtures/generation/*/naive is Django written by a language model with no auditor in the room; */repaired is the same model's second pass with the finding list in front of it. Both are replayed through the real Loop by scripts/generation_probe.py. This measures the defect density of unaudited LLM Django and the loop's mechanics. It does not measure whether any particular vendor's model produces the repaired version on demand.",
+  "measured_with": "djaudit 0.4.0, min_severity=low, min_confidence=firm",
+  "apps": {
+    "billing": {
+      "description": "Invoices for customers, each with line items. A customer sees only their own invoices.",
+      "naive_rules": [
+        "DJA-002",
+        "DJA-002",
+        "DJA-004",
+        "DJA-008",
+        "DJA-008",
+        "DJD-001",
+        "DJD-002"
+      ],
+      "repaired_rules": []
+    },
+    "blog": {
+      "description": "Posts with comments. Drafts are visible only to their author; published posts are readable by any signed-in user.",
+      "naive_rules": [
+        "DJA-002",
+        "DJA-002",
+        "DJA-004",
+        "DJA-004",
+        "DJA-008",
+        "DJA-008",
+        "DJD-002"
+      ],
+      "repaired_rules": []
+    },
+    "support": {
+      "description": "Support tickets with threaded replies and a subject search. A reporter sees only their own tickets.",
+      "naive_rules": [
+        "DJA-002",
+        "DJA-002",
+        "DJA-004",
+        "DJA-008",
+        "DJA-008",
+        "DJI-001"
+      ],
+      "repaired_rules": []
+    }
+  }
+}

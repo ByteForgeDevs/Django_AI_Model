@@ -79,6 +79,16 @@ def load_ground_truth(directory: Path) -> list[ReviewedFinding]:
     for path in sorted(directory.glob("*.json")):
         document = json.loads(path.read_text(encoding="utf-8"))
         target = str(document.get("target", path.stem))
+        # A file dropped in here that is not a triage corpus used to surface as
+        # a bare `KeyError: 'findings'` from inside the scorer, naming neither
+        # the file nor what was wrong with it. Corpora live at the top level
+        # and everything else lives in a subdirectory, so say that.
+        if "findings" not in document:
+            raise ValueError(
+                f"{path} has no 'findings' key, so it is not a triage corpus. "
+                f"Benchmark data of other kinds belongs in a subdirectory of "
+                f"{path.parent}, next to graph/ and subsumption/."
+            )
         for entry in document["findings"]:
             findings.append(
                 ReviewedFinding(
