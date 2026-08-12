@@ -8,16 +8,18 @@ caveat that the minor carries breakage below `1.0.0`. `docs/versioning.md`
 explains what counts as a breaking change to the report schema and to
 fingerprints, and therefore to any baseline you have committed.
 
-## Unreleased (0.2.0)
+## Unreleased (0.3.0)
 
 ### Upgrading
 
 - **Report schema 1.** The JSON report shape or its enum vocabularies changed; see `docs/versioning.md`.
 - **Report schema 2.** The JSON report shape or its enum vocabularies changed; see `docs/versioning.md`.
+- **Report schema 3.** The JSON report shape or its enum vocabularies changed; see `docs/versioning.md`.
 - **Fingerprints are now `djaudit/v1`.** Finding identity changed, so existing baseline files no longer match and must be regenerated with `djaudit run --write-baseline`, or every finding they held will be reported as new.
 
 ### Added
 
+- **BREAKING** **config:** exclude paths by filtering findings, not by skipping files (0493c244)
 - **config:** read [tool.djaudit], and ask click who set what (9acc37cf)
 - **BREAKING** **container:** build the image from source, so a tag cannot publish other code (e3228744)
 - **pre-commit:** audit the project, because auditing the diff finds nothing (715df392)
