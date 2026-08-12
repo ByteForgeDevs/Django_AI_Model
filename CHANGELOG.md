@@ -220,6 +220,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Documentation
 
+- **rules:** document how to write a rule, by running the example (3d264183)
 - **rules:** index every rule, and verify the anchors actually land (8311a710)
 - **guide:** write the adoption path, and gate every command in it (3761a5ed)
 - **config:** derive the configuration reference's contents from the code (cde7ffe5)
