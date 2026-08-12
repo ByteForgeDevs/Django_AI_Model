@@ -9718,6 +9718,93 @@ URL-scheme check and **5 tests**, including a control.
 
 ---
 
+# Phase 9 — Reading the findings without a terminal
+
+Every phase so far has assumed its reader is at a shell. The terminal reporter
+is the default, JSON is for machines, SARIF is for GitHub — and all three
+require a reader who runs commands, keeps a checkout, and knows what
+`--min-confidence` does.
+
+That excludes most of the people a security finding needs to reach. The
+engineering manager deciding whether a release ships, the contractor handed a
+legacy codebase, the reviewer who was sent a link — none of them are going to
+`uv sync` a static analyser to read twenty-nine findings.
+
+**What this phase does not change.** No new rule, no new analysis, no new
+dependency. `--format html` is a fourth reporter behind the same
+`render(result, verdicts) -> str` signature the other three already implement,
+rendering the payload `json_reporter.build` already produces. The two formats
+therefore cannot disagree about a run, which is the property that makes the
+report quotable: CI gates on the JSON, and the HTML is the same numbers.
+
+**Why the escaping is the interesting part.** djaudit parses but never executes
+the audited project, and that guarantee is what makes it safe to point at code
+nobody trusts. A report that embeds source excerpts and is then opened in a
+browser can give that guarantee away in a single line: a project containing
+`</script><script>…</script>` in a string literal would have its code run by
+whoever read the report about it. The finding an attacker most wants unread is
+the one describing their own code.
+
+So the report has two structural defences rather than one habit. Every value
+reaching the document goes through `html.escape(quote=True)`, and the embedded
+JSON escapes `<`, `>` and `&` to their `\u` forms so no string in the data can
+terminate the element holding it. Separately, the JavaScript never constructs
+DOM from data at all — filtering toggles `hidden` on elements already present,
+so there is no `innerHTML` for an escaped string to be un-escaped into.
+
+### Step 9.1 — The HTML report
+
+- **9.1.1** — `--format html`, a single self-contained file.
+  **Done.** `src/djaudit/reporters/html_reporter.py`, built on
+  `json_reporter.build` so the two formats render the same run. No CDN, no
+  webfont, no analytics: the report opens with a double-click, works on an
+  air-gapped machine, and tells nobody that it was read. Findings group by
+  severity and filter client-side by family, severity and confidence.
+
+  Wiring it up found a latent defect. Two call sites — `_emit` and `triage` —
+  chose their renderer with `json_reporter if fmt is JSON else sarif`, a
+  ternary correct only while exactly two non-terminal formats existed. A third
+  would have silently emitted SARIF for `--format html`. Replaced with an
+  explicit `_RENDERERS` mapping, exhaustive by construction.
+
+- **9.1.2** — Escaping proven against hostile input, with failure controls.
+  **Done.** `tests/test_html_report.py`. The report is rendered from findings
+  carrying `</script><script>alert(1)</script>`, an attribute-breaking
+  `" onmouseover="`, and a bare `<img onerror>` in every string field that
+  reaches the page — rule id, title, message, rationale, remediation, path,
+  snippet, evidence, references and properties.
+
+  The assertions do not check that strings look escaped. The document is fed to
+  `html.parser` and the resulting **elements** are counted, because a substring
+  check is also satisfied by a reporter that mangles its input, whereas
+  `script` elements == 2 can only hold if the injected markup never became
+  markup.
+
+  Both defences carry a mutation control, per risk 12. Replacing `_esc` with
+  `str` must push the script count above two and must create an `on*`
+  attribute; replacing `_embed` with plain `json.dumps` must make the payload
+  fail to parse. Verified — the mutated payload truncates at
+  `"rule_id": "DJS-001`, exactly where a browser stops reading JSON and starts
+  reading markup.
+
+  A fourth test asserts the payload is still *shown*, escaped rather than
+  dropped, since a reporter that deleted anything suspicious would pass all
+  three controls above and hide the finding.
+
+- **9.1.3** — The report states what it could not check.
+  **Done.** `docs/report.md`, gated by `check_docs_commands.py`. A prettier
+  report that omits caveats is worse than plain text, so `below_threshold`,
+  `degraded`, `diagnostics`, `rule_errors` and `parse_errors` all render, and
+  an empty report says no findings were at or above the threshold rather than
+  implying the project is clean.
+
+  The below-threshold assertion is made against a `--min-severity high` run
+  rather than a default one, because the label renders even when the count is
+  zero — a test for the words would have passed against a report that always
+  printed `0`.
+
+---
+
 ## 7. Risk register
 
 | # | Risk | Likelihood | Impact | Mitigation |
@@ -9752,7 +9839,8 @@ URL-scheme check and **5 tests**, including a control.
 | 6 | LLM layer | 5 | 19 | **Complete** (PR #6) — **pulled forward, ran after Phase 3** |
 | 7 | Distribution | 4 | 13 | **Complete** — all 13 substeps. Release workflow, GitHub Action, pre-commit hooks, changelog, container image, `[tool.djaudit]` config with path exclusions and severity overrides, and four gated documentation pages. Carries schema 1 → 4 and version 0.1.0 → 0.4.0, the project's first breaking releases |
 | 8 | Generation | 2 | 9 | **Complete** — an MCP server validated against the reference SDK client, and a generate-audit-repair loop that clears 20 of 20 findings across a 3-app corpus while structurally refusing all three degenerate optima |
-| | **Total** | **55** | **247** | |
+| 9 | Reading the findings without a terminal | 1 | 3 | **Complete** — `--format html`, one self-contained file rendered from the same payload the JSON format emits. Escaping proven against hostile input by element count, both defences mutation-controlled |
+| | **Total** | **56** | **250** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
