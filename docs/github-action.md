@@ -59,6 +59,40 @@ run, and the action stops there rather than uploading nothing.
 | `sarif-file` | Path to the report, written whether or not the audit passed. |
 | `exit-code` | `0` if nothing reached `fail-on`, `1` if something did, anything else means djaudit failed to run. |
 
+## Getting an HTML report as well
+
+The action hardcodes `--format sarif`, because SARIF is what code scanning
+consumes. **Do not try to change that through `args`.** The flag would be
+passed twice and the last one wins, which means `--format html` in `args`
+writes an HTML document into the file named `djaudit.sarif`. The action's own
+"did it write a report" guard is satisfied — the file exists — so the run
+proceeds to the upload step and fails there, or uploads something that is not
+SARIF. Verified: passing `--format` twice produces the second format, silently.
+
+Run a second step instead. It is a second audit, so it costs the runtime again,
+but the two are independent and the HTML one cannot break the upload:
+
+```yaml
+      - uses: ByteForgeDevs/Django_AI_Model@v0.4.0
+
+      - name: Render a readable report
+        if: always()
+        run: djaudit run . --format html -o djaudit-report.html || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: djaudit-report
+          path: djaudit-report.html
+```
+
+`install: true` on the first step already put djaudit on `PATH`, so the second
+step does not reinstall it. `if: always()` on both, because the report is most
+wanted on the run that failed, and `|| true` because `djaudit run` exits `1`
+when it finds something and that must not fail the job twice.
+
+See [report.md](report.md) for what the report contains.
+
 ## Adopting on an existing codebase
 
 A mature codebase will not be clean on the first run, and a job that fails from

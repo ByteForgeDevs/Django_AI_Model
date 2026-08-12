@@ -9803,6 +9803,41 @@ so there is no `innerHTML` for an escaped string to be un-escaped into.
   zero — a test for the words would have passed against a report that always
   printed `0`.
 
+- **9.1.4** — The format propagated through the reference documentation.
+  **Done.** A new output format is not documented by giving it a page. It is
+  documented by fixing every page that enumerates the formats, and one of those
+  was left saying something false: `configuration.md` listed the `format` key
+  as accepting `"terminal"`, `"json"` and `"sarif"`, which is a closed list a
+  reader is entitled to treat as exhaustive. `format = "html"` in a
+  `pyproject.toml` worked from the day the reporter landed; the page said it
+  did not exist.
+
+  `check_config_doc.py` passed throughout, because it checked that every key
+  the code accepts is documented and never read the values cell of the row it
+  had just matched. Extended to compare the documented values of the four keys
+  with closed sets — `format`, `min_severity`, `min_confidence`, `family` —
+  against the enums themselves, in both directions: a value the code accepts
+  and the page omits, and a value the page offers and the code rejects. Proven
+  against the defect it exists to catch by restoring the old row (caught) and
+  by adding `"pdf"` (caught). 19 enumerated values now gated.
+
+  Four other pages were incomplete rather than wrong. `live-tier.md` explained
+  that the consent notice goes to stderr because `json` and `sarif` write a
+  document to stdout — true of `html` too, and a notice landing in the middle
+  of it would corrupt the report it was warning about. `versioning.md` gained
+  the stability contract: the report's markup is explicitly *not* covered,
+  exactly as the terminal reporter is not, while the payload embedded at
+  `id="djaudit-payload"` is the `--format json` bytes and so *is* covered by
+  `SCHEMA_VERSION`. `getting-started.md` and `container.md` gained the command.
+
+  `github-action.md` gained a refusal rather than a feature. The action
+  hardcodes `--format sarif`, and passing `--format html` through its `args`
+  input does not fail — the flag is accepted twice and the last wins, so an
+  HTML document is written to a file named `djaudit.sarif`, the action's
+  "did it write a report" guard is satisfied because the file exists, and the
+  failure surfaces later at the upload as something that looks unrelated.
+  Measured, then documented as a footgun with a second-step recipe instead.
+
 ---
 
 ## 7. Risk register
@@ -9820,7 +9855,7 @@ so there is no `innerHTML` for an escaped string to be un-escaped into.
 | 9 | LLM layer erodes determinism | Medium | High | Model may never create or suppress a finding; all output labelled |
 | 10 | Benchmark repositories drift | Low | Low | Pinned by commit SHA; updated deliberately |
 | 11 | A project djaudit cannot read scores as a clean one | Medium | High | Discovery emits a blocking diagnostic rather than returning quietly, and `run`, `eval` and `benchmark` all refuse to exit 0 on one. Pinned by tests using a class-configured project, which is the shape we detect and cannot yet parse |
-| 12 | A gate passes because what it checks is absent | High | High | Three found and fixed in Phase 2 alone — a doc generator hardcoded to one family, a triage citation nothing verified, a plan checker that only read the plan. Two more in Phase 3: the timing-gate test that asserted a result was dead by end of loop, which rebinding achieves anyway, and 3.1.2's reachability test, which put an unconditional rebind after the branch and so passed with the reachability filter deleted. Every new gate must be shown failing on the defect it exists to catch, in the commit that adds it. Phase 5 adds two more: `check_adapters_doc.py` compared a subsumption pairing by asking whether both rule names appeared anywhere in the note, and the note states that pairing twice — so rewriting one of the two left the note self-contradictory and the gate green; and three of the controls written against it changed one of two statements of the same fact, which leaves the fact true and makes a working gate look weak. **A control must remove every statement of what it is testing** |
+| 12 | A gate passes because what it checks is absent | High | High | Three found and fixed in Phase 2 alone — a doc generator hardcoded to one family, a triage citation nothing verified, a plan checker that only read the plan. Two more in Phase 3: the timing-gate test that asserted a result was dead by end of loop, which rebinding achieves anyway, and 3.1.2's reachability test, which put an unconditional rebind after the branch and so passed with the reachability filter deleted. Every new gate must be shown failing on the defect it exists to catch, in the commit that adds it. Phase 5 adds two more: `check_adapters_doc.py` compared a subsumption pairing by asking whether both rule names appeared anywhere in the note, and the note states that pairing twice — so rewriting one of the two left the note self-contradictory and the gate green; and three of the controls written against it changed one of two statements of the same fact, which leaves the fact true and makes a working gate look weak. **A control must remove every statement of what it is testing**. Phase 9 adds a shape none of the earlier ones had: `check_config_doc.py` matched a documentation row by its key and never read the rest of that row, so it verified for four phases that `format` was documented while the values it was documented as accepting were wrong. **A gate that locates the right line is not a gate that read it** |
 | 13 | A detector is measured only where it fires, so its noise floor is never seen | Medium | High | **Run the detector with its real signal removed and count what survives.** 3.1.3's queryset tracker was first measured by accident against an empty model graph, where every remaining detection was by construction spurious — which is how a rule claiming `self.get(...)` on a DRF view and `self.update()` on a form as querysets was caught, 33× over-detection on a 12-model project. Precision measured only on a populated graph would have buried it in true positives. The empty-input control is cheap, is now a test, and is run deliberately for each new detector |
 | 14 | A local timing number is quoted as the budget position | High | Medium | The dev box runs at load ~7 on 8 cores, and the same unchanged commit measures NetBox at 7.40 s and 8.96 s an hour apart — a 21% swing from load alone, verified by stashing the working tree and re-running. CI measured the same commit at 5.05 s. **Local timings are only ever valid as a same-session A/B against a stashed tree; CI is the only authoritative budget position.** Commit messages before `3.1.3` quote local figures as though they were the gate's, which overstates the deficit by up to 75% |
 
@@ -9839,8 +9874,8 @@ so there is no `innerHTML` for an escaped string to be un-escaped into.
 | 6 | LLM layer | 5 | 19 | **Complete** (PR #6) — **pulled forward, ran after Phase 3** |
 | 7 | Distribution | 4 | 13 | **Complete** — all 13 substeps. Release workflow, GitHub Action, pre-commit hooks, changelog, container image, `[tool.djaudit]` config with path exclusions and severity overrides, and four gated documentation pages. Carries schema 1 → 4 and version 0.1.0 → 0.4.0, the project's first breaking releases |
 | 8 | Generation | 2 | 9 | **Complete** — an MCP server validated against the reference SDK client, and a generate-audit-repair loop that clears 20 of 20 findings across a 3-app corpus while structurally refusing all three degenerate optima |
-| 9 | Reading the findings without a terminal | 1 | 3 | **Complete** — `--format html`, one self-contained file rendered from the same payload the JSON format emits. Escaping proven against hostile input by element count, both defences mutation-controlled |
-| | **Total** | **56** | **250** | |
+| 9 | Reading the findings without a terminal | 1 | 4 | **Complete** — `--format html`, one self-contained file rendered from the same payload the JSON format emits. Escaping proven against hostile input by element count, both defences mutation-controlled |
+| | **Total** | **56** | **251** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this

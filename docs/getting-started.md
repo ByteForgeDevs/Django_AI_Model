@@ -184,6 +184,17 @@ $ djaudit run . --baseline .djaudit-baseline.json --fail-on high
 everything and failing on `high` is a good default, because it keeps the
 `medium` findings visible without blocking anyone.
 
+## Send it to someone who does not use a terminal
+
+```
+$ djaudit run . --format html -o report.html
+```
+
+One self-contained file. It opens with a double-click, fetches nothing when it
+does, and filters by family, severity and confidence in the page. It renders
+the same payload as `--format json`, so it cannot disagree with the report your
+CI gates on. See [report.md](report.md).
+
 ## Then tune, in this order
 
 Reach for these when the defaults are wrong for your project, and prefer the
