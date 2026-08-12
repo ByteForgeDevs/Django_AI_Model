@@ -57,7 +57,7 @@ $ djaudit explain DJP-001
 Every finding carries a rule id, a `file:line`, machine-generated evidence, and
 a remediation. `explain` prints the rule's full reasoning, what it looks for,
 and what it deliberately does not claim. The rule reference in
-[rules/](rules/) is the same material for every rule at once, generated from
+[rules/README.md](rules/README.md) is the same material for every rule at once, generated from
 the rules themselves so it cannot drift.
 
 Confidence and severity are separate axes and are not interchangeable. A

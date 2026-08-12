@@ -37,7 +37,7 @@ the project has a reason — a value supplied by the deployment, a guard the
 static tier cannot see, a bearer credential the endpoint exists to redeem. That
 counts as a true positive here, because the rule correctly reported what it can
 see. What it cannot see is written down for every rule in
-[`docs/rules/`](docs/rules/).
+[`docs/rules/`](docs/rules/README.md).
 
 ### The N+1 numbers, stated plainly
 

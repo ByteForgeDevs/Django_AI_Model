@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import typer.core
 import typer.main
 
 from djaudit.cli import app
@@ -36,9 +37,16 @@ ROW = re.compile(r"^\|\s*`([a-z_]+)`\s*\|", re.MULTILINE)
 FLAG = re.compile(r"`(--[a-z-]+)`")
 
 
-def _run_options() -> set[str]:
+def _group() -> typer.core.TyperGroup:
+    """`get_command` is typed as returning a bare `Command`; djaudit's is a group."""
     group = typer.main.get_command(app)
-    run = group.commands["run"]
+    if not isinstance(group, typer.core.TyperGroup):
+        raise SystemExit("::error::djaudit is no longer a command group")
+    return group
+
+
+def _run_options() -> set[str]:
+    run = _group().commands["run"]
     return {opt for param in run.params for opt in param.opts if opt.startswith("--")}
 
 

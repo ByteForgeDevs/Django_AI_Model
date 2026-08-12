@@ -34,6 +34,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import typer.core
 import typer.main
 
 from djaudit.cli import app
@@ -49,11 +50,14 @@ PLACEHOLDER = re.compile(r"[<>${}]")
 
 
 def _click_command() -> Any:
+    """`Any` because the concrete class lives in typer's vendored `_click`."""
     return typer.main.get_command(app)
 
 
 def _subcommands() -> dict[str, Any]:
     group = _click_command()
+    if not isinstance(group, typer.core.TyperGroup):
+        raise SystemExit("::error::djaudit is no longer a command group")
     return dict(group.commands)
 
 
@@ -174,8 +178,12 @@ def _check_links(path: Path, text: str, problems: list[str]) -> int:
         if not anchorless:
             continue
         checked += 1
-        if not (path.parent / anchorless).exists():
+        resolved = path.parent / anchorless
+        if not resolved.exists():
             problems.append(f"{path.relative_to(ROOT)}: link to {target!r} does not resolve")
+        elif resolved.is_dir():
+            # A directory link renders as a file listing, which is not a page.
+            problems.append(f"{path.relative_to(ROOT)}: link to {target!r} is a directory")
     return checked
 
 

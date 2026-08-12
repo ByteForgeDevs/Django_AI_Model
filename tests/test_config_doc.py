@@ -10,13 +10,16 @@ feeding it the defect it exists to catch.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
 
-from scripts import check_config_doc
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import check_config_doc  # noqa: E402
+
 CONFIG_DOC = ROOT / "docs" / "configuration.md"
 
 

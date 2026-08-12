@@ -149,6 +149,6 @@ Two consequences worth stating plainly:
   than netting it off.
 
 Per-rule limits, written for each rule individually, are in
-[`docs/rules/`](../rules/). Those are the authority for what a specific rule
+[`docs/rules/`](../rules/README.md). Those are the authority for what a specific rule
 misses; this note is the authority for what the substrate underneath them all
 cannot see.
