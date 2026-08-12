@@ -187,6 +187,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Fixed
 
+- **packaging:** ship py.typed, so the annotations leave the repository (5f135cf5)
 - **docs:** gate the versions the docs tell people to install (aa150376)
 - **changelog:** read an absent tag the same way twice (f07521a1)
 - **adapters:** call a tool by its name, not by the path it lives at (0550e926)
