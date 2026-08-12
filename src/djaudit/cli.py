@@ -19,16 +19,18 @@ import sys
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.syntax import Syntax
 from rich.table import Table
 
 from djaudit import __version__, adapters, engine
 from djaudit.adapters import Adapter
 from djaudit.baseline import Baseline, BaselineError
+from djaudit.config import ConfigError, FileConfig, from_pyproject
 from djaudit.context import ProjectContext
 from djaudit.discovery import build_context
 from djaudit.live import consent
@@ -61,6 +63,7 @@ EXIT_OK = 0
 EXIT_FINDINGS = 1
 EXIT_ERROR = 2
 
+
 # A run with hundreds of corpus verdicts refuses hundreds of times, and the
 # refusals are all the same sentence; showing every one buries the diffs above.
 _REFUSALS_SHOWN = 5
@@ -81,12 +84,40 @@ app = typer.Typer(
 
 
 def _fail(message: str) -> None:
-    Console(stderr=True).print(f"[bold red]error:[/bold red] {message}")
+    # Escaped, not interpolated raw: a message naming a TOML table reads as
+    # `[tool.djaudit] ...`, and rich would take that for a style tag and print
+    # the sentence without the part identifying where the problem is.
+    Console(stderr=True).print(f"[bold red]error:[/bold red] {escape(message)}")
     raise typer.Exit(EXIT_ERROR)
+
+
+# CLI parameter name -> `[tool.djaudit]` key, where the two differ.
+_CONFIG_FIELD = {"output_format": "format", "baseline_path": "baseline"}
+
+
+def _resolve(ctx: typer.Context, settings: FileConfig, typed: dict[str, Any]) -> dict[str, Any]:
+    """The command line if it said anything, otherwise the file.
+
+    Asking click where each value came from is the whole point. For an option
+    nobody mentioned, `typed` already holds that option's default, so a merge
+    that asked "is this still the default?" could not tell an unset flag from
+    one set to the same value -- and every setting in the file would lose to a
+    default nobody typed, silently.
+    """
+    merged: dict[str, Any] = {}
+    for name, value in typed.items():
+        stated = getattr(settings, _CONFIG_FIELD.get(name, name))
+        if isinstance(stated, tuple):
+            stated = list(stated)
+        source = ctx.get_parameter_source(name)
+        spoken = source is not None and source.name != "DEFAULT"
+        merged[name] = value if stated is None or spoken else stated
+    return merged
 
 
 @app.command()
 def run(
+    cli_ctx: typer.Context,
     path: Annotated[
         Path,
         typer.Argument(help="Path to the Django project to audit."),
@@ -162,6 +193,38 @@ def run(
         _fail(f"path does not exist: {path}")
     if not path.is_dir():
         _fail(f"path is not a directory: {path}")
+
+    try:
+        settings = from_pyproject(path / "pyproject.toml")
+    except ConfigError as exc:
+        _fail(str(exc))
+
+    resolved = _resolve(
+        cli_ctx,
+        settings,
+        {
+            "output_format": output_format,
+            "output": output,
+            "min_severity": min_severity,
+            "min_confidence": min_confidence,
+            "fail_on": fail_on,
+            "family": family,
+            "select": select,
+            "ignore": ignore,
+            "baseline_path": baseline_path,
+            "live": live,
+            "external": external,
+        },
+    )
+    output_format, output = resolved["output_format"], resolved["output"]
+    min_severity, min_confidence = resolved["min_severity"], resolved["min_confidence"]
+    fail_on, family = resolved["fail_on"], resolved["family"]
+    select, ignore = resolved["select"], resolved["ignore"]
+    baseline_path, live, external = (
+        resolved["baseline_path"],
+        resolved["live"],
+        resolved["external"],
+    )
 
     baseline: Baseline | None = None
     if baseline_path is not None:

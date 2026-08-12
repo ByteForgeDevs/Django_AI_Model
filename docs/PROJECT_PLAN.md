@@ -9149,7 +9149,57 @@ codebase the honest answer involves exclusions.
 - **7.3.1** — `[tool.djaudit]` in `pyproject.toml`: discovery, validation, and
   the precedence rule against CLI flags. The subtle part is not reading TOML,
   it is that a flag left unset must be distinguishable from a flag set to its
-  own default, or config silently loses to a default nobody typed.
+  own default, or config silently loses to a default nobody typed. **DONE.**
+
+  `src/djaudit/config.py` reads `[tool.djaudit]` from the audited project's
+  `pyproject.toml`, the same file `[tool.djaudit.llm]` already lives in. Eleven
+  keys: the three thresholds, the three rule filters, `baseline`, `format`,
+  `output`, and the two tier switches. Every field on `FileConfig` defaults to
+  `None`, because "not stated" has to survive as far as the merge — a field
+  holding `Severity.LOW` would be indistinguishable from a project that asked
+  for `low`.
+
+  **Precedence asks click, not the value.** `--min-severity` defaults to `low`,
+  so by the time the function body runs, an unmentioned flag and an explicit
+  `--min-severity low` are the same object. `ctx.get_parameter_source(name)`
+  is the only thing that separates them. A merge written the obvious way —
+  compare against the default — passes every unit test of the parser and then
+  loses every setting in the file to a default nobody typed. It is in the
+  un-fix controls as its own case for that reason.
+
+  *Measured through the CLI, by counting findings on the planted-defect
+  fixture:* 24 findings by default; `min_severity = "critical"` in the file
+  cuts it to 3; `--min-severity low` on top restores 24; `min_confidence =
+  "tentative"` widens it to 27.
+
+  **The file cannot turn on a tier that executes the target.** This is read out
+  of the repository under audit, so it is exactly as trustworthy as that
+  repository — and the static tier's promise, stated three times in this plan,
+  is that it never imports or executes what it is pointed at. A file that could
+  set `live = true` would move that decision from the operator to the author of
+  the code being audited. `live` and `external` may be switched off here and
+  never on; the refusal names the flag to use instead, because a refusal
+  without an alternative is a dead end.
+
+  `write_baseline` is deliberately not a key at all. As a persistent setting it
+  would record every finding and exit zero on every run — an audit that always
+  passes, which is the one failure this tool must not have.
+
+  **An unknown key is an error**, with a suggestion: `min_severty` names
+  `min_severity`, and `min-severity` is told the key is spelled with an
+  underscore, since the flag is hyphenated and that is the obvious wrong guess.
+  Wrong types and bad enum values name what was given and list what is allowed.
+
+  **A defect the messages themselves exposed.** Every string this module
+  produces contains `[tool.djaudit]`, which is also valid rich markup, and
+  `_fail` interpolated its argument into a markup string. The user was told
+  `pyproject.toml:  min_severity must be a string` — the renderer had silently
+  eaten the part naming the table. `_fail` now escapes. The same latent bug
+  would have removed any bracketed path from any error the CLI reports.
+
+  *Verified:* 46 config tests, 121 with the CLI suite; ruff and mypy clean;
+  nine un-fix controls, all caught — including one that reverts the merge to a
+  default comparison and one that stops escaping the error.
 - **7.3.2** — Per-path exclusions. The design question is *where* they apply:
   excluding files from parsing would remove models from the graph and change
   cross-file analysis in ways nobody asked for, so exclusions are expected to
