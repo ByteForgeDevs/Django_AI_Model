@@ -9642,25 +9642,79 @@ editor rather than typed by a person who chose to run it.
 
 ### Step 8.2 — The generation loop
 
-Not started. Recorded so the shape is agreed before it is built, not to claim
-it exists.
+**Complete.** `djaudit generate` takes a specification, asks a model for a
+Django app, audits it with the same 87 rules, hands the findings back, and
+audits again.
 
-- **8.2.1** — A real `Provider`. The seam has been in place since Phase 6 —
-  `Provider` is a Protocol, `NullProvider` is its only implementation, and
-  `Budget`, `Cached` and `ResponseSchema` already wrap it. What is missing is
-  one HTTP client. It must keep the existing refusal to accept an inline
-  `api_key`, taking `api_key_env` only.
-- **8.2.2** — `djaudit generate`: a specification in, Django source out, then
-  audit, repair, and audit again until clean or the budget is spent. Built on
-  `llm/verify.py`, which already applies a patch to a disposable copy, checks
-  every changed file still parses, checks the targeted finding is gone, checks
-  no new finding appeared, and bisects when a batch fails.
-- **8.2.3** — A ceiling on the loop. Repair that does not converge must stop
-  and say so rather than iterate against a budget, and a repair that removes a
-  finding by deleting the feature is a failure, not a fix.
-- **8.2.4** — Measurement. The claim "generated code is audited" is worth
-  nothing without a before-and-after on a corpus of generated projects, scored
-  the way `eval` scores fixtures.
+- **8.2.1** — A real `Provider`. **Done** — `src/djaudit/llm/http.py`, an
+  OpenAI-compatible and Anthropic client on `urllib.request` with no new
+  dependencies. Retries only the five status codes worth retrying, never
+  retries a schema violation, and returns `Declined` rather than raising on
+  every failure, because every consumer already handles `Declined` and none
+  handles an exception. The credential is still taken as `api_key_env` only,
+  and `_scrub` removes it from any message before it is reported, because
+  vendors echo the key back inside a 401 body. **52 tests**, including a
+  control proving the scrubbing is not indiscriminate.
+- **8.2.2** — `djaudit generate`. **Done** — `src/djaudit/generate/`,
+  `scaffold.py` + `surface.py` + `loop.py`. The response schema declares
+  exactly five string fields, one per file, so a model **cannot** return a
+  sixth, or `settings.py`, or `../../etc/cron.d/anything` — there is no field
+  to put it in, and the reply is validated before anything reaches a filesystem
+  call. Boilerplate is written by djaudit. Every iteration materialises into a
+  disposable copy of the real project — auditing in isolation is not possible,
+  since half the rules need the settings module and the model graph — so a
+  failed run leaves the caller's project byte-identical.
+- **8.2.3** — A ceiling on the loop. **Done** — three stopping conditions, and
+  only one is a counter. Convergence stops when an iteration clears nothing.
+  Regression stops when an iteration *declares less* than the one before it,
+  which is the degenerate optimum of any audit-until-clean loop: an empty file
+  passes all 87 rules. Names are compared rather than counts, because deleting
+  `Order` and adding `OrderAudit` keeps the count and still loses the feature.
+  Suppression comments are rejected outright. `Outcome.writable` gates the
+  commit, so `regressed`, `suppressed`, `unparseable` and `declined` cannot be
+  written. **50 tests** in `tests/test_generate.py`.
+- **8.2.4** — Measurement. **Done** — `scripts/generation_probe.py` against
+  `benchmarks/generation.json` and a three-app corpus in
+  `tests/fixtures/generation/`:
+
+  | app | before | after | cleared | outcome |
+  |---|---|---|---|---|
+  | billing | 7 | 0 | 7 | clean |
+  | blog | 7 | 0 | 7 | clean |
+  | support | 6 | 0 | 6 | clean |
+
+  **20 findings before, 0 after; 6.7 per app of unaudited LLM Django.** The
+  defects are the ordinary ones — `fields = "__all__"` on every serializer,
+  viewsets with no `permission_classes`, querysets returning every row
+  regardless of who asked, a `CharField(null=True)`, and one `%`-formatted SQL
+  string spliced from `request.query_params`. Nothing exotic, which is what
+  makes the density worth reporting.
+
+  **Provenance, stated plainly:** no vendor API was called to build that
+  corpus. The `naive/` code is Django written by a language model with no
+  auditor in the room; `repaired/` is the same model's second pass with the
+  finding list in front of it. That measures the defect density and the loop's
+  mechanics honestly. It does not measure whether a given vendor produces the
+  repair on demand.
+
+  The control is the load-bearing part: every app is also driven against a
+  gutted version, and the gate fails if the loop accepts one. Disabling the
+  regression check makes all three report `clean` and get written, and the gate
+  turns red — verified by mutation.
+
+**Verified end to end over a real socket.** The recorded-reply tests cannot
+prove the transport, so the command was run against a local OpenAI-compatible
+server replaying the corpus: real config parsing, real `Authorization` header,
+real `response_format: json_schema`, real schema validation, real audit, real
+write — and the gutted reply refused with nothing written.
+
+That run found a defect no unit test had. `base_url` was documented and passed
+to `http.build` from `config.extras`, but `from_pyproject` never populated
+`extras`, so the key was silently ignored and the request went to
+`api.openai.com` instead of the endpoint the file named. It failed in the one
+direction that matters: pointing djaudit at a private model would have sent the
+caller's source to a public vendor, silently. Fixed in `llm/config.py` with a
+URL-scheme check and **5 tests**, including a control.
 
 ---
 
@@ -9697,7 +9751,7 @@ it exists.
 | 5 | Portability and external adapters | 4 | 20 | **Complete** — `DJX-001`…`DJX-009`, two external adapters behind `--external`, 100% precision on three real targets |
 | 6 | LLM layer | 5 | 19 | **Complete** (PR #6) — **pulled forward, ran after Phase 3** |
 | 7 | Distribution | 4 | 13 | **Complete** — all 13 substeps. Release workflow, GitHub Action, pre-commit hooks, changelog, container image, `[tool.djaudit]` config with path exclusions and severity overrides, and four gated documentation pages. Carries schema 1 → 4 and version 0.1.0 → 0.4.0, the project's first breaking releases |
-| 8 | Generation | 2 | 9 | In progress — Step 8.1 complete: an MCP server over the existing engine, validated against the reference SDK client. Step 8.2, the generation loop, is specified and not started |
+| 8 | Generation | 2 | 9 | **Complete** — an MCP server validated against the reference SDK client, and a generate-audit-repair loop that clears 20 of 20 findings across a 3-app corpus while structurally refusing all three degenerate optima |
 | | **Total** | **55** | **247** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,

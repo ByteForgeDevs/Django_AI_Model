@@ -147,6 +147,29 @@ The point is that a model reviewing its own output uses the faculty that
 produced it, so the blind spot applies twice. An independent parser does not
 share it. See [`docs/mcp.md`](docs/mcp.md) for client configuration.
 
+## Have it write the app in the first place
+
+```bash
+djaudit generate "orders placed by customers, with line items" \
+  --app shop --into ~/src/mysite --write
+```
+
+`djaudit generate` asks a model for a Django app, audits the result with the
+same 87 rules, hands the findings back, and audits again. It needs credentials;
+nothing else in djaudit does.
+
+The loop has three degenerate optima and closes each one structurally rather
+than by asking the model nicely. It cannot write a file you did not ask for,
+because the response schema declares exactly five and rejects a sixth — so
+`settings.py` and `../../etc/cron.d/anything` have nowhere to go. It cannot
+delete the feature to clear the finding, because djaudit compares what each
+version declares and refuses an iteration that declares less. It cannot write
+`# djaudit: ignore`.
+
+Nothing is written until a run is accepted, and `--dry-run` is the default. See
+[`docs/generate.md`](docs/generate.md), including what "clean" does and does not
+prove.
+
 ## Severity and confidence are separate axes
 
 Severity is how much damage the finding does. Confidence is how sure we are it
