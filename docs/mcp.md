@@ -33,10 +33,11 @@ agent does the writing, and the repairing.
 The server is launched by the client, over stdin/stdout. You never run it
 yourself.
 
-Install djaudit so it has a stable path:
+Install djaudit so it has a stable path. There is no published release yet, so
+this is from a checkout:
 
 ```bash
-uv tool install djaudit
+uv tool install .
 ```
 
 Then confirm the command exists — the most common setup failure is a client

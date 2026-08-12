@@ -4,11 +4,18 @@ The image is for CI systems that will not install Python packages — a runner
 that has docker and nothing else, a pipeline that pins tools by digest, a
 security team that wants the analyzer isolated from the code it reads.
 
-If you can `pip install djaudit`, install it. The image buys isolation and a
+If you can install djaudit directly, do that instead — see
+[getting-started.md](getting-started.md). The image buys isolation and a
 pinned interpreter; it costs you a mount, a bind of your source tree, and the
 live tier.
 
 ## Getting it
+
+> **No release has been tagged yet**, and the image is published by the release
+> workflow, so the tag below does not exist on a registry today. Build it
+> locally from a checkout in the meantime — see
+> [Building it yourself](#building-it-yourself) below. Everything else on this
+> page describes the image as it is built.
 
 ```console
 $ docker pull ghcr.io/byteforgedevs/djaudit:0.4.0

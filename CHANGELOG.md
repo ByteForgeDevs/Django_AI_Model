@@ -225,6 +225,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Documentation
 
+- tell people how to actually run this, and stop pointing them at a 404 (c74d4bb0)
 - **generate:** what the loop refuses, and what "clean" does not prove (4c263bf9)
 - **configurations:** describe the shape, not the library (947e31c7)
 - **plan:** mark phase 7 complete (aa4aebc6)

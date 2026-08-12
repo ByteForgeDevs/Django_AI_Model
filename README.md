@@ -4,24 +4,25 @@ Django-aware static analysis. Audits an existing Django codebase and reports
 ranked, evidence-backed findings across settings hardening, injection, DRF
 authorization, ORM performance, migration safety and cross-database portability.
 
-**Status: Phase 3 in progress.** 67 rules — 27 settings-hardening (`DJS`), 15 API
+**Status: Phases 0–8 complete.** 87 rules — 28 settings-hardening (`DJS`), 15 API
 authorization and data exposure (`DJA`), 12 injection and untrusted input
-(`DJI`), 10 ORM performance (`DJP`), 3 data model design (`DJD`) — on top of a
-Django model graph, a DRF route graph and a taint-tracking dataflow pass built
-entirely from source.
+(`DJI`), 10 ORM performance (`DJP`), 10 migration safety (`DJM`), 9
+cross-database portability (`DJX`), 3 data model design (`DJD`) — on top of a
+Django model graph, a DRF route graph, a migration graph and a taint-tracking
+dataflow pass built entirely from source.
 
 Measured, in CI, on every commit:
 
 | | Result |
 |---|---|
-| Recall, on eight planted-defect fixtures | **100%** — 83 expected findings, 0 missed |
-| Precision, on the same fixtures | **100%** — 0 false positives, against 121 near-miss shapes that must stay silent |
-| Precision, on Healthchecks (653 files) | **100%** — 33 reported, all reviewed |
-| Precision, on NetBox (1213 files) | **100%** — 71 reported, all reviewed |
-| Precision, on pretix (1225 files) | **100%** — 141 reported, all reviewed |
+| Recall, on eleven planted-defect fixtures | **100%** — 104 expected findings, 0 missed |
+| Precision, on the same fixtures | **100%** — 0 false positives, against 169 near-miss shapes that must stay silent |
+| Precision, on Healthchecks (653 files) | **100%** — 41 reported, all reviewed |
+| Precision, on NetBox (1213 files) | **100%** — 76 reported, all reviewed |
+| Precision, on pretix (1225 files) | **100%** — 151 reported, all reviewed |
 | Model graph coverage, against each target's own migrations | **12/12**, **144/145**, **103/113** models — every gap attributed |
 | Crashes on any target | **0** rule errors |
-| Runtime | 1.7s on Healthchecks, 6s on NetBox, 15s on pretix |
+| Runtime | 3.8s on Healthchecks, 20s on NetBox, 25s on pretix |
 
 Precision is measured against three mature, well-audited open-source Django
 projects pinned to a commit SHA and cloned in CI, never vendored. They cannot
@@ -32,7 +33,7 @@ justification, a reviewer and a date; `scripts/check_triage.py` fails the build
 if an entry is unreviewed, because scoring your own precision benchmark is
 otherwise how a project ends up with 100% and no credibility.
 
-Fifty-one of the 245 verdicts are `accepted_risk`: the finding is accurate and
+Sixty-three of the 268 verdicts are `accepted_risk`: the finding is accurate and
 the project has a reason — a value supplied by the deployment, a guard the
 static tier cannot see, a bearer credential the endpoint exists to redeem. That
 counts as a true positive here, because the rule correctly reported what it can
@@ -84,21 +85,163 @@ verified example of each staying silent.
 
 ## What it is, and what it is not
 
-This is not a trained model and does not call an LLM. Every finding is produced
-by deterministic analysis of your source, and every finding carries evidence you
-can check yourself.
+**Detection is not a model and never calls one.** Every finding is produced by
+deterministic analysis of your source, and every finding carries evidence you
+can check yourself. Anything expressible as an AST rule is written as an AST
+rule: cheap, testable, and incapable of hallucinating.
 
-An LLM layer is planned, but as a *consumer* of the finding schema — triage,
-explanation, patch generation — not as the thing doing the detection. Anything
-expressible as an AST rule is written as an AST rule: cheap, testable, and
-incapable of hallucinating.
+There is now an LLM layer, but strictly as a *consumer* of the finding schema —
+triage, explanation, patch proposal (`djaudit triage`, `explain`, `fix`) — and a
+generator that is judged by the rules rather than trusted (`djaudit generate`).
+It is off unless you configure it, and no model can create, withdraw or reword a
+finding. `djaudit run` never opens a socket.
 
-## Install
+Every statement the tool emits is labelled with what authored it, so a
+model-written sentence can never be mistaken for a rule-written one. See
+[`docs/architecture/llm-layer.md`](docs/architecture/llm-layer.md).
+
+## Run it from a local checkout
+
+Everything below is the development path — no published package, no container,
+just the repository. Python 3.12+ and [uv](https://docs.astral.sh/uv/) are the
+only prerequisites.
 
 ```bash
+git clone https://github.com/ByteForgeDevs/Django_AI_Model.git
+# or, for a private repo you already have access to:  gh repo clone ByteForgeDevs/Django_AI_Model
+cd Django_AI_Model
 uv sync
-uv run djaudit --help
 ```
+
+`uv sync` creates `.venv/` and installs the project with its dev dependencies.
+Nothing else needs installing — djaudit reads your project's source and never
+imports it, so your Django project's own dependencies are irrelevant to it.
+
+### Confirm it works, without leaving the repo
+
+The repository ships deliberately vulnerable Django projects under
+`tests/fixtures/`, so you can see real output before pointing it at anything of
+your own:
+
+```bash
+uv run djaudit run tests/fixtures/vulnerable_project
+```
+
+You should get 24 findings — 3 critical, 6 high, 11 medium, 4 low — plus `5
+below threshold`, in about 0.3s. **It exits `1`, and that is correct:** findings
+at or above `--fail-on` are a non-zero exit so CI can gate on them. `2` means
+the tool itself could not run.
+
+To check that against the fixture's manifest of expected findings rather than
+eyeballing it:
+
+```bash
+uv run djaudit eval tests/fixtures/vulnerable_project
+```
+
+That prints `precision 100.00% recall 100.00% f1 100.00% tp=29 fp=0 fn=0` and
+`evaluation passed`. If it does not, the checkout is broken and nothing below
+will mean anything.
+
+### Point it at your own project
+
+```bash
+uv run djaudit run /path/to/your/django/project
+```
+
+Give it the directory containing `manage.py`. It finds the settings module
+itself; if it cannot, it says so and exits `2` rather than reporting a
+reassuring zero.
+
+Useful from here:
+
+```bash
+# see every rule, with severity, confidence and tier
+uv run djaudit rules
+
+# the whole picture, including what the default threshold hides
+uv run djaudit run /path/to/project --min-severity info --min-confidence tentative
+
+# only the things worth stopping a deploy for
+uv run djaudit run /path/to/project --fail-on high
+
+# machine-readable
+uv run djaudit run /path/to/project --format json --output findings.json
+```
+
+Every finding prints a `fingerprint`. Pass one back to `explain` to get the
+full rationale, the remediation, and what else in that file is wrong for the
+same reason:
+
+```bash
+uv run djaudit explain 31f91131 tests/fixtures/vulnerable_project
+```
+
+A prefix is enough as long as it is unique. `explain` takes a *fingerprint*,
+not a rule ID — for what a rule does in general, see
+[`docs/rules/`](docs/rules/README.md).
+
+### Put `djaudit` on your PATH
+
+If typing `uv run` from inside the checkout gets old:
+
+```bash
+uv tool install .
+djaudit run /path/to/your/project
+```
+
+That installs the built artifact rather than running from source, so re-run it
+after pulling changes — an installed copy goes stale silently the moment a
+command is added.
+
+### Generating an app (needs credentials)
+
+`djaudit generate` is the only command that talks to a vendor. It needs a
+`tool.djaudit.llm` table in the **target project's** `pyproject.toml`:
+
+```toml
+[tool.djaudit.llm]
+enabled = true
+provider = "openai"          # or "anthropic"
+model = "gpt-4o"
+api_key_env = "OPENAI_API_KEY"
+max_calls = 8
+```
+
+The key is read from the environment variable you name — djaudit refuses a
+config that inlines something key-shaped. Add `base_url` to point at any
+OpenAI-compatible endpoint instead (a gateway, a proxy, a self-hosted model):
+
+```toml
+base_url = "http://127.0.0.1:8000/v1"
+```
+
+Then, from the checkout:
+
+```bash
+export OPENAI_API_KEY=...
+
+# dry run: generates and audits, writes nothing
+uv run djaudit generate "orders placed by customers, with line items" \
+    --app shop --into /path/to/your/project
+
+# same thing, but keep the result
+uv run djaudit generate "orders placed by customers, with line items" \
+    --app shop --into /path/to/your/project --write
+```
+
+`--dry-run` is the default, so the first invocation on a real project cannot
+damage it. Without configuration the command explains why and generates
+nothing — it does not fall back to a stub or write an empty app.
+
+`--into` must be an **existing Django project** — a directory with a
+`manage.py`. That is not a formality: the generated app is audited inside a
+scratch copy of that project, because half the rules need its settings module
+and model graph to say anything at all. Pointing it at an empty directory exits
+`2` and tells you so.
+
+Run `manage.py makemigrations` afterwards. The audit is static: it proves the
+code parses and clears 87 rules, not that it runs.
 
 ## Use
 
@@ -196,13 +339,13 @@ linter, and honouring them would silently hide security findings.
 
 | Prefix | Family | Status |
 |---|---|---|
-| `DJS` | Settings & deployment hardening | **27 rules** — [reference](docs/rules/DJS.md) |
+| `DJS` | Settings & deployment hardening | **28 rules** — [reference](docs/rules/DJS.md) |
 | `DJA` | API / DRF authorization & data exposure | **15 rules** — [reference](docs/rules/DJA.md) |
+| `DJI` | Injection & untrusted input | **12 rules** — [reference](docs/rules/DJI.md) |
+| `DJP` | Performance & ORM efficiency | **10 rules** — [reference](docs/rules/DJP.md) |
+| `DJM` | Migration safety | **10 rules** — [reference](docs/rules/DJM.md) |
+| `DJX` | Cross-database portability | **9 rules** — [reference](docs/rules/DJX.md) |
 | `DJD` | Data model design | **3 rules** — [reference](docs/rules/DJD.md) |
-| `DJI` | Injection & untrusted input | Phase 3 |
-| `DJP` | Performance & ORM efficiency | Phase 3 |
-| `DJM` | Migration safety | Phase 4 |
-| `DJX` | Cross-database portability | Phase 5 |
 
 ## Analysis tiers
 
@@ -222,7 +365,7 @@ understood as a source of dev/prod divergence.
 ## Development
 
 ```bash
-uv run pytest              # 1614 tests
+uv run pytest              # 5670 tests
 uv run ruff check .
 uv run mypy                # strict, on our own code only
 
@@ -238,8 +381,8 @@ uv run python scripts/graph_coverage.py /path/to/netbox \
 ```
 
 Fixtures under `tests/fixtures/` contain deliberately vulnerable code and are
-excluded from linting and type checking. Their manifests carry 97
-`must_not_report` entries alongside the 56 expected findings, because a rule
+excluded from linting and type checking. Their manifests carry 169
+`must_not_report` entries alongside the 104 expected findings, because a rule
 that fires on the wrong thing fails a fixture the same way a missing rule does.
 `overridden_project` checks that a safe override silences a rule, and
 `near_miss_project` is a correct Django project written entirely in the shapes
