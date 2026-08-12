@@ -9458,7 +9458,7 @@ codebase the honest answer involves exclusions.
 | 4 | Migration safety and live tier | 6 | 28 | **Complete** (PR #7) — `DJM-001`…`DJM-010`, the live tier, and lock classification measured against a real `pg_locks` |
 | 5 | Portability and external adapters | 4 | 20 | **Complete** — `DJX-001`…`DJX-009`, two external adapters behind `--external`, 100% precision on three real targets |
 | 6 | LLM layer | 5 | 19 | **Complete** (PR #6) — **pulled forward, ran after Phase 3** |
-| 7 | Distribution | 4 | 13 | In progress — steps 7.1 and 7.2 complete (release workflow, GitHub Action, pre-commit hooks, changelog, container image); 7.3 next |
+| 7 | Distribution | 4 | 13 | **Complete** — all 13 substeps. Release workflow, GitHub Action, pre-commit hooks, changelog, container image, `[tool.djaudit]` config with path exclusions and severity overrides, and four gated documentation pages. Carries schema 1 → 4 and version 0.1.0 → 0.4.0, the project's first breaking releases |
 | | **Total** | **53** | **238** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
