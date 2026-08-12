@@ -1,7 +1,7 @@
-"""Support for ``django-configurations``, which puts settings in a class body.
+"""Settings declared in a class body rather than at module level.
 
-`django-configurations`_ replaces the module-of-constants convention with a
-class per environment::
+`django-configurations`_ is the best-known way to write them, replacing the
+module-of-constants convention with a class per environment::
 
     class Base(Configuration):
         SECRET_KEY = values.SecretValue()
@@ -22,6 +22,16 @@ per environment. ``Dev`` and ``Prod`` are ``dev.py`` and ``prod.py``, so each
 class becomes its own settings module with a role inferred from its name, and
 the existing severity grading -- which already knows that ``DEBUG = True`` is
 correct in development and critical in production -- applies unchanged.
+
+The library is not the only way in, and it is not how this support is
+recognised. readthedocs.org -- the project this module exists for -- hand-rolls
+the same idea: a ``Settings`` class whose ``load_settings(cls, module_name)``
+classmethod copies every ``member.isupper()`` attribute onto the named module,
+which is what the library's metaclass does under a different name. Matching the
+library by base class would have left that project exactly as unreadable as
+before, so what is matched is the *shape*: a module-level call handing a class
+this module's ``__name__`` is direct evidence the class becomes this settings
+module, and covers every project that rolled its own.
 
 .. _django-configurations: https://django-configurations.readthedocs.io/
 """

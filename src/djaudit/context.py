@@ -62,7 +62,7 @@ class SettingsModule:
     """True when ``DJANGO_SETTINGS_MODULE`` points here."""
 
     configuration_class: str = ""
-    """The ``django-configurations`` class this module stands for, if any.
+    """The settings class this module stands for, if any.
 
     Set when the settings live in a class body rather than at module level. The
     same file yields one :class:`SettingsModule` per class, because a class per
