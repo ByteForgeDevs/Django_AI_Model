@@ -171,6 +171,12 @@ jobs:
       - name: the container's interface still matches the CLI
         run: uv run python scripts/check_dockerfile.py
 
+      # A reference page is read for shape, not truth: nobody notices a
+      # missing row. This derives the settings table's contents from the code
+      # that accepts them.
+      - name: the configuration reference still matches the configuration
+        run: uv run python scripts/check_config_doc.py
+
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch
       # cache. Every other method clones the queryset and re-queries, so the

@@ -9269,7 +9269,28 @@ codebase the honest answer involves exclusions.
 - **7.4.1** — Getting-started guide and adoption path for a legacy codebase.
 - **7.4.2** — Complete rule reference, generated from `RuleMeta` so it cannot drift.
 - **7.4.3** — Rule authoring guide for external contributors.
-- **7.4.4** — Configuration reference: `pyproject.toml` settings, per-rule severity overrides, per-path exclusions.
+- **7.4.4** — Configuration reference: `pyproject.toml` settings, per-rule
+  severity overrides, per-path exclusions. **DONE**, and taken before 7.4.1
+  because the two pages link to each other and a link gate can only be added
+  once its targets exist; committing the guide first would have shipped a
+  dangling link with nothing to catch it.
+
+  `docs/configuration.md` is checked by `scripts/check_config_doc.py` rather
+  than reviewed, because a reference page is read for shape and not for truth
+   — nobody notices a missing row. The gate derives the settings table from
+  `config.KNOWN`, requires every subtable to be mentioned, refuses a row for a
+  key the code does not accept, and cross-checks every `--flag` the page names
+  against `djaudit run`'s real options. Run against the page as first written
+  it found two omissions immediately.
+
+  It also requires the page to still say that `live = true` and
+  `external = true` are refused. That refusal is a security property — a
+  `pyproject.toml` arrives with the repository you were asked to analyse, so a
+  file that could switch on the executing tiers would let an untrusted
+  repository arrange its own execution — and an undocumented security property
+  is one the next person removes. The control for that check had to remove
+  *both* statements of it: the page says it in prose and in an example, and
+  removing one leaves the fact stated and the gate correctly green.
 
 ---
 
