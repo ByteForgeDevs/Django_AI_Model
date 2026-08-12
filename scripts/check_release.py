@@ -210,6 +210,27 @@ def _tag(tag: str, problems: list[str]) -> None:
         problems.append(f"tag {tag} does not match the package version {__version__}")
 
 
+def _typed(problems: list[str]) -> None:
+    """The package must tell consumers it is typed, or none of the typing ships.
+
+    Every gate in this repository reads the source tree, where the annotations
+    are plainly visible, so all of them agreed the project was fully typed
+    while the published wheel handed importers `Any` for the entire API. This
+    is the one fact that can only be established from the built artefact's
+    point of view: PEP 561 requires the marker file, and mypy ignores an
+    installed package without it no matter how well annotated it is.
+    """
+    marker = ROOT / "src" / "djaudit" / "py.typed"
+    if not marker.is_file():
+        problems.append(
+            "src/djaudit/py.typed is missing, so mypy treats the installed "
+            "package as untyped and every import resolves to Any"
+        )
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    if '"Typing :: Typed"' not in text:
+        problems.append('pyproject.toml does not declare the "Typing :: Typed" classifier')
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", help="the tag being released, e.g. v0.2.0")
@@ -218,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     problems: list[str] = []
     _version_source(problems)
     _release_workflow(problems)
+    _typed(problems)
     if arguments.tag:
         _tag(arguments.tag, problems)
 

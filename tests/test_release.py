@@ -52,6 +52,7 @@ def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     shutil.copy(RELEASE, root / ".github/workflows/release.yml")
     shutil.copy(CI, root / ".github/workflows/ci.yml")
     shutil.copy(ROOT / MODULE, root / MODULE)
+    (root / "src/djaudit/py.typed").touch()
 
     monkeypatch.setattr(check_release, "ROOT", root)
     monkeypatch.setattr(check_release, "PYPROJECT", root / "pyproject.toml")
@@ -336,3 +337,39 @@ class TestTheWorkflowsAreValidYaml:
             declared = job.get("needs") or []
             for dependency in [declared] if isinstance(declared, str) else declared:
                 assert dependency in jobs, f"{name} needs {dependency}, which is not a job"
+
+
+class TestTheInstalledPackageIsTyped:
+    """PEP 561: without the marker, the annotations do not leave this repo.
+
+    This is the one fact no other gate here can see. Every check in this
+    repository reads the source tree, where the annotations are plainly
+    visible, and all of them agreed the project was fully typed -- while the
+    built wheel handed importers `Any` for the whole API. It was found by
+    installing the wheel into an empty environment and running mypy against an
+    import of it, which is the only vantage point from which it is visible.
+    """
+
+    def test_the_marker_is_in_the_package(self) -> None:
+        assert (ROOT / "src" / "djaudit" / "py.typed").is_file()
+
+    def test_the_marker_ships_in_the_wheel(self) -> None:
+        """In the package directory, so any wheel built from it includes it."""
+        marker = ROOT / "src" / "djaudit" / "py.typed"
+        assert marker.parent == ROOT / "src" / "djaudit"
+        assert (marker.parent / "__init__.py").is_file(), "not a package directory"
+
+    def test_the_classifier_is_declared(self) -> None:
+        assert '"Typing :: Typed"' in PYPROJECT.read_text()
+
+    def test_a_missing_marker_is_caught(
+        self, tree: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (tree / "src/djaudit/py.typed").unlink()
+        assert "py.typed is missing" in complaint(capsys)
+
+    def test_a_missing_classifier_is_caught(
+        self, tree: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        edit(tree / "pyproject.toml", '    "Typing :: Typed",\n', "")
+        assert "Typing :: Typed" in complaint(capsys)

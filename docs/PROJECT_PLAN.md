@@ -8758,6 +8758,26 @@ conversation.
   tree does, stamped `0.1.0` — the first evidence that packaging carries
   everything the rules need rather than merely importing.
 
+  *Amended at the end of Phase 7, before the first tag.* Rehearsing the release
+  by hand — build the wheel, install it into an empty venv, import it — found a
+  defect no gate in this repository could see. The published package had **no
+  `py.typed` marker**, so despite mypy being clean on 363 files, a consumer who
+  installed djaudit and ran mypy over `from djaudit.registry import all_rules`
+  got `Revealed type is "Any"` and an `import-untyped` error. Every check here
+  reads the *source tree*, where the annotations are plainly visible, and all
+  of them agreed the project was fully typed. PEP 561 is a fact about the
+  built artefact, and it is only visible from the artefact's point of view.
+  Adding the marker turns that same import into
+  `def () -> list[type[djaudit.registry.Rule]]`. `check_release.py` now
+  requires the marker and the `Typing :: Typed` classifier, with un-fix
+  controls for each, and the fixture that every other release test builds on
+  carries the marker so removing it from the real package fails three tests.
+
+  The rehearsal is worth repeating before any first release: the wheel built at
+  `0.4.0` installs clean into an empty environment, reports `0.4.0` from
+  outside the source tree, and audits Healthchecks to the same 41 findings
+  (35 above threshold) the source tree produces.
+
   *Verified:* 16 un-fixes, each caught with its own message — a literal
   version restored, `dynamic` dropped, the build pointed at a missing file and
   at a module with no `__version__`, `workflow_dispatch` added, a branch
