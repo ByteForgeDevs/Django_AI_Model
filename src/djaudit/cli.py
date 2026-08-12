@@ -87,12 +87,19 @@ def _fail(message: str) -> None:
     # Escaped, not interpolated raw: a message naming a TOML table reads as
     # `[tool.djaudit] ...`, and rich would take that for a style tag and print
     # the sentence without the part identifying where the problem is.
-    Console(stderr=True).print(f"[bold red]error:[/bold red] {escape(message)}")
+    # soft_wrap, because the message usually names a file path and rich will
+    # otherwise break it across a line -- `pyproject.tom\nl` is not something
+    # anyone can paste back into a shell.
+    Console(stderr=True).print(f"[bold red]error:[/bold red] {escape(message)}", soft_wrap=True)
     raise typer.Exit(EXIT_ERROR)
 
 
 # CLI parameter name -> `[tool.djaudit]` key, where the two differ.
-_CONFIG_FIELD = {"output_format": "format", "baseline_path": "baseline"}
+_CONFIG_FIELD = {
+    "output_format": "format",
+    "baseline_path": "baseline",
+    "exclude_path": "exclude_paths",
+}
 
 
 def _resolve(ctx: typer.Context, settings: FileConfig, typed: dict[str, Any]) -> dict[str, Any]:
@@ -158,6 +165,15 @@ def run(
         list[str] | None,
         typer.Option("--ignore", help="Skip these rule ids. Repeatable."),
     ] = None,
+    exclude_path: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--exclude-path",
+            help="Hide findings whose file matches this glob. Repeatable. Filters by "
+            "location only: excluded files are still parsed, because dropping them "
+            "would remove their models from the graph and silently empty the audit.",
+        ),
+    ] = None,
     baseline_path: Annotated[
         Path | None,
         typer.Option("--baseline", help="Suppress findings recorded in this baseline file."),
@@ -211,6 +227,7 @@ def run(
             "family": family,
             "select": select,
             "ignore": ignore,
+            "exclude_path": exclude_path,
             "baseline_path": baseline_path,
             "live": live,
             "external": external,
@@ -220,6 +237,10 @@ def run(
     min_severity, min_confidence = resolved["min_severity"], resolved["min_confidence"]
     fail_on, family = resolved["fail_on"], resolved["family"]
     select, ignore = resolved["select"], resolved["ignore"]
+    exclude_path = resolved["exclude_path"]
+    for pattern in exclude_path or ():
+        if not pattern.strip().strip("/"):
+            _fail(f"exclude path pattern is empty: {pattern!r}")
     baseline_path, live, external = (
         resolved["baseline_path"],
         resolved["live"],
@@ -250,6 +271,7 @@ def run(
         min_confidence=Confidence.TENTATIVE if writing else min_confidence,
         baseline=None if writing else baseline,
         external=_with_external(external),
+        exclude_paths=tuple(exclude_path) if exclude_path else (),
     )
 
     if write_baseline is not None:

@@ -53,6 +53,7 @@ KNOWN = (
     "family",
     "select",
     "ignore",
+    "exclude_paths",
     "baseline",
     "live",
     "external",
@@ -81,6 +82,7 @@ class FileConfig:
     family: tuple[Family, ...] | None = None
     select: tuple[str, ...] | None = None
     ignore: tuple[str, ...] | None = None
+    exclude_paths: tuple[str, ...] | None = None
     baseline: Path | None = None
     live: bool | None = None
     external: bool | None = None
@@ -194,6 +196,7 @@ def from_pyproject(path: Path) -> FileConfig:
         family=_read(table, "family", lambda v, k: _families(v, k, path)),
         select=_read(table, "select", lambda v, k: _rules(v, k, path)),
         ignore=_read(table, "ignore", lambda v, k: _rules(v, k, path)),
+        exclude_paths=_read(table, "exclude_paths", lambda v, k: _strings(v, k, path)),
         baseline=_read(table, "baseline", lambda v, k: _path(v, k, path)),
         live=_read(table, "live", lambda v, k: _bool(v, k, path)),
         external=_read(table, "external", lambda v, k: _bool(v, k, path)),

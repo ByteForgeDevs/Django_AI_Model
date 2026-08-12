@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - uses: ByteForgeDevs/Django_AI_Model@v0.2.0
+      - uses: ByteForgeDevs/Django_AI_Model@v0.3.0
         with:
           path: .
 ```
@@ -66,7 +66,7 @@ day one gets switched off. Record what is there today and fail only on what is
 added after:
 
 ```yaml
-      - uses: ByteForgeDevs/Django_AI_Model@v0.2.0
+      - uses: ByteForgeDevs/Django_AI_Model@v0.3.0
         with:
           baseline: .djaudit-baseline.json
 ```

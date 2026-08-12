@@ -17,6 +17,7 @@ from djaudit.degradation import Degradation, assess
 from djaudit.discovery import build_context
 from djaudit.gcpolicy import deferred_full_collection
 from djaudit.models import Confidence, Family, Finding, Severity, Tier
+from djaudit.pathfilter import excluded
 from djaudit.registry import Rule, select
 from djaudit.suppression import is_suppressed
 
@@ -42,6 +43,12 @@ class RunResult:
     findings: list[Finding] = field(default_factory=list)
     total_raw: int = 0
     suppressed_inline: int = 0
+    suppressed_path: int = 0
+    """How many findings an `exclude_paths` pattern hid.
+
+    Reported for the reason in this class's docstring: an exclusion that
+    quietly removes 300 findings and a clean project both print nothing.
+    """
     suppressed_baseline: int = 0
     filtered_threshold: int = 0
     rules_run: int = 0
@@ -116,6 +123,7 @@ def run(
     baseline: Baseline | None = None,
     context: ProjectContext | None = None,
     external: Sequence[Adapter] = (),
+    exclude_paths: tuple[str, ...] = (),
 ) -> RunResult:
     """Audit the project at ``root``.
 
@@ -139,6 +147,7 @@ def run(
             baseline=baseline,
             context=context,
             external=external,
+            exclude_paths=exclude_paths,
         )
 
 
@@ -154,6 +163,7 @@ def _audit(
     baseline: Baseline | None,
     context: ProjectContext | None,
     external: Sequence[Adapter],
+    exclude_paths: tuple[str, ...],
 ) -> RunResult:
     """The audit itself. Separated so :func:`run` reads as policy, then work."""
     started = time.perf_counter()
@@ -212,6 +222,11 @@ def _audit(
     for finding in collected:
         if suppressed(finding):
             result.suppressed_inline += 1
+            continue
+        # After every rule has run, never before parsing: see djaudit.pathfilter
+        # for the measurement that settled this.
+        if exclude_paths and excluded(finding.location.file, exclude_paths):
+            result.suppressed_path += 1
             continue
         kept.append(scope.apply(finding))
 

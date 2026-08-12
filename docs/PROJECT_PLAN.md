@@ -9200,10 +9200,36 @@ codebase the honest answer involves exclusions.
   *Verified:* 46 config tests, 121 with the CLI suite; ruff and mypy clean;
   nine un-fix controls, all caught — including one that reverts the merge to a
   default comparison and one that stops escaping the error.
-- **7.3.2** — Per-path exclusions. The design question is *where* they apply:
-  excluding files from parsing would remove models from the graph and change
-  cross-file analysis in ways nobody asked for, so exclusions are expected to
-  filter findings by location instead. Measure it before choosing.
+- **7.3.2** — Per-path exclusions. **DONE.** The design question was *where*
+  they apply, and it was settled by measurement rather than by argument. On
+  `orm_project` at `--min-severity info --min-confidence tentative` the full run
+  reports **15 findings across 5 files**. `inventory/models.py` holds **2** of
+  them. Physically removing that file — what "exclude before parsing" amounts
+  to — reports **0 findings and exits clean**, because every `DJP` finding in
+  the views, the serializers and the management command is derived from the
+  model graph that file builds. Excluding the same path by pattern reports
+  **13**, with `suppressed_path = 2`. The stronger implementation is the one
+  that does less: exclusions filter findings by location after every rule has
+  run and seen the whole project.
+
+  Shipped as `--exclude-path` (repeatable) and `exclude_paths` in
+  `[tool.djaudit]`, matched with `fnmatch` against the project-relative posix
+  path, where a bare directory name excludes its subtree. The count is reported
+  in the JSON summary (`suppressed_path`) and on the terminal, for the reason
+  `RunResult`'s own docstring gives: a run that hides 300 findings and a clean
+  project otherwise print the same thing. That report field is a schema shape
+  change, so `SCHEMA_VERSION` goes 2 → 3 and the version 0.2.0 → 0.3.0.
+
+  Two things the tests found. Writing the un-fix control for the empty-pattern
+  guard showed the guard **could not fire** — against a relative path, `""`
+  matches nothing, `"/*"` matches nothing and `startswith("/")` is never true —
+  so it was dead code that read like a safety net, and the mutant survived
+  because there was nothing to break. Silently ignoring a pattern the user
+  clearly meant something by is the same failure this substep exists to
+  prevent, so the empty pattern is now *refused* at the CLI boundary instead.
+  Related: `fnmatch`'s `*` crosses `/`, so a literal directory prefix needs its
+  own check, and that check has to be `bare + "/"` — a plain `startswith(bare)`
+  makes `--exclude-path app` swallow `apples/`.
 - **7.3.3** — Per-rule severity overrides, applied before thresholds rather
   than after, since an override that cannot change what `--min-severity` keeps
   or what `--fail-on` fails on is decoration.
