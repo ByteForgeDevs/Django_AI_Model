@@ -20,6 +20,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Added
 
+- **settings:** resolve settings declared in a class body (5ad33349)
 - **BREAKING** **config:** override rule severity before the threshold, not after (eace456f)
 - **BREAKING** **config:** exclude paths by filtering findings, not by skipping files (0493c244)
 - **config:** read [tool.djaudit], and ask click who set what (9acc37cf)
