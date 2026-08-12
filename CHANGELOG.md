@@ -222,6 +222,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Documentation
 
+- **configurations:** describe the shape, not the library (947e31c7)
 - **plan:** mark phase 7 complete (aa4aebc6)
 - **rules:** document how to write a rule, by running the example (3d264183)
 - **rules:** index every rule, and verify the anchors actually land (8311a710)
