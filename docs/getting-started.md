@@ -12,13 +12,23 @@ that breaks this page fails the build.
 
 ## Install
 
+djaudit is **not published to a package index yet** — there is no release tag
+and no PyPI entry — so install it from a checkout:
+
 ```
-$ uv tool install djaudit
+$ git clone https://github.com/ByteForgeDevs/Django_AI_Model.git
+$ cd Django_AI_Model
+$ uv tool install .
 ```
 
-`pipx install djaudit` and `pip install djaudit` work too. djaudit analyses
-your project's source; it does not import it, and it does not need your
-project's dependencies installed. It can run from anywhere.
+That puts `djaudit` on your PATH. To run it from the checkout without
+installing, use `uv sync` and prefix each command with `uv run`.
+
+Once a release is published, `uv tool install djaudit`, `pipx install djaudit`
+and `pip install djaudit` will work; today they will fail with "not found".
+
+djaudit analyses your project's source; it does not import it, and it does not
+need your project's dependencies installed. It can run from anywhere.
 
 There is also a container, if you would rather not install anything — see
 [container.md](container.md).
