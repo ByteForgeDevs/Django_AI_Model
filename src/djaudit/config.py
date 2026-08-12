@@ -62,7 +62,7 @@ KNOWN = (
 )
 
 # `[tool.djaudit.llm]` is read by djaudit.llm.config, not here.
-SUBTABLES = ("llm",)
+SUBTABLES = ("llm", "severity")
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +83,7 @@ class FileConfig:
     select: tuple[str, ...] | None = None
     ignore: tuple[str, ...] | None = None
     exclude_paths: tuple[str, ...] | None = None
+    severity_overrides: dict[str, Severity] | None = None
     baseline: Path | None = None
     live: bool | None = None
     external: bool | None = None
@@ -197,6 +198,7 @@ def from_pyproject(path: Path) -> FileConfig:
         select=_read(table, "select", lambda v, k: _rules(v, k, path)),
         ignore=_read(table, "ignore", lambda v, k: _rules(v, k, path)),
         exclude_paths=_read(table, "exclude_paths", lambda v, k: _strings(v, k, path)),
+        severity_overrides=_read(table, "severity", lambda v, k: _overrides(v, k, path)),
         baseline=_read(table, "baseline", lambda v, k: _path(v, k, path)),
         live=_read(table, "live", lambda v, k: _bool(v, k, path)),
         external=_read(table, "external", lambda v, k: _bool(v, k, path)),
@@ -238,3 +240,22 @@ def _format(value: Any, key: str, where: Path) -> OutputFormat:
         raise ConfigError(
             f"{where}: [tool.djaudit] {key} = {value!r} is not one of {allowed}"
         ) from None
+
+
+def _overrides(value: Any, key: str, where: Path) -> dict[str, Severity]:
+    """``[tool.djaudit.severity]`` -- a rule id per key, a severity per value.
+
+    Rule ids are upper-cased, the way the CLI normalises `--select`, so
+    `djp-001 = "low"` is not a silent no-op. Whether the id exists at all is
+    checked later, against the registry, because this module deliberately knows
+    nothing about which rules are compiled in.
+    """
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"{where}: [tool.djaudit.{key}] must be a table of rule id = severity, "
+            f"not {_name(value)}"
+        )
+    out: dict[str, Severity] = {}
+    for rule_id, level in value.items():
+        out[rule_id.upper()] = _enum(level, Severity, f"{key}.{rule_id}", where)
+    return out

@@ -103,6 +103,8 @@ def _summary(result: RunResult, console: Console) -> None:
         notes.append(f"{result.suppressed_inline} suppressed inline")
     if result.suppressed_path:
         notes.append(f"{result.suppressed_path} in excluded paths")
+    if result.severity_overridden:
+        notes.append(f"{result.severity_overridden} severity overridden")
     if result.suppressed_baseline:
         notes.append(f"{result.suppressed_baseline} in baseline")
     notes.append(f"{result.duration_seconds:.2f}s")

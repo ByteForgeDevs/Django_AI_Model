@@ -17,6 +17,7 @@ also valid rich markup.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
 from pathlib import Path
@@ -26,7 +27,7 @@ from typer.testing import CliRunner
 
 from djaudit import config as config_module
 from djaudit.cli import app
-from djaudit.config import KNOWN, ConfigError, FileConfig, from_pyproject
+from djaudit.config import KNOWN, SUBTABLES, ConfigError, FileConfig, from_pyproject
 from djaudit.models import Confidence, Family, Severity
 from djaudit.reporters import OutputFormat
 
@@ -330,12 +331,28 @@ class TestTheMergeIsWiredUp:
 
         assert "get_parameter_source" in inspect.getsource(cli._resolve)
 
-    def test_every_cli_name_maps_to_a_known_key(self) -> None:
-        """The rename map is where `output_format` becomes `format`."""
+    def test_every_cli_name_maps_to_a_real_field(self) -> None:
+        """The rename map is where `output_format` becomes `format`.
+
+        It maps to a `FileConfig` *attribute*, which `_resolve` reaches with
+        `getattr`. That is not always the TOML key: `[tool.djaudit.severity]`
+        is read into `severity_overrides`. Asserting against `KNOWN` conflated
+        the two for as long as they happened to coincide.
+        """
         from djaudit import cli
 
+        fields = {f.name for f in dataclasses.fields(FileConfig)}
         for cli_name, key in cli._CONFIG_FIELD.items():
-            assert key in KNOWN, f"{cli_name} maps to {key}, which is not a config key"
+            assert key in fields, f"{cli_name} maps to {key}, which FileConfig does not have"
+
+    def test_every_field_comes_from_a_documented_key(self) -> None:
+        """The other direction: no field is populated by a key nobody may write."""
+        keys = {*KNOWN, *SUBTABLES}
+        for field in dataclasses.fields(FileConfig):
+            name = field.name
+            assert name in keys or name.removesuffix("_overrides") in keys, (
+                f"FileConfig.{name} has no corresponding [tool.djaudit] key"
+            )
 
     def test_the_refusal_list_is_still_enforced(self) -> None:
         assert "EXECUTING" in inspect.getsource(config_module.from_pyproject) or "EXECUTING" in (

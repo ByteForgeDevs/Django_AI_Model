@@ -80,6 +80,7 @@ def build(
             "total_raw": result.total_raw,
             "suppressed_inline": result.suppressed_inline,
             "suppressed_path": result.suppressed_path,
+            "severity_overridden": result.severity_overridden,
             "suppressed_baseline": result.suppressed_baseline,
             "below_threshold": result.filtered_threshold,
             "rules_run": result.rules_run,

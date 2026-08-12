@@ -15,10 +15,10 @@ inputs:
     default: "."
   version:
     description: >-
-      Version of djaudit to install, as a PEP 440 specifier such as `0.3.0` or
+      Version of djaudit to install, as a PEP 440 specifier such as `0.4.0` or
       `>=0.1,<0.2`. Ignored when `install` is false.
     required: false
-    default: "0.3.0"
+    default: "0.4.0"
   install:
     description: >-
       Install djaudit before running. Set to `false` when the workflow has

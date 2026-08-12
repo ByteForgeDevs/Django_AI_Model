@@ -15,6 +15,7 @@ worse outcome than a red one.
 
 from __future__ import annotations
 
+import difflib
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
@@ -99,7 +100,43 @@ _CONFIG_FIELD = {
     "output_format": "format",
     "baseline_path": "baseline",
     "exclude_path": "exclude_paths",
+    "severity_override": "severity_overrides",
 }
+
+
+def _overrides(stated: list[str] | dict[str, Severity] | None) -> dict[str, Severity]:
+    """Normalise severity overrides from either source, and refuse nonsense.
+
+    The config file hands over a parsed mapping; the command line hands over
+    `RULE=LEVEL` strings. Both end up validated against the registry here,
+    because a typo'd rule id would otherwise be a setting that silently does
+    nothing -- and a severity override that does nothing is indistinguishable
+    from one that worked on a rule the project never triggers.
+    """
+    if not stated:
+        return {}
+    pairs: dict[str, Severity] = {}
+    if isinstance(stated, dict):
+        pairs = dict(stated)
+    else:
+        for item in stated:
+            rule_id, sep, level = item.partition("=")
+            if not sep or not rule_id.strip() or not level.strip():
+                _fail(f"--severity expects RULE=LEVEL, got {item!r}")
+            try:
+                pairs[rule_id.strip().upper()] = Severity(level.strip().lower())
+            except ValueError:
+                allowed = ", ".join(s.value for s in Severity)
+                _fail(
+                    f"--severity {rule_id.strip()}: unknown severity {level.strip()!r} ({allowed})"
+                )
+    known = {rule_cls.meta.id for rule_cls in all_rules()}
+    for rule_id in pairs:
+        if rule_id not in known:
+            close = difflib.get_close_matches(rule_id, sorted(known), n=1, cutoff=0.6)
+            hint = f"; did you mean {close[0]!r}?" if close else ""
+            _fail(f"severity override names an unknown rule: {rule_id}{hint}")
+    return pairs
 
 
 def _resolve(ctx: typer.Context, settings: FileConfig, typed: dict[str, Any]) -> dict[str, Any]:
@@ -165,6 +202,16 @@ def run(
         list[str] | None,
         typer.Option("--ignore", help="Skip these rule ids. Repeatable."),
     ] = None,
+    severity_override: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--severity",
+            metavar="RULE=LEVEL",
+            help="Re-rank a rule, as DJP-001=low. Repeatable. Applied before "
+            "--min-severity and --fail-on, so an override can change what is "
+            "reported and what fails the build.",
+        ),
+    ] = None,
     exclude_path: Annotated[
         list[str] | None,
         typer.Option(
@@ -228,6 +275,7 @@ def run(
             "select": select,
             "ignore": ignore,
             "exclude_path": exclude_path,
+            "severity_override": severity_override,
             "baseline_path": baseline_path,
             "live": live,
             "external": external,
@@ -238,6 +286,7 @@ def run(
     fail_on, family = resolved["fail_on"], resolved["family"]
     select, ignore = resolved["select"], resolved["ignore"]
     exclude_path = resolved["exclude_path"]
+    overrides = _overrides(resolved["severity_override"])
     for pattern in exclude_path or ():
         if not pattern.strip().strip("/"):
             _fail(f"exclude path pattern is empty: {pattern!r}")
@@ -272,6 +321,7 @@ def run(
         baseline=None if writing else baseline,
         external=_with_external(external),
         exclude_paths=tuple(exclude_path) if exclude_path else (),
+        severity_overrides=overrides,
     )
 
     if write_baseline is not None:

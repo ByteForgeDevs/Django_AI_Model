@@ -11,10 +11,10 @@ live tier.
 ## Getting it
 
 ```console
-$ docker pull ghcr.io/byteforgedevs/djaudit:0.3.0
+$ docker pull ghcr.io/byteforgedevs/djaudit:0.4.0
 ```
 
-Tags follow the release: `0.3.0` is the version in `pyproject.toml`, and the
+Tags follow the release: `0.4.0` is the version in `pyproject.toml`, and the
 image at that tag was built from that tag's source. Nothing is installed from
 PyPI at build time, so an image and the code it audits with cannot drift.
 
@@ -23,7 +23,7 @@ PyPI at build time, so an image and the code it audits with cannot drift.
 Mount the project at `/src` and run:
 
 ```console
-$ docker run --rm -v "$PWD:/src:ro" ghcr.io/byteforgedevs/djaudit:0.3.0
+$ docker run --rm -v "$PWD:/src:ro" ghcr.io/byteforgedevs/djaudit:0.4.0
 ```
 
 That is the whole interface. `/src` is the working directory and the default
@@ -38,9 +38,9 @@ The entrypoint is `djaudit`, not `djaudit run`, so every subcommand is
 reachable by naming it:
 
 ```console
-$ docker run --rm ghcr.io/byteforgedevs/djaudit:0.3.0 rules
-$ docker run --rm ghcr.io/byteforgedevs/djaudit:0.3.0 explain DJP-001
-$ docker run --rm -v "$PWD:/src:ro" ghcr.io/byteforgedevs/djaudit:0.3.0 run /src --family DJS
+$ docker run --rm ghcr.io/byteforgedevs/djaudit:0.4.0 rules
+$ docker run --rm ghcr.io/byteforgedevs/djaudit:0.4.0 explain DJP-001
+$ docker run --rm -v "$PWD:/src:ro" ghcr.io/byteforgedevs/djaudit:0.4.0 run /src --family DJS
 ```
 
 Note the `/src` in the last one: naming a subcommand replaces `CMD` entirely,
@@ -52,7 +52,7 @@ Every reporter writes to stdout when `--output` is absent, which is the
 simplest way across a container boundary:
 
 ```console
-$ docker run --rm -v "$PWD:/src:ro" ghcr.io/byteforgedevs/djaudit:0.3.0 \
+$ docker run --rm -v "$PWD:/src:ro" ghcr.io/byteforgedevs/djaudit:0.4.0 \
     run /src --format sarif > djaudit.sarif
 ```
 
@@ -61,7 +61,7 @@ If you would rather have djaudit write the file, mount somewhere writable —
 
 ```console
 $ docker run --rm -v "$PWD:/src:ro" -v "$PWD/out:/out" \
-    ghcr.io/byteforgedevs/djaudit:0.3.0 run /src --format sarif -o /out/djaudit.sarif
+    ghcr.io/byteforgedevs/djaudit:0.4.0 run /src --format sarif -o /out/djaudit.sarif
 ```
 
 SARIF locations are recorded relative to the analyzed root, with the absolute

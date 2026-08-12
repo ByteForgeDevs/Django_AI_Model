@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from djaudit import fingerprint as fp
@@ -50,6 +50,13 @@ class RunResult:
     quietly removes 300 findings and a clean project both print nothing.
     """
     suppressed_baseline: int = 0
+    severity_overridden: int = 0
+    """How many findings a configured severity override relabelled.
+
+    Same reason as the counters above: a project that has quietly demoted a
+    rule to `info` and a project that never triggers it look identical in the
+    output otherwise.
+    """
     filtered_threshold: int = 0
     rules_run: int = 0
     corroborated: int = 0
@@ -124,6 +131,7 @@ def run(
     context: ProjectContext | None = None,
     external: Sequence[Adapter] = (),
     exclude_paths: tuple[str, ...] = (),
+    severity_overrides: Mapping[str, Severity] | None = None,
 ) -> RunResult:
     """Audit the project at ``root``.
 
@@ -148,6 +156,7 @@ def run(
             context=context,
             external=external,
             exclude_paths=exclude_paths,
+            severity_overrides=severity_overrides,
         )
 
 
@@ -164,6 +173,7 @@ def _audit(
     context: ProjectContext | None,
     external: Sequence[Adapter],
     exclude_paths: tuple[str, ...],
+    severity_overrides: Mapping[str, Severity] | None,
 ) -> RunResult:
     """The audit itself. Separated so :func:`run` reads as policy, then work."""
     started = time.perf_counter()
@@ -239,6 +249,20 @@ def _audit(
         before = len(kept)
         kept = baseline.filter(kept)
         result.suppressed_baseline = before - len(kept)
+
+    if severity_overrides:
+        # Before the threshold, not after: an override applied afterwards could
+        # only relabel findings the threshold had already decided about, which
+        # is the definition of decoration. Measured: on `orm_project`,
+        # `--min-severity high` keeps 2, raising DJP-006 keeps 3, lowering
+        # DJP-003 keeps 1. After the filter all three would be 2.
+        kept = [
+            replace(f, severity=severity_overrides[f.rule_id])
+            if f.rule_id in severity_overrides
+            else f
+            for f in kept
+        ]
+        result.severity_overridden = sum(1 for f in kept if f.rule_id in severity_overrides)
 
     above = [f for f in kept if _passes_threshold(f, min_severity, min_confidence)]
     result.filtered_threshold = len(kept) - len(above)

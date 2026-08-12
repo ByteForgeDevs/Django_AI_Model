@@ -9230,9 +9230,39 @@ codebase the honest answer involves exclusions.
   Related: `fnmatch`'s `*` crosses `/`, so a literal directory prefix needs its
   own check, and that check has to be `bare + "/"` — a plain `startswith(bare)`
   makes `--exclude-path app` swallow `apples/`.
-- **7.3.3** — Per-rule severity overrides, applied before thresholds rather
-  than after, since an override that cannot change what `--min-severity` keeps
-  or what `--fail-on` fails on is decoration.
+- **7.3.3** — Per-rule severity overrides. **DONE.** The plan's claim was that
+  they must apply *before* thresholds, and that is measurable rather than
+  stylistic. On `orm_project` with `--min-severity high`:
+
+  | run | reported |
+  |---|---|
+  | plain | 2 |
+  | `--severity DJP-006=critical` (it is `low`) | **3** |
+  | `--severity DJP-003=low` (it is `high`) | **1** |
+
+  and `--fail-on critical` goes from exit 0 to exit 1 under
+  `--severity DJP-003=critical`. Applied after the threshold filter, all four
+  numbers are unchanged and the override is a relabelling of findings the
+  threshold had already decided about — decoration, exactly as the plan
+  suspected. The un-fix control for this is the one that matters: *moving* the
+  override after the filter (not adding a second pass — that was a control bug
+  first time round, and it caught nothing) fails 3 tests.
+
+  Shipped as `--severity RULE=LEVEL` (repeatable) and `[tool.djaudit.severity]`.
+  Ids are upper-cased on both paths, so `djp-003 = "low"` is not a silent
+  no-op, and an id no rule owns is refused with a `difflib` suggestion — a
+  typo'd override is otherwise a setting that does nothing forever and looks
+  identical to one working on a rule the project never triggers.
+
+  Two properties worth recording. Severity is **not** part of the fingerprint
+  (`compute(rule_id, file, snippet, occurrence)`), so an override cannot
+  invalidate a committed baseline; there is a test asserting a baseline written
+  before an override still matches every finding after it. And the count is
+  reported as `severity_overridden`, because a consumer reading `severity:
+  "low"` otherwise has no way to know the project relabelled it — an aggregate
+  dashboard would be skewed by someone else's config with nothing to show for
+  it. That field is another shape change, so `SCHEMA_VERSION` goes 3 → 4 and
+  the version 0.3.0 → 0.4.0. The schema gate named the required bump itself.
 
 ### Step 7.4 — Documentation
 
