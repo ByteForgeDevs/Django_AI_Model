@@ -9267,6 +9267,36 @@ codebase the honest answer involves exclusions.
 ### Step 7.4 — Documentation
 
 - **7.4.1** — Getting-started guide and adoption path for a legacy codebase.
+  **DONE.** `docs/getting-started.md`. The ordering is the content: the way a
+  static analyser dies on a legacy codebase is being switched on at full
+  strength on day one, printing four thousand findings, and never being run
+  again. So the guide runs look → understand one finding → baseline → CI →
+  tune, and the tuning section is ordered narrowest-first (inline suppression,
+  then path exclusion, then re-ranking, then disabling a rule).
+
+  One piece of advice in it is the sort of thing only writing the page
+  surfaces: **write the baseline at the widest thresholds you might ever use.**
+  A baseline captured at `--min-severity high` does not contain the `medium`
+  findings, so the day the threshold is lowered every one of them arrives as
+  new — the adoption path quietly sets a trap for whoever tightens it later.
+
+  `scripts/check_docs_commands.py` gates it, and gates every other page too.
+  Prose is never executed, so a renamed flag leaves the guide that recommended
+  it looking correct forever; this project has already shipped that defect
+  three times. The gate pulls every `djaudit ...` line out of every fenced
+  block in `docs/` and `README.md` and asks click whether the subcommand
+  exists, whether each long option exists on it, and whether options that need
+  a value were given one. It deliberately does not execute them — that would
+  test the examples' environment rather than the examples. It also resolves
+  every relative markdown link, since a guide pointing at a page nobody wrote
+  reads exactly like one that does not.
+
+  Verified against real drift before being trusted: run against the repository
+  as it stood, it found that click injects `--help` rather than declaring it in
+  `params`. Four un-fix controls catch — an unknown subcommand, a misspelled
+  option, an option missing its value, and a value given to a flag that takes
+  none — plus a dangling link, and a control confirming prose outside a fenced
+  block is left alone.
 - **7.4.2** — Complete rule reference, generated from `RuleMeta` so it cannot drift.
 - **7.4.3** — Rule authoring guide for external contributors.
 - **7.4.4** — Configuration reference: `pyproject.toml` settings, per-rule

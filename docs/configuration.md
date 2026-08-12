@@ -4,6 +4,10 @@ djaudit reads `[tool.djaudit]` from the `pyproject.toml` at the root of the
 project being analysed. Every setting has a command-line equivalent, and the
 command line always wins.
 
+If you are adopting djaudit on an existing codebase, read
+[getting-started.md](getting-started.md) first — it puts these settings in the
+order you will actually want them.
+
 ## Precedence
 
 A flag you typed beats the file. A flag you did not type does not.

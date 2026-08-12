@@ -171,6 +171,12 @@ jobs:
       - name: the container's interface still matches the CLI
         run: uv run python scripts/check_dockerfile.py
 
+      # Prose is never executed, so a renamed flag leaves the guide that told
+      # people to use it looking correct forever. This asks click about every
+      # command in the docs, and resolves every relative link.
+      - name: the documented commands and links still exist
+        run: uv run python scripts/check_docs_commands.py
+
       # A reference page is read for shape, not truth: nobody notices a
       # missing row. This derives the settings table's contents from the code
       # that accepts them.
