@@ -132,6 +132,21 @@ a hand-rolled settings class applied by some project-specific loader, for
 instance — it says so and exits non-zero. A clean report from a run that read
 nothing is more dangerous than no report at all, so it is not offered as one.
 
+## Use it from a coding agent
+
+```bash
+uv run djaudit mcp
+```
+
+`djaudit mcp` serves the analyser to an AI coding agent over the
+[Model Context Protocol](https://modelcontextprotocol.io), so the agent can
+audit the Django code it just wrote and repair it before you see the diff. You
+do not run this yourself — a client launches it.
+
+The point is that a model reviewing its own output uses the faculty that
+produced it, so the blind spot applies twice. An independent parser does not
+share it. See [`docs/mcp.md`](docs/mcp.md) for client configuration.
+
 ## Severity and confidence are separate axes
 
 Severity is how much damage the finding does. Confidence is how sure we are it

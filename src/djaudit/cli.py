@@ -28,7 +28,7 @@ from rich.markup import escape
 from rich.syntax import Syntax
 from rich.table import Table
 
-from djaudit import __version__, adapters, engine
+from djaudit import __version__, adapters, engine, mcp
 from djaudit.adapters import Adapter
 from djaudit.baseline import Baseline, BaselineError
 from djaudit.config import ConfigError, FileConfig, from_pyproject
@@ -1092,6 +1092,22 @@ def _print_benchmark(console: Console, report: BenchmarkReport) -> None:
             f"[red]over budget[/red] {score.family} false-positive rate "
             f"{score.false_positive_rate:.1%} exceeds {report.max_false_positive_rate:.1%}"
         )
+
+
+@app.command(name="mcp")
+def mcp_command() -> None:
+    """Serve djaudit to a coding agent over the Model Context Protocol.
+
+    Speaks stdio JSON-RPC and is meant to be launched by a client rather than
+    run by hand: an agent writing Django code calls `audit_django_project`
+    after each change and repairs what comes back, which is the loop a model
+    cannot run on itself, because reviewing its own output uses the faculty
+    that produced the defect.
+
+    Nothing is printed to stdout but protocol messages, so this command is
+    silent when it appears to be idle -- it is waiting for a request.
+    """
+    raise typer.Exit(mcp.serve())
 
 
 @app.command()

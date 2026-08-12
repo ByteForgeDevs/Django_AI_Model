@@ -9494,6 +9494,176 @@ codebase the honest answer involves exclusions.
 
 ---
 
+# Phase 8 — Generation
+
+Phases 0–7 built an auditor: something that reads Django code and says what is
+wrong with it. This phase closes the loop the auditor was always implicitly
+half of — putting the findings in front of whatever is *writing* the code, at
+the moment it writes it.
+
+**The motivating measurement.** While demonstrating the finished tool, a Django
+app was written to exercise it: two models, two serializers, two viewsets,
+about forty lines, written naturally and with care. Audited, it produced **six
+findings, two of them `DJI-001` critical SQL injection.** The relevant fact is
+not that the code was bad — it is that the author could not see it, and had no
+reason to look. Reading it back produced no suspicion; running the auditor
+produced six file-and-line citations in under a second.
+
+That is the shape of the gap. A language model writing Django code is a
+plausible-continuation engine, and `.raw("SELECT ... WHERE id = %s" % pk)` is
+an extremely plausible continuation. Reviewing its own output uses the same
+faculty that produced it, so the same blind spot applies twice. What closes the
+gap is not a better generator but an independent checker the generator can
+consult — and then a second pass. Fed the six findings back, the same author
+rewrote the app to zero in a single iteration, and the result still passed
+`manage.py check`, `makemigrations` and `migrate`, so the repair was real and
+not auditor-appeasement.
+
+**Scope discipline.** The v1 non-goals list says "no code generation or
+scaffolding", and that list is binding until amended. This is the amendment,
+and it is deliberately narrow: djaudit still generates nothing. It exposes what
+it already computes to a client that generates, and the deterministic core is
+untouched — every rule, every fingerprint and every gate is the same code
+running under a different transport. The parse-never-execute property is
+preserved exactly, which matters more here than anywhere else in the project,
+because this server is launched automatically by an agent inside a developer's
+editor rather than typed by a person who chose to run it.
+
+### Step 8.1 — Model Context Protocol server
+
+- **8.1.1** — A stdio JSON-RPC server speaking MCP, with no new dependencies.
+  **DONE.** `src/djaudit/mcp/server.py`, reached by `djaudit mcp`.
+
+  The protocol was read from the published `schema.ts` at version
+  `2025-06-18`, and that decision has a measurement behind it. Searching for
+  the protocol's shape first returned a confident description using
+  `mcp_version`, `client_id` and `tool_id` — none of which exist. The real
+  fields are `protocolVersion`, `clientInfo` and `name`. A server built on the
+  first answer would have passed every test its author wrote and been unable to
+  complete a handshake with any client in existence. Fetching the schema cost
+  one request.
+
+  An official Python SDK exists and was not used. It brings pydantic, anyio,
+  httpx and starlette into a package whose entire runtime dependency list is
+  typer and rich, to carry newline-delimited JSON over a pipe. The wire format
+  is roughly two hundred lines to implement and the dependency surface is
+  permanent, so the trade was declined — but declining it is only defensible if
+  the result is checked against something that is not ours, which is 8.1.4.
+
+  Two properties are enforced structurally rather than by convention. **stdout
+  is the wire**, so every tool handler runs inside `redirect_stdout(sys.stderr)`
+  — one stray `print` in any of 87 rules, now or later, would otherwise corrupt
+  the session in a way that reads to the client as a malformed server. And a
+  malformed line is answered with `-32700` and the loop **continues**; a client
+  that sends one bad line should not lose its connection.
+
+- **8.1.2** — Three tools over the existing engine: audit, explain, list rules.
+  **DONE.**
+
+  `audit_django_project(path, min_severity?, families?)`,
+  `explain_django_finding(path, fingerprint)` and
+  `list_django_rules(family?)`. The defaults are deliberately identical to the
+  CLI's — `min_severity=low`, `min_confidence=firm` — so that a developer who
+  runs `djaudit run` by hand after the agent has finished sees the same
+  findings the agent saw. A transport that quietly disagreed with the command
+  line would be worse than no transport.
+
+  Each result carries both a text block and `structuredContent`. The text is
+  what the model reads, and its content is the design: rule id, severity,
+  `file:line`, fingerprint, title, message and **the remediation**. A count and
+  a severity would be a notification; a fix and a location are a work item. The
+  ordering is most-severe-first because a model with a finite attention budget
+  should spend it on the SQL injection.
+
+  `ANALYSIS INCOMPLETE` is printed **before** the findings whenever the run
+  emitted blocking diagnostics. A short audit that reads as a clean one is the
+  single failure this project exists to avoid, and it is far more dangerous
+  through this surface than through a terminal, because no human sees it.
+
+- **8.1.3** — The `instructions` field, which is the reason any of this gets
+  used. **DONE.**
+
+  A tool that is merely *available* is not called. `instructions` is the one
+  field in the handshake that the specification says may be added to the
+  model's system prompt, so it is where the loop is actually specified: write
+  the Django code, call `audit_django_project`, repair what comes back, call it
+  again to confirm. It ends by saying that a finding must not be suppressed to
+  make the audit pass — the obvious degenerate solution, and the one a model
+  optimising for a green result will otherwise find.
+
+- **8.1.4** — Validation against a client we did not write. **DONE.**
+
+  A hand-driven probe passed all six edge cases — handshake, version
+  negotiation, tool errors, unknown method, malformed line, notification — and
+  proved nothing, because the same author wrote both ends. Installing the
+  official `mcp` SDK as an independent client and pointing it at the server
+  found a real failure on the first run.
+
+  The failure was not in the protocol: it was that `~/.local/bin/djaudit` was
+  an installed snapshot taken before `djaudit mcp` existed, so the client
+  launched a binary with no such command. That is a defect this surface will
+  keep producing — an MCP server is referenced by absolute path in a client's
+  config file, so it is *always* a build artifact and never the working tree,
+  and no gate in this repository reads anything but the working tree.
+
+  After reinstalling: handshake, `instructions`, three tools, a call returning
+  structured findings, and a bad path arriving as `isError` rather than a
+  transport failure — all confirmed by the reference implementation. The client
+  also negotiated `2025-11-25`, a version newer than the one the server was
+  written against, exercising the negotiation path against a real client rather
+  than a manufactured one.
+
+- **8.1.5** — Tests at the wire, and documentation. **DONE.**
+
+  `tests/test_mcp.py` drives `serve` with the bytes a client would send and
+  reads the bytes that come back, because the failure this module is exposed to
+  is not a wrong return value — it is a well-formed object on a corrupted
+  stream, or an error delivered in a shape the model cannot read. Neither is
+  visible from inside a function.
+
+  The specification's rule that a tool failure is `isError: true` **and not a
+  JSON-RPC error** gets its own class of tests, with a control asserting that a
+  successful call is not flagged, since every one of those assertions would
+  pass on a server that always errored. A separate class asserts the stream
+  stays parseable: one line per reply, each independently `json.loads`-able,
+  with multi-line remediation prose deliberately in the payload because that is
+  the hazard.
+
+  Writing the fixtures found a defect in the fixtures themselves. The first
+  version put settings in a top-level `conf.py`, which discovery does not treat
+  as a settings module; it produced one finding instead of six, and the
+  severity-ordering test had nothing to order. The contents were then
+  **measured** — six findings across three severities and two families — rather
+  than assumed, and the clean-project fixture was likewise measured to zero
+  rather than hoped to be.
+
+  `docs/mcp.md` documents the setup for real clients, gated by
+  `scripts/check_docs_commands.py` like every other page.
+
+### Step 8.2 — The generation loop
+
+Not started. Recorded so the shape is agreed before it is built, not to claim
+it exists.
+
+- **8.2.1** — A real `Provider`. The seam has been in place since Phase 6 —
+  `Provider` is a Protocol, `NullProvider` is its only implementation, and
+  `Budget`, `Cached` and `ResponseSchema` already wrap it. What is missing is
+  one HTTP client. It must keep the existing refusal to accept an inline
+  `api_key`, taking `api_key_env` only.
+- **8.2.2** — `djaudit generate`: a specification in, Django source out, then
+  audit, repair, and audit again until clean or the budget is spent. Built on
+  `llm/verify.py`, which already applies a patch to a disposable copy, checks
+  every changed file still parses, checks the targeted finding is gone, checks
+  no new finding appeared, and bisects when a batch fails.
+- **8.2.3** — A ceiling on the loop. Repair that does not converge must stop
+  and say so rather than iterate against a budget, and a repair that removes a
+  finding by deleting the feature is a failure, not a fix.
+- **8.2.4** — Measurement. The claim "generated code is audited" is worth
+  nothing without a before-and-after on a corpus of generated projects, scored
+  the way `eval` scores fixtures.
+
+---
+
 ## 7. Risk register
 
 | # | Risk | Likelihood | Impact | Mitigation |
@@ -9527,7 +9697,8 @@ codebase the honest answer involves exclusions.
 | 5 | Portability and external adapters | 4 | 20 | **Complete** — `DJX-001`…`DJX-009`, two external adapters behind `--external`, 100% precision on three real targets |
 | 6 | LLM layer | 5 | 19 | **Complete** (PR #6) — **pulled forward, ran after Phase 3** |
 | 7 | Distribution | 4 | 13 | **Complete** — all 13 substeps. Release workflow, GitHub Action, pre-commit hooks, changelog, container image, `[tool.djaudit]` config with path exclusions and severity overrides, and four gated documentation pages. Carries schema 1 → 4 and version 0.1.0 → 0.4.0, the project's first breaking releases |
-| | **Total** | **53** | **238** | |
+| 8 | Generation | 2 | 9 | In progress — Step 8.1 complete: an MCP server over the existing engine, validated against the reference SDK client. Step 8.2, the generation loop, is specified and not started |
+| | **Total** | **55** | **247** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this
