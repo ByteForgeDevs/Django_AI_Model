@@ -170,3 +170,5 @@ the network — not in the default tier. The live tier (`--live`) does run
 (`--external`) shell out to ruff and pip-audit. Both are opt-in flags for that
 reason, and neither can be switched on from a configuration file, because a
 configuration file arrives with the repository you were asked to analyse.
+
+Writing a rule of your own is [authoring-rules.md](authoring-rules.md).

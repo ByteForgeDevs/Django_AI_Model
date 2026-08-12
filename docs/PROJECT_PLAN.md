@@ -9368,7 +9368,39 @@ codebase the honest answer involves exclusions.
   in the repository is wrong, and nothing in the repository can fix it. It does
   mean the local gate has been the only gate, which is exactly the condition
   under which a silently-disabled type check survives.
-- **7.4.3** — Rule authoring guide for external contributors.
+- **7.4.3** — Rule authoring guide for external contributors. **DONE.**
+
+  `docs/authoring-rules.md`: the shape of a rule, what each `RuleMeta` field is
+  for, why severity and confidence are separate axes, per-finding overrides,
+  evidence kinds, what `ProjectContext` offers, what `@register` enforces, and
+  the five steps that make a rule finished rather than merely firing — planted
+  defect, control twin, reachability probe, benchmark corpus, and writing down
+  the limitation that made you lower the confidence.
+
+  A guide to writing rules is the one document whose claims are *all*
+  executable, so reviewing it would be the wrong instrument.
+  `scripts/check_authoring_doc.py` runs it: every fenced Python block is
+  compiled and executed, the example rule is registered through the real
+  `@register`, and the finished rule is run over a real project by the real
+  engine, which must report exactly one finding, on line 2, quoting the assert.
+  It also requires every `RuleMeta` field to appear in the field table, every
+  `ctx.` accessor the page names to exist on `ProjectContext`, every
+  `Severity.`/`Confidence.`/`Tier.`/`Family.`/`EvidenceKind.` member to be
+  real, and every backticked repository path to be a real path.
+
+  It earned that on first run. The guide promised `ctx.tree(path)`, an accessor
+  that has never existed — the real one is `ctx.parse(path)`. Written as prose
+  it would have read as fine to any reviewer, including me, because it is
+  exactly what the method should have been called.
+
+  Ten un-fix controls catch. One of them, reusing the shipped id `DJS-001`,
+  originally produced a traceback from inside the engine rather than a
+  diagnosis, and that was a real defect in the gate: builtin rules load
+  lazily, so at the moment the example registered, the registry was empty and
+  the collision check had nothing to compare against. Forcing `all_rules()`
+  before the snapshot turns it into a sentence. `test_the_example_does_not_leak_into_the_registry`
+  guards the other half — the gate registers a rule, and must put the registry
+  back.
 - **7.4.4** — Configuration reference: `pyproject.toml` settings, per-rule
   severity overrides, per-path exclusions. **DONE**, and taken before 7.4.1
   because the two pages link to each other and a link gate can only be added

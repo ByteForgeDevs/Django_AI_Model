@@ -183,6 +183,13 @@ jobs:
       - name: the configuration reference still matches the configuration
         run: uv run python scripts/check_config_doc.py
 
+      # The one guide whose every claim is executable, so it is executed: the
+      # example rule is registered through the real decorator and run over a
+      # real project by the real engine. Writing it, this caught the guide
+      # promising `ctx.tree()`, which has never existed.
+      - name: the rule authoring guide's example still works
+        run: uv run python scripts/check_authoring_doc.py
+
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch
       # cache. Every other method clones the queryset and re-queries, so the
