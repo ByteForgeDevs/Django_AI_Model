@@ -20,6 +20,9 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Added
 
+- **generate:** write a Django app, audit it, repair it, and refuse the shortcuts (f2f9f627)
+- **llm:** a real HTTP provider, so the seam built in Phase 6 has something behind it (53f54830)
+- **mcp:** serve djaudit to coding agents over the Model Context Protocol (92e05a42)
 - **settings:** resolve settings declared in a class body (5ad33349)
 - **BREAKING** **config:** override rule severity before the threshold, not after (eace456f)
 - **BREAKING** **config:** exclude paths by filtering findings, not by skipping files (0493c244)
@@ -222,6 +225,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Documentation
 
+- **generate:** what the loop refuses, and what "clean" does not prove (4c263bf9)
 - **configurations:** describe the shape, not the library (947e31c7)
 - **plan:** mark phase 7 complete (aa4aebc6)
 - **rules:** document how to write a rule, by running the example (3d264183)

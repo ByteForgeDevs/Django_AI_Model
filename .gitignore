@@ -14,3 +14,6 @@ uv.lock
 # Eval targets are cloned at a pinned SHA, never vendored.
 .eval-targets/
 *.sarif
+
+# djaudit writes its LLM answer cache here by default.
+.djaudit-cache/

@@ -15,6 +15,7 @@ it exists to score.
 from __future__ import annotations
 
 import json
+import pathlib
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -579,3 +580,54 @@ class TestBaselineTable:
                 and result.recall(Verdict.ACCEPTED_RISK) == 1.0
             )
             assert not perfect, result.name
+
+
+def _corpus(path: pathlib.Path) -> None:
+    """The smallest thing the loader should accept."""
+    path.write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {
+                        "fingerprint": "a",
+                        "rule_id": "DJS-001",
+                        "verdict": "true_positive",
+                        "file": "x.py",
+                        "line": 1,
+                    }
+                ]
+            }
+        )
+    )
+
+
+class TestAFileThatIsNotACorpus:
+    """A real incident: adding `benchmarks/generation.json` for an unrelated
+    measurement made 40 tests fail with `KeyError: 'findings'` raised from
+    inside the scorer, naming neither the file nor the problem. The data moved
+    to a subdirectory, and the loader now says which file it choked on."""
+
+    def test_it_names_the_file_and_the_convention(self, tmp_path) -> None:
+        _corpus(tmp_path / "healthchecks.json")
+        (tmp_path / "generation.json").write_text(json.dumps({"apps": {}}))
+        with pytest.raises(ValueError, match=r"generation\.json"):
+            load_ground_truth(tmp_path)
+
+    def test_the_message_says_where_the_file_should_go(self, tmp_path) -> None:
+        """An error that names the problem and not the remedy costs a search."""
+        (tmp_path / "generation.json").write_text(json.dumps({"apps": {}}))
+        with pytest.raises(ValueError, match="subdirectory"):
+            load_ground_truth(tmp_path)
+
+    def test_the_control_a_real_corpus_still_loads(self, tmp_path) -> None:
+        """Without this, the checks above pass on a loader that rejects everything."""
+        _corpus(tmp_path / "healthchecks.json")
+        assert len(load_ground_truth(tmp_path)) == 1
+
+    def test_the_shipped_corpora_are_all_at_the_top_level(self) -> None:
+        """The convention the message points at has to be true."""
+        assert sorted(p.name for p in BENCHMARKS.glob("*.json")) == [
+            "healthchecks.json",
+            "netbox.json",
+            "pretix.json",
+        ]

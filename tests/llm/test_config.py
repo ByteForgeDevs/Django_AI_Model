@@ -226,3 +226,61 @@ class TestMalformedConfig:
         path = pyproject(tmp_path, "[tool.djaudit.llm\nprovider =\n")
         with pytest.raises(ConfigError):
             from_pyproject(path)
+
+
+class TestTheEndpointIsWhereYouSaidItWas:
+    """A base_url that is read but not honoured is worse than one rejected.
+
+    This was a real defect: `base_url` was documented, passed to `http.build`
+    from `config.extras`, and never put into `extras` by the parser. It failed
+    silently in the one direction that matters -- someone pointing djaudit at a
+    self-hosted endpoint had their source sent to the public vendor instead,
+    and nothing said so. Caught by running the command against a local server
+    and watching the request arrive at api.openai.com.
+    """
+
+    def test_a_configured_base_url_survives_parsing(self, tmp_path):
+        path = pyproject(
+            tmp_path,
+            "[tool.djaudit.llm]\nenabled = true\nprovider = 'openai'\n"
+            "model = 'm'\napi_key_env = 'K'\nbase_url = 'http://127.0.0.1:8931/v1'\n",
+        )
+        assert from_pyproject(path).extras["base_url"] == "http://127.0.0.1:8931/v1"
+
+    def test_the_control_no_base_url_leaves_the_vendor_default(self, tmp_path):
+        """Without this, the assertion above passes on a parser that hardcodes it."""
+        path = pyproject(
+            tmp_path,
+            "[tool.djaudit.llm]\nenabled = true\nprovider = 'openai'\nmodel = 'm'\n",
+        )
+        assert "base_url" not in from_pyproject(path).extras
+
+    def test_a_base_url_survives_the_cli_overriding_other_fields(self, tmp_path):
+        """`resolve` rebuilds the config; extras must not be dropped on the way."""
+        path = pyproject(
+            tmp_path,
+            "[tool.djaudit.llm]\nprovider = 'openai'\nmodel = 'm'\n"
+            "api_key_env = 'K'\nbase_url = 'https://llm.internal/v1'\n",
+        )
+        config = resolve(path, enable=True, model="other")
+        assert config.model == "other"
+        assert config.extras["base_url"] == "https://llm.internal/v1"
+
+    def test_a_base_url_that_is_not_a_url_is_refused(self, tmp_path):
+        """`http.build` would raise on this later, inside a provider whose whole
+        contract is that it never raises -- so it must be caught here."""
+        path = pyproject(
+            tmp_path,
+            "[tool.djaudit.llm]\nenabled = true\nprovider = 'openai'\n"
+            "model = 'm'\napi_key_env = 'K'\nbase_url = 'api.openai.com'\n",
+        )
+        with pytest.raises(ConfigError, match="http or https"):
+            from_pyproject(path)
+
+    def test_an_empty_base_url_is_not_recorded(self, tmp_path):
+        path = pyproject(
+            tmp_path,
+            "[tool.djaudit.llm]\nenabled = true\nprovider = 'openai'\n"
+            "model = 'm'\napi_key_env = 'K'\nbase_url = '  '\n",
+        )
+        assert "base_url" not in from_pyproject(path).extras

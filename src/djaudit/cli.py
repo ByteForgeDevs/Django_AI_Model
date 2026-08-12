@@ -28,14 +28,25 @@ from rich.markup import escape
 from rich.syntax import Syntax
 from rich.table import Table
 
-from djaudit import __version__, adapters, engine
+from djaudit import __version__, adapters, engine, mcp
 from djaudit.adapters import Adapter
 from djaudit.baseline import Baseline, BaselineError
 from djaudit.config import ConfigError, FileConfig, from_pyproject
 from djaudit.context import ProjectContext
 from djaudit.discovery import build_context
+from djaudit.generate import (
+    DEFAULT_MAX_ITERATIONS,
+    Loop,
+    Outcome,
+    Run,
+    Spec,
+    commit,
+    first_prompt,
+    repair_prompt,
+)
 from djaudit.live import consent
 from djaudit.llm import config as llm_config
+from djaudit.llm import http
 from djaudit.llm.budget import Budget, Metered
 from djaudit.llm.cache import Cache, Cached
 from djaudit.llm.evaluate import Verdict
@@ -638,16 +649,29 @@ def _build_provider(config: llm_config.LLMConfig) -> Provider:
     consulting the budget is cheaper than consulting it and forgiving it, and
     it leaves the cache able to tag each entry with its finding's fingerprint.
 
-    There is no branch here that reaches a third party. No such provider is
-    implemented, and this returns a declining one saying so, because a stack
-    that silently does nothing is indistinguishable from one that is broken.
+    A vendor this build does not speak returns a declining provider naming
+    itself rather than raising. Every consumer in this package already handles
+    `Declined`, because `NullProvider` is the path CI exercises on every
+    commit, so an unknown provider degrades along a tested route.
     """
     allowed, reason = config.usable
     if not allowed:
         return NullProvider(reason)
-    unimplemented = NullProvider(f"provider {config.provider!r} is not implemented yet")
+
+    # config.usable has already established the credential is present.
+    assert config.credential is not None
+    try:
+        inner: Provider = http.build(
+            vendor=config.provider,
+            model=config.model,
+            credential=config.credential,
+            base_url=config.extras.get("base_url", ""),
+        )
+    except ValueError as exc:
+        return NullProvider(str(exc))
+
     metered = Metered(
-        inner=unimplemented,
+        inner=inner,
         budget=Budget(max_tokens=config.max_tokens, max_calls=config.max_calls),
     )
     return Cached(inner=metered, cache=Cache(directory=config.cache_dir))
@@ -1092,6 +1116,135 @@ def _print_benchmark(console: Console, report: BenchmarkReport) -> None:
             f"[red]over budget[/red] {score.family} false-positive rate "
             f"{score.false_positive_rate:.1%} exceeds {report.max_false_positive_rate:.1%}"
         )
+
+
+@app.command()
+def generate(
+    description: Annotated[
+        str,
+        typer.Argument(help="What the app should do, in prose."),
+    ],
+    app_name: Annotated[
+        str,
+        typer.Option("--app", help="Python package name for the generated app."),
+    ],
+    into: Annotated[
+        Path,
+        typer.Option("--into", help="Existing Django project to generate the app into."),
+    ] = Path(),
+    max_iterations: Annotated[
+        int,
+        typer.Option("--max-iterations", help="Give up after this many audit-repair rounds."),
+    ] = DEFAULT_MAX_ITERATIONS,
+    min_severity: Annotated[
+        Severity,
+        typer.Option("--min-severity", help="Repair findings at or above this severity."),
+    ] = Severity.LOW,
+    write: Annotated[
+        bool,
+        typer.Option("--write/--dry-run", help="Write the result into the project."),
+    ] = False,
+) -> None:
+    """Write a Django app, audit it, repair it, and audit it again.
+
+    The generator is a language model; the judge is 87 deterministic rules. A
+    model cannot review its own output with the faculty that produced it, so
+    the audit is what makes the second pass worth anything.
+
+    Requires a model: configure the `tool.djaudit.llm` table in the project's
+    pyproject.toml with `enabled = true`, a `provider`, a `model` and an
+    `api_key_env`. Without one this reports why and generates nothing.
+
+    Nothing is written to `--into` until a run is accepted, and `--dry-run` is
+    the default, so the first invocation on a real project cannot damage it.
+    """
+    console = Console()
+    project = into.resolve()
+    if not (project / "manage.py").is_file():
+        _fail(
+            f"{project} does not look like a Django project (no manage.py). "
+            "Generation audits the app inside its real project, because half the "
+            "rules need the settings module to say anything."
+        )
+
+    try:
+        spec = Spec(app=app_name, description=description, project=project)
+    except ValueError as exc:
+        _fail(str(exc))
+
+    if spec.destination.exists():
+        _fail(f"{spec.destination} already exists; generation does not overwrite an app")
+
+    config = llm_config.resolve(project / "pyproject.toml")
+    provider = _build_provider(config)
+
+    loop = Loop(
+        provider=provider,
+        max_iterations=max_iterations,
+        min_severity=min_severity,
+        observer=lambda line: console.print(f"[dim]{line}[/dim]"),
+    )
+    result = loop.run(
+        spec,
+        first_prompt(spec),
+        lambda files, findings: repair_prompt(spec, files, findings),
+    )
+
+    _print_generation(console, result)
+
+    if result.outcome is Outcome.DECLINED:
+        raise typer.Exit(EXIT_ERROR)
+    if not result.accepted:
+        raise typer.Exit(EXIT_FINDINGS)
+
+    if write:
+        written = commit(result)
+        console.print(f"\nwrote {len(written)} file(s) to {spec.destination}")
+        console.print(
+            "[dim]Run `manage.py makemigrations` next. The audit is static: it "
+            "proves the code parses and clears the rules, not that it runs.[/dim]"
+        )
+    else:
+        console.print("\n[dim]--dry-run: nothing written. Pass --write to keep it.[/dim]")
+
+    raise typer.Exit(EXIT_OK if result.outcome is Outcome.CLEAN else EXIT_FINDINGS)
+
+
+def _print_generation(console: Console, result: Run) -> None:
+    """Report how the loop ended. The per-iteration lines were streamed live by
+    the observer, so reprinting them here would only make the run look twice as
+    long as it was."""
+    if result.outcome is Outcome.CLEAN:
+        console.print(
+            f"[bold green]clean[/bold green] after {len(result.iterations)} iteration(s)"
+            + (f", {result.cleared} finding(s) repaired" if result.cleared else "")
+        )
+        return
+
+    colour = "yellow" if result.outcome.writable else "bold red"
+    console.print(f"[{colour}]{result.outcome.value}[/{colour}]: {result.reason}")
+
+    for finding in result.findings:
+        console.print(
+            f"  {finding.rule_id}  {finding.severity.value}  "
+            f"{finding.location.file}:{finding.location.line}  {finding.title}"
+        )
+
+
+@app.command(name="mcp")
+def mcp_command() -> None:
+    """Serve djaudit to a coding agent over the Model Context Protocol.
+
+    Speaks stdio JSON-RPC and is meant to be launched by a client rather than
+    run by hand: an agent writing Django code calls `audit_django_project`
+    after each change and repairs what comes back, which is the loop a model
+    cannot run on itself, because reviewing its own output uses the faculty
+    that produced the defect.
+
+    Nothing is printed to stdout but protocol messages, so this command is
+    silent when it appears to be idle -- it is waiting for a request.
+    """
+    raise typer.Exit(mcp.serve())
 
 
 @app.command()
