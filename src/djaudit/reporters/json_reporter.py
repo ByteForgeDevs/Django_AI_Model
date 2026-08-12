@@ -25,6 +25,36 @@ def _finding(finding: Finding, verdict: Verdict | None) -> dict[str, Any]:
     return payload
 
 
+def _degraded(result: RunResult) -> dict[str, Any] | None:
+    """What the run could not check, for a consumer that never sees the terminal.
+
+    Emitted even when nothing was skipped, because an empty `skipped` is the
+    positive statement -- "the live tier ran, so this report is complete" -- and
+    a consumer that only saw the block when it was bad could not distinguish a
+    complete report from an old djaudit that never wrote one.
+
+    Terminal output has carried this since the live tier landed; JSON and SARIF
+    did not, so a pipeline uploading a report had no way to tell a clean project
+    from an unreachable one. That is the exact confusion `djaudit.degradation`
+    exists to prevent, and the container makes it the normal case: an image
+    holds djaudit alone, so the live tier can never run inside one.
+    """
+    if result.degraded is None:
+        return None
+    return {
+        "reason": result.degraded.reason,
+        "skipped": [
+            {
+                "rule_id": item.rule_id,
+                "title": item.title,
+                "fallback": item.fallback,
+                "covered_by": list(item.covered_by),
+            }
+            for item in result.degraded.skipped
+        ],
+    }
+
+
 def build(
     result: RunResult,
     verdicts: Mapping[str, Verdict] | None = None,
@@ -49,6 +79,8 @@ def build(
             "reported": len(result.findings),
             "total_raw": result.total_raw,
             "suppressed_inline": result.suppressed_inline,
+            "suppressed_path": result.suppressed_path,
+            "severity_overridden": result.severity_overridden,
             "suppressed_baseline": result.suppressed_baseline,
             "below_threshold": result.filtered_threshold,
             "rules_run": result.rules_run,
@@ -56,6 +88,7 @@ def build(
             "duration_seconds": round(result.duration_seconds, 4),
         },
         "findings": [_finding(f, judged.get(f.fingerprint)) for f in result.findings],
+        "degraded": _degraded(result),
         "diagnostics": [
             {
                 "code": d.code,

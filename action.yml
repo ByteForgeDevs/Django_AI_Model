@@ -1,0 +1,130 @@
+name: djaudit
+description: >-
+  Django-aware static analysis for security, DRF authorization, ORM
+  performance, migration safety and SQLite/Postgres portability.
+author: djaudit
+
+branding:
+  icon: shield
+  color: green
+
+inputs:
+  path:
+    description: Path to the Django project to audit.
+    required: false
+    default: "."
+  version:
+    description: >-
+      Version of djaudit to install, as a PEP 440 specifier such as `0.4.0` or
+      `>=0.1,<0.2`. Ignored when `install` is false.
+    required: false
+    default: "0.4.0"
+  install:
+    description: >-
+      Install djaudit before running. Set to `false` when the workflow has
+      already installed it — for example to audit against a development
+      checkout rather than a release.
+    required: false
+    default: "true"
+  fail-on:
+    description: >-
+      Exit non-zero when a finding reaches this severity: critical, high,
+      medium, low or info.
+    required: false
+    default: "high"
+  min-severity:
+    description: Hide findings below this severity.
+    required: false
+    default: "low"
+  min-confidence:
+    description: >-
+      Hide findings below this confidence: certain, firm or tentative.
+      Tentative findings are excluded by default because they are the noisy
+      ones.
+    required: false
+    default: "firm"
+  baseline:
+    description: >-
+      Path to a baseline file whose findings are suppressed. This is how an
+      existing codebase adopts the tool without a wall of alerts on day one.
+    required: false
+    default: ""
+  args:
+    description: >-
+      Additional arguments passed to `djaudit run` verbatim, for the options
+      this action does not expose as inputs. Split on whitespace, so no
+      argument may contain a space.
+    required: false
+    default: ""
+  sarif-file:
+    description: Where to write the SARIF report.
+    required: false
+    default: "djaudit.sarif"
+  upload-sarif:
+    description: >-
+      Upload the SARIF report to GitHub code scanning. Requires the job to
+      grant `security-events: write`, and is silently unavailable to pull
+      requests from forks.
+    required: false
+    default: "true"
+
+outputs:
+  sarif-file:
+    description: Path to the SARIF report, written whether or not the audit passed.
+    value: ${{ inputs.sarif-file }}
+  exit-code:
+    description: >-
+      The audit's exit code. 0 means nothing reached `fail-on`; 1 means
+      something did; anything else means djaudit failed to run.
+    value: ${{ steps.audit.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: install djaudit
+      if: inputs.install == 'true'
+      shell: bash
+      run: python -m pip install --disable-pip-version-check "djaudit==${{ inputs.version }}"
+
+    # The audit deliberately does not fail this step. A composite action's
+    # steps stop at the first failure, so failing here would skip the upload
+    # and the findings would never reach code scanning -- the one case where
+    # the report matters most. The exit code is carried forward instead and
+    # acted on at the end, after the upload has happened.
+    - name: audit
+      id: audit
+      shell: bash
+      run: |
+        set -o pipefail
+        code=0
+        djaudit run "${{ inputs.path }}" \
+          --format sarif \
+          --output "${{ inputs.sarif-file }}" \
+          --fail-on "${{ inputs.fail-on }}" \
+          --min-severity "${{ inputs.min-severity }}" \
+          --min-confidence "${{ inputs.min-confidence }}" \
+          ${{ inputs.baseline && format('--baseline {0}', inputs.baseline) || '' }} \
+          ${{ inputs.args }} || code=$?
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        if [ ! -f "${{ inputs.sarif-file }}" ]; then
+          echo "::error::djaudit exited $code without writing a report, so it failed to run rather than finding anything"
+          exit 1
+        fi
+
+    - name: upload to code scanning
+      if: inputs.upload-sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+        category: djaudit
+
+    # Only now, with the findings uploaded and visible, is it safe to fail.
+    - name: report the verdict
+      shell: bash
+      run: |
+        code="${{ steps.audit.outputs.exit-code }}"
+        if [ "$code" != "0" ]; then
+          echo "::error::djaudit found something at or above '${{ inputs.fail-on }}'; the findings are in ${{ inputs.sarif-file }}"
+          exit "$code"
+        fi
+        echo "djaudit found nothing at or above '${{ inputs.fail-on }}'"

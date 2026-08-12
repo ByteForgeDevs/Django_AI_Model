@@ -8721,22 +8721,728 @@ conversation.
 
 ### Step 7.1 — Packaging and release
 
-- **7.1.1** — PyPI release workflow with trusted publishing.
-- **7.1.2** — Semantic versioning policy, including what constitutes a breaking change to the finding schema.
-- **7.1.3** — Changelog generation from the commit trail.
+- **7.1.1** — PyPI release workflow with trusted publishing. **Done** —
+  `.github/workflows/release.yml`, `scripts/check_release.py`,
+  `tests/test_release.py` (33 tests).
+
+  *The version had two sources.* `pyproject.toml` said `0.1.0` and
+  `src/djaudit/__init__.py` said `0.1.0`, with nothing keeping them equal —
+  and they are not interchangeable, because every JSON and SARIF report we
+  emit stamps `__version__` into `tool.version`. A tree whose metadata and
+  module disagree publishes findings labelled with a version that was never
+  released, and the mistake travels in the reports of everyone who installed
+  it. The module is now the source (`[tool.hatch.version]`), the literal is
+  gone, and the link was verified by changing `__version__` to `9.8.7` and
+  watching `uv build` produce `djaudit-9.8.7`. Building with both numbers
+  already equal would have proved nothing.
+
+  *Publishing is the only thing here with no undo,* so the gate guards the
+  path rather than the artefact. Trusted publishing means no API token exists
+  in this repository — a token is a long-lived credential that publishes from
+  anywhere and whose theft is invisible from inside CI, whereas OIDC mints a
+  short-lived one that PyPI accepts only from this workflow, in this
+  repository, in this environment. The release runs `ci.yml` through
+  `workflow_call` on the tagged tree rather than trusting that some earlier
+  commit was green: a tag can be moved, and a `workflow_run` gate would be
+  checking a different commit than the one being shipped. `workflow_dispatch`
+  is deliberately absent, because a human picking a ref from a dropdown is
+  exactly how an untested commit reaches PyPI under a version no tag points at.
+  The tag/version comparison runs *before* the build, since a mismatch does not
+  fail — it succeeds, and ships the wrong number.
+
+  *Building is not shipping.* `uv build` succeeding says the metadata parsed.
+  The workflow installs the built wheel into an empty environment with no dev
+  dependencies and no source tree on the path, runs `djaudit version` from
+  outside the repository, and compares it to the tag. Locally the same wheel
+  was made to audit Healthchecks and returned the same 35 findings the source
+  tree does, stamped `0.1.0` — the first evidence that packaging carries
+  everything the rules need rather than merely importing.
+
+  *Amended at the end of Phase 7, before the first tag.* Rehearsing the release
+  by hand — build the wheel, install it into an empty venv, import it — found a
+  defect no gate in this repository could see. The published package had **no
+  `py.typed` marker**, so despite mypy being clean on 363 files, a consumer who
+  installed djaudit and ran mypy over `from djaudit.registry import all_rules`
+  got `Revealed type is "Any"` and an `import-untyped` error. Every check here
+  reads the *source tree*, where the annotations are plainly visible, and all
+  of them agreed the project was fully typed. PEP 561 is a fact about the
+  built artefact, and it is only visible from the artefact's point of view.
+  Adding the marker turns that same import into
+  `def () -> list[type[djaudit.registry.Rule]]`. `check_release.py` now
+  requires the marker and the `Typing :: Typed` classifier, with un-fix
+  controls for each, and the fixture that every other release test builds on
+  carries the marker so removing it from the real package fails three tests.
+
+  The rehearsal is worth repeating before any first release: the wheel built at
+  `0.4.0` installs clean into an empty environment, reports `0.4.0` from
+  outside the source tree, and audits Healthchecks to the same 41 findings
+  (35 above threshold) the source tree produces.
+
+  *Verified:* 16 un-fixes, each caught with its own message — a literal
+  version restored, `dynamic` dropped, the build pointed at a missing file and
+  at a module with no `__version__`, `workflow_dispatch` added, a branch
+  trigger added, the tag trigger removed, the publisher replaced by an echo,
+  `id-token` removed, the environment removed, an API token passed, `needs`
+  cut at the end of the chain and in its middle, the gate job pointed
+  elsewhere, and `workflow_call` removed from `ci.yml`. Two of the gate's own
+  readers are asserted directly rather than assumed: YAML 1.1 folds the bare
+  word `on` to the boolean `true`, so a reader asking for `workflow["on"]`
+  raises on a real workflow and one asking with a default returns empty and
+  makes every trigger check vacuous; and `needs: gate` must walk the same as
+  `needs: [gate]`, or a legal spelling silently breaks the dependency graph.
+
+  *One test-design defect, found by asserting the message.* Two un-fixes
+  anchored on the path `src/djaudit/__init__.py`, which `pyproject.toml`
+  mentions in a comment *before* it mentions it in `[tool.hatch.version]` — so
+  they rewrote the prose, changed the file, and left the build reading exactly
+  what it read before. Both reported that the gate had passed. The helper now
+  requires its anchor to be unique rather than merely present, which turns that
+  whole class of silent no-op into a test failure. Had the tests asserted only
+  a non-zero exit, the two would have looked like gate defects and been "fixed"
+  in the gate.
+- **7.1.2** — Semantic versioning policy, including what constitutes a
+  breaking change to the finding schema. **Done** — `docs/versioning.md`,
+  `schema/contract.json`, `scripts/gen_schema.py`,
+  `tests/test_schema_contract.py` (48 tests).
+
+  *The policy already existed as a sentence.* `models.py` opened with "treat
+  changes here as breaking changes and bump `SCHEMA_VERSION`", and nothing
+  anywhere enforced it. Three numbers govern three different contracts —
+  `__version__` for the release, `SCHEMA_VERSION` for the report, and
+  `FINGERPRINT_VERSION` for finding identity — and only the first was even
+  mechanically checkable before this substep.
+
+  *The third is the one that matters most and shows least.* A fingerprint is
+  the key in every baseline file committed in every repository that has adopted
+  the tool. Change how a snippet is normalised — a `.lower()`, a different
+  whitespace rule — and no field name changes, no shape changes, and every test
+  asserting fingerprints are *stable* still passes, because they are perfectly
+  stable, at new values. Every baseline everywhere stops matching and findings
+  triaged months ago reappear as new. Nothing in the repository pinned a single
+  digest, so the whole class was invisible. It is pinned now, with vectors
+  chosen for what could drift unseen: whitespace collapsing, the occurrence
+  index, an empty snippet, and non-ASCII text.
+
+  *A ledger rather than a snapshot,* because a snapshot has an obvious bypass.
+  A developer changes the shape, the gate fails, and they regenerate — which is
+  what the error message told them to do — and now the file agrees with the new
+  code under the old version number. So `schema/contract.json` holds one entry
+  per published version, the generator only ever *adds* entries, and the gate
+  additionally compares every published entry against the copy in `HEAD`.
+  Changing the contract has two ways out: revert, or publish a new version.
+
+  *The contract is derived, never written.* It comes from running the reporter
+  over two specimens — one with every optional populated, one with everything
+  at its default — and merging what they emit. Both are needed: a single
+  populated specimen records `end_line` as an integer when a real run almost
+  always emits `null`, so the contract would promise consumers a field that is
+  always there. Keys that are data rather than field names — `parse_errors`,
+  `rule_errors`, `findings[].properties` — collapse to `map`, because the first
+  draft baked one specimen's invented filename into the contract as though
+  `parse_errors.broken.py` were a field. `summary.by_severity` deliberately
+  does not collapse: its keys are the `Severity` enum, so they are contract.
+
+  *Writing it found two defects in it.* The first draft left `diagnostics`,
+  `parse_errors` and `settings_modules` empty, so eight fields never entered
+  the contract at all and the docstring claiming otherwise was false. The
+  second was worse and only surfaced when a test bumped a release: `build()`
+  *assigned* each entry, so `tool_version` on an already-published entry was
+  rewritten every time the release number moved — meaning a routine patch
+  release would rewrite history and trip the append-only check on its way out
+  the door. `setdefault` fixed both that and the laundering bypass at once, and
+  a control now bumps `0.1.0` to `0.1.1` and asserts the ledger is byte
+  identical.
+
+  *Verified:* 21 un-fixes, each caught with its own message — a field removed,
+  renamed and retyped; a severity and a family added; snippet normalisation
+  changed, the fingerprint payload reordered and the digest truncated
+  differently; both version constants bumped without recording anything; the
+  ledger deleted; a vector, an enum member and a shape entry tampered with; a
+  digest quietly corrected; and six against the doc gate. Two controls were
+  themselves wrong and were fixed rather than accepted: one produced invalid
+  JSON, so it proved the parser worked and not the gate, and one renamed a
+  constant the gate imports, so it crashed rather than reporting. `--check`
+  also caught a genuine hole on its first run: the path regex required the
+  whole backtick span to be a path, so every path cited with arguments —
+  including `scripts/gen_schema.py --check`, the doc's own headline command —
+  was never verified to exist.
+
+  *Verified against reality:* four fixture projects are audited through the
+  real CLI in a subprocess and their output asserted to conform, with a
+  companion test that fails if those fixtures ever stop producing findings —
+  a conformance check over an empty report would pass while proving nothing.
+- **7.1.3** — Changelog generation from the commit trail. **Done.**
+
+  The commit trail is already the changelog: 232 commits, 222 of which match
+  `<type>(<scope>): <subject>`, the other ten being eight merges and two
+  commits written before the convention was adopted. Writing a second,
+  hand-maintained account of the same history would create a file that can
+  disagree with the repository, and nothing would notice when it did. So
+  `scripts/gen_changelog.py` derives `CHANGELOG.md` from `git log` and
+  `--check` rebuilds and compares, which makes a hand edit and a forgotten
+  regeneration fail identically.
+
+  Three details are not obvious:
+
+  - **Changelog-only commits are excluded.** Regenerating the changelog is
+    itself a commit; if it were included, the next run would find the trail
+    changed and demand another regeneration, forever. Commits whose only
+    touched file is `CHANGELOG.md` are dropped.
+  - **Upgrade notes come from the contract ledger, not from subjects.** A
+    commit can say `feat(core): better snippets` while quietly bumping
+    `FINGERPRINT_VERSION`, and the reader needs to be told to regenerate their
+    baseline. `contract_changes()` diffs `schema/contract.json` between the
+    last tag and `HEAD` and requires the changelog to mention any new schema
+    or fingerprint version by name.
+  - **Tagged-release paths are exercised only in constructed repositories.**
+    The real repo has no tags, so everything under a version heading is tested
+    against temporary git repositories built by the test fixture. The
+    `--check` summary reports `0 released · 224 commits unreleased`, which is
+    the honest state.
+
+  Writing the CI step found a defect the local run could not: GitHub's
+  checkout action clones to depth 1 by default, and a depth-1 clone rebuilds
+  the changelog from a single commit and reports a *correct* file as out of
+  date. Verified by cloning the repo shallowly and watching the gate fail for
+  the wrong reason. Fixed twice over — the `quality` job now checks out with
+  `fetch-depth: 0`, and the gate detects a shallow clone and says so, rather
+  than sending the reader after a content problem that does not exist.
+
+  *Verified:* 27 tests; six un-fix controls against the generator (merges
+  admitted, changelog-only commits kept, the breaking marker dropped, the
+  `BREAKING CHANGE:` footer ignored, unknown types kept, scope dropped) all
+  caught by the unit tests; six controls against the real tree (an entry
+  deleted, an entry reworded, a sha altered, the preamble stripped, the
+  versioning link removed, the file deleted) all caught by `--check`; the
+  shallow guard confirmed load-bearing by removing it.
 
 ### Step 7.2 — Integrations
 
-- **7.2.1** — A composite GitHub Action wrapping the CLI with SARIF upload.
-- **7.2.2** — `pre-commit` hook definition.
-- **7.2.3** — Container image for non-Python CI environments.
+- **7.2.1** — A composite GitHub Action wrapping the CLI with SARIF upload. **Done.**
 
-### Step 7.3 — Documentation
+  The ordering is the design. A composite action stops at its first failing
+  step, so an audit that failed the step directly would skip the upload, and
+  the findings would be missing from code scanning in precisely the case where
+  someone needed to see them. The audit therefore records its exit code
+  instead of acting on it, the upload runs next, and a final step fails the
+  job. A crash is separated from a finding: exiting non-zero *without* writing
+  a report means djaudit failed to run, and the action stops rather than
+  uploading nothing. Verified that a report is written before the non-zero
+  exit, and that a project with no findings still produces a valid SARIF file
+  with an empty `results` array — otherwise the upload would have nothing to
+  send on a clean run.
 
-- **7.3.1** — Getting-started guide and adoption path for a legacy codebase.
-- **7.3.2** — Complete rule reference, generated from `RuleMeta` so it cannot drift.
-- **7.3.3** — Rule authoring guide for external contributors.
-- **7.3.4** — Configuration reference: `pyproject.toml` settings, per-rule severity overrides, per-path exclusions.
+  An action is a string executed on someone else's runner, so a mistake is
+  reported against *their* repository. `scripts/check_action.py` therefore
+  checks everything reachable without a runner: every `${{ inputs.x }}` names
+  a declared input (an undeclared one expands to the empty string rather than
+  erroring), every declared input is used, every `--flag` handed to `djaudit
+  run` exists on `djaudit run`, every default that names a CLI choice is one of
+  that option's choices, and the upload sits between the audit and the failure.
+  The flag and choice checks read the real CLI through typer, so renaming an
+  option breaks the gate rather than the caller.
+
+  Structural checks are not enough, so the tests render the action's own shell
+  scripts — substituting the workflow expressions, and refusing to run if any
+  expression is one the renderer does not understand — and execute them
+  against fixture projects. CI goes further and runs the action itself with
+  `uses: ./`, once against a fixture full of findings (asserting the action
+  fails *and* left a report behind) and once against `near_miss_project` with
+  the upload enabled. That second run is the only way to learn that code
+  scanning accepts the shape of what we emit, and because the report has zero
+  results it creates no alerts.
+
+  Two things are true and worth stating: the action's default `install: true`
+  installs a pinned release that does not exist until 7.1.1's workflow
+  publishes it, which is why every CI run passes `install: false`; and the
+  upload is unavailable to pull requests from forks, which is recorded in the
+  documentation rather than worked around.
+
+  *Verified:* 21 tests; six un-fix controls against the action (the audit
+  failing the step, a flag the CLI does not have, an input referenced by the
+  wrong name, a missing `shell:`, a default outside the choices, the verdict
+  step deleted) all caught by both the gate and the tests; five controls
+  against the documentation gate all caught.
+- **7.2.2** — `pre-commit` hook definition. **Done.**
+
+  pre-commit's default contract is to hand a hook the changed files, and that
+  contract does not fit this tool. djaudit's unit of analysis is the project:
+  it resolves the settings modules, builds a model graph and a DRF route
+  graph, and follows taint between files. DJA-004 needs the viewset, the
+  serializer and the model, which are rarely in one commit.
+
+  Both ways of getting this wrong were measured rather than assumed, and they
+  fail very differently:
+
+  - **`pass_filenames: true` fails loudly.** `djaudit run` takes one directory,
+    so pre-commit's file list arrives as "Got unexpected extra argument(s)",
+    and a single changed file exits 2 with "path is not a directory".
+  - **Narrowing to a subdirectory fails silently.** An app package contains no
+    settings module, so djaudit resolves nothing, reports nothing and exits 0.
+    Measured on `vulnerable_project`: 29 findings from the root, **0 from its
+    `app/` subtree, exit 0**. That is the trap, and it is the one a reader
+    would have called the safe option.
+
+  So the hooks set `pass_filenames: false` and audit the repository root, with
+  `types: [python]` so a templates-only commit is not audited. Two are
+  published: `djaudit`, and `djaudit-security` restricted to `DJS`/`DJI`/`DJA`
+  for repositories that want a fast local signal and leave the rest to CI.
+
+  `scripts/check_pre_commit.py` checks the manifest against the real CLI —
+  every hook invokes a command that exists, every flag exists on it, every
+  value handed to a choice option is one of its choices, `pass_filenames` is
+  false, and the documented hook list is exactly the published one. The family
+  check is the one that earns its keep: renaming a family would leave a hook
+  silently auditing nothing.
+
+  A manifest nobody has run is a guess, so `tests/test_pre_commit.py` runs the
+  real `pre-commit` binary against throwaway git repositories that consume this
+  checkout, and confirms it installs the hook, fails a dirty tree and passes a
+  clean one. Those tests are opt-in through `DJAUDIT_TEST_PRE_COMMIT=1`,
+  following the Postgres convention — and because an opt-in that quietly does
+  nothing is the exact failure it exists to prevent, asking for them without
+  `pre-commit` installed raises rather than skips, and the CI step fails if the
+  run reports any skip at all. That guard needed its own correction: the first
+  version grepped for `SKIPPED`, which `-q` in `addopts` never prints, so it
+  could not have fired. It now matches the summary line, checked against a run
+  that skips and a run that does not.
+
+  *Verified:* 16 tests, 3 of them driving real pre-commit; ten un-fix controls
+  against the gate (filenames passed, a flag the CLI rejects, a severity it
+  rejects, a renamed family, a command that does not exist, the `types`
+  restriction removed, a hook renamed but not documented, a documented hook
+  that does not exist, a non-python language, the manifest deleted) all caught,
+  each with the message that names the actual defect.
+- **7.2.3** — Container image for non-Python CI environments. **Done.**
+
+  For runners that have docker and nothing else. If you can `pip install`, the
+  image buys nothing but isolation and a pinned interpreter; it costs a mount
+  and the live tier.
+
+  **The image is built from this checkout, not installed from PyPI.** A tag
+  names a version and the report stamps `tool.version` into every finding, so
+  an image that installed `djaudit==<n>` could publish findings labelled with
+  code it does not contain. Two stages: build a wheel, install it, discard the
+  toolchain.
+
+  `ENTRYPOINT ["djaudit"]` with `CMD ["run", "/src"]`, and both halves matter.
+  Naming the bare CLI keeps every subcommand reachable — `docker run ... rules`
+  works, which `ENTRYPOINT ["djaudit", "run"]` would break. `WORKDIR /src` and
+  the `CMD` path agree so a bare `docker run -v "$PWD:/src:ro"` does the
+  obvious thing; a `CMD` pointing anywhere else would audit an empty directory,
+  report nothing and **exit 0**, which is indistinguishable from a clean
+  project. The gate checks that agreement for exactly that reason.
+
+  **No container runtime exists on this machine** — no docker, podman, buildah
+  or nerdctl, and no socket — so *the image has never been built here.* That is
+  stated plainly rather than papered over, and it shaped the work: CI builds it
+  and runs it, and the CI job compares the image's finding count against the
+  CLI's on the same fixture, because a build that succeeds proves nothing about
+  what the image does. It also asserts a bare run exits 1, a non-`run`
+  subcommand still works, the user is not root, and a read-only mount is
+  enough.
+
+  Locally, the testable half is the build *context*. `COPY pyproject.toml
+  README.md ./` plus `COPY src ./src` is a claim that those paths suffice to
+  build a wheel — a claim that breaks the day packaging metadata reads a file
+  nobody copied. `tests/test_container.py` copies exactly what the Dockerfile
+  copies into an empty directory and builds there, which reproduces that
+  failure in seconds. The wheel it produced was installed into a clean venv and
+  audited Healthchecks: **35 findings, stamped with this tree's version**.
+
+  `scripts/check_dockerfile.py` gates what a successful build would not reveal:
+  the base is pinned, both stages agree on it, it satisfies `requires-python`,
+  every copied path exists, the image drops privileges *after* installing, the
+  entrypoint names a real command, `CMD`'s flags exist, and `docs/container.md`
+  documents the same mount point.
+
+  **Two defects the controls found, both in the tests rather than the subject.**
+  The suite reimplemented the copied-path loop and the doc check instead of
+  calling the gate, so deleting either check from `check_dockerfile.py` left
+  everything green — the copy in the test file had quietly become the thing
+  under test. Both are now extracted as functions the tests call, with a
+  reflection assertion that `check` still calls them. A third control was
+  itself imprecise: it stripped one mention of `--live` from the doc and left
+  the others, so the fact it meant to remove was still stated.
+
+  *Verified:* 24 tests; 19/19 un-fix controls caught, covering every gate
+  branch and the Dockerfile, `.dockerignore` and doc it reads.
+
+  *Not verified anywhere but CI:* that `docker build` succeeds, and everything
+  downstream of it.
+
+  **Amended — a reporting gap the container exposed, fixed here.** Writing the
+  "what does not work in the image" section forced the question of how a reader
+  learns the live tier did not run. Measurement: the warning goes to *stderr*,
+  and `RunResult.degraded` reached only the terminal reporter. So a pipeline
+  uploading SARIF got a static-only report with nothing in the artifact saying
+  so — and fewer findings look exactly like a cleaner codebase, which is the
+  precise confusion `djaudit/degradation.py` was written to prevent. Its own
+  docstring says a tool that quietly checks less is worse than one that fails;
+  two of the three reporters did not honour it.
+
+  JSON now carries a `degraded` block (reason, and each skipped rule with its
+  fallback and which fallbacks actually ran), and SARIF carries a
+  `toolExecutionNotifications` entry. The SARIF level distinguishes the two
+  cases: `note` when the live tier was never requested, which is the ordinary
+  state of affairs, and `warning` when it was requested and could not run,
+  which is the actionable one. Raising a warning on every static run would be
+  an alarm that is always on. `executionSuccessful` stays true — the tool did
+  reach everything it could, and a narrower report is not an unusable one. The
+  block is emitted even when nothing was skipped, because an absent key cannot
+  be told apart from an older djaudit.
+
+  This is a report-shape change, so the contract gate demanded — correctly — a
+  new schema version, and the versioning policy makes a `SCHEMA_VERSION` bump a
+  breaking release. Hence **schema 2** and **0.2.0**, with schema 1's ledger
+  entry untouched. The specimen was extended to populate `degraded` so its
+  nested shape is under contract rather than recorded as a bare `null`.
+
+  **Three tests were found to be passing for the wrong reason**, all by the
+  bump rather than by review:
+
+  - `test_a_new_version_without_a_release_bump_is_caught` went green because
+    the gate required *every* prior entry to share the current release series.
+    That fires exactly once, at the first bump, and never again — from the
+    second entry onwards there is always an older series to make `all` false,
+    so a third schema version could have ridden along on an already-shipped
+    release. Now `any`.
+  - Its contrast asserted against the literal `"0.2.0"`, which stopped being a
+    contrast the moment the project reached it. Now derived from the live
+    version.
+  - The action's end-to-end test ran the install step and passed only because
+    an editable install's recorded metadata still read the previous version —
+    `djaudit` is not on PyPI at all, so that step could never have succeeded on
+    its own terms. The test now honours the step's `if:` condition and runs
+    with `install: false`, with a contrast proving the condition evaluator is
+    not simply skipping everything.
+
+  **Two further defects surfaced while closing the release loop**, both of the
+  same kind: a documented or generated version with nothing holding it to
+  `__version__`.
+
+  - **The changelog could not report a contract change in this repository.**
+    `contract_changes(None)` compared the ledger against itself, so it always
+    returned nothing, and the gate demanding those notes appear could never
+    fire. Both were dead code that read as working — the schema 2 bump above
+    produced no upgrade note at all. The cause was one argument meaning two
+    things: `commits(None, ...)` reads a missing tag as "nothing has shipped"
+    and returns the entire history, so the same section claimed all 228 commits
+    were unreleased while claiming the contract they ship was not new. `None`
+    now compares against an empty ledger. This is the window in which people
+    install from git, which is exactly when a schema bump needs explaining.
+
+  - **The docs told people to install a version that no longer exists.**
+    `docs/github-action.md` pinned `@v0.1.0` twice and `docs/pre-commit.md`
+    `rev: v0.1.0`, at version 0.2.0. Those strings are copied verbatim into
+    someone else's workflow, so they decide which djaudit that person runs.
+    All ten gate scripts passed with them wrong; replacing both with `v9.9.9`
+    and rerunning left both gates green. `test_the_example_pins_a_version`
+    looked like coverage and was not — it asserts the example matches
+    `@v\d+\.\d+\.\d+`, so a *wrong* version satisfies it, which it did for the
+    whole life of 0.1.0. Both gates now compare every documented rev against
+    `__version__`.
+
+  *Verified:* 5299 tests; ruff and mypy clean; ten fixture evals passing; 100%
+  precision on all three corpora with zero regressions; five un-fix controls
+  across the three changed scripts, all caught. The timing gate reads 3.69s
+  against its 3.5s budget on this machine — `main` measures 3.72s under the
+  same load, so the overrun is the shared machine, not this branch.
+
+### Step 7.3 — Configuration
+
+**Amended.** This step did not exist. The original 7.3.4 promised a
+*configuration reference* covering "`pyproject.toml` settings, per-rule
+severity overrides, per-path exclusions", and none of those three things had
+been built: `[tool.djaudit.llm]` is read by `src/djaudit/llm/config.py` and
+nothing else is, `--ignore` takes rule ids rather than paths, and no severity
+can be overridden anywhere. A documentation substep whose subject does not
+exist is the failure mode risk 12 is about, one layer up — it would have
+produced a reference page for a feature nobody could use, and the page would
+have passed review because references are read for shape, not truth.
+
+So the reference stays (as 7.4.4) and the feature it describes is built first.
+Configuration comes before documentation in the step order deliberately: 7.4.1
+tells a reader how to adopt djaudit on a legacy codebase, and on a legacy
+codebase the honest answer involves exclusions.
+
+- **7.3.1** — `[tool.djaudit]` in `pyproject.toml`: discovery, validation, and
+  the precedence rule against CLI flags. The subtle part is not reading TOML,
+  it is that a flag left unset must be distinguishable from a flag set to its
+  own default, or config silently loses to a default nobody typed. **DONE.**
+
+  `src/djaudit/config.py` reads `[tool.djaudit]` from the audited project's
+  `pyproject.toml`, the same file `[tool.djaudit.llm]` already lives in. Eleven
+  keys: the three thresholds, the three rule filters, `baseline`, `format`,
+  `output`, and the two tier switches. Every field on `FileConfig` defaults to
+  `None`, because "not stated" has to survive as far as the merge — a field
+  holding `Severity.LOW` would be indistinguishable from a project that asked
+  for `low`.
+
+  **Precedence asks click, not the value.** `--min-severity` defaults to `low`,
+  so by the time the function body runs, an unmentioned flag and an explicit
+  `--min-severity low` are the same object. `ctx.get_parameter_source(name)`
+  is the only thing that separates them. A merge written the obvious way —
+  compare against the default — passes every unit test of the parser and then
+  loses every setting in the file to a default nobody typed. It is in the
+  un-fix controls as its own case for that reason.
+
+  *Measured through the CLI, by counting findings on the planted-defect
+  fixture:* 24 findings by default; `min_severity = "critical"` in the file
+  cuts it to 3; `--min-severity low` on top restores 24; `min_confidence =
+  "tentative"` widens it to 27.
+
+  **The file cannot turn on a tier that executes the target.** This is read out
+  of the repository under audit, so it is exactly as trustworthy as that
+  repository — and the static tier's promise, stated three times in this plan,
+  is that it never imports or executes what it is pointed at. A file that could
+  set `live = true` would move that decision from the operator to the author of
+  the code being audited. `live` and `external` may be switched off here and
+  never on; the refusal names the flag to use instead, because a refusal
+  without an alternative is a dead end.
+
+  `write_baseline` is deliberately not a key at all. As a persistent setting it
+  would record every finding and exit zero on every run — an audit that always
+  passes, which is the one failure this tool must not have.
+
+  **An unknown key is an error**, with a suggestion: `min_severty` names
+  `min_severity`, and `min-severity` is told the key is spelled with an
+  underscore, since the flag is hyphenated and that is the obvious wrong guess.
+  Wrong types and bad enum values name what was given and list what is allowed.
+
+  **A defect the messages themselves exposed.** Every string this module
+  produces contains `[tool.djaudit]`, which is also valid rich markup, and
+  `_fail` interpolated its argument into a markup string. The user was told
+  `pyproject.toml:  min_severity must be a string` — the renderer had silently
+  eaten the part naming the table. `_fail` now escapes. The same latent bug
+  would have removed any bracketed path from any error the CLI reports.
+
+  *Verified:* 46 config tests, 121 with the CLI suite; ruff and mypy clean;
+  nine un-fix controls, all caught — including one that reverts the merge to a
+  default comparison and one that stops escaping the error.
+- **7.3.2** — Per-path exclusions. **DONE.** The design question was *where*
+  they apply, and it was settled by measurement rather than by argument. On
+  `orm_project` at `--min-severity info --min-confidence tentative` the full run
+  reports **15 findings across 5 files**. `inventory/models.py` holds **2** of
+  them. Physically removing that file — what "exclude before parsing" amounts
+  to — reports **0 findings and exits clean**, because every `DJP` finding in
+  the views, the serializers and the management command is derived from the
+  model graph that file builds. Excluding the same path by pattern reports
+  **13**, with `suppressed_path = 2`. The stronger implementation is the one
+  that does less: exclusions filter findings by location after every rule has
+  run and seen the whole project.
+
+  Shipped as `--exclude-path` (repeatable) and `exclude_paths` in
+  `[tool.djaudit]`, matched with `fnmatch` against the project-relative posix
+  path, where a bare directory name excludes its subtree. The count is reported
+  in the JSON summary (`suppressed_path`) and on the terminal, for the reason
+  `RunResult`'s own docstring gives: a run that hides 300 findings and a clean
+  project otherwise print the same thing. That report field is a schema shape
+  change, so `SCHEMA_VERSION` goes 2 → 3 and the version 0.2.0 → 0.3.0.
+
+  Two things the tests found. Writing the un-fix control for the empty-pattern
+  guard showed the guard **could not fire** — against a relative path, `""`
+  matches nothing, `"/*"` matches nothing and `startswith("/")` is never true —
+  so it was dead code that read like a safety net, and the mutant survived
+  because there was nothing to break. Silently ignoring a pattern the user
+  clearly meant something by is the same failure this substep exists to
+  prevent, so the empty pattern is now *refused* at the CLI boundary instead.
+  Related: `fnmatch`'s `*` crosses `/`, so a literal directory prefix needs its
+  own check, and that check has to be `bare + "/"` — a plain `startswith(bare)`
+  makes `--exclude-path app` swallow `apples/`.
+- **7.3.3** — Per-rule severity overrides. **DONE.** The plan's claim was that
+  they must apply *before* thresholds, and that is measurable rather than
+  stylistic. On `orm_project` with `--min-severity high`:
+
+  | run | reported |
+  |---|---|
+  | plain | 2 |
+  | `--severity DJP-006=critical` (it is `low`) | **3** |
+  | `--severity DJP-003=low` (it is `high`) | **1** |
+
+  and `--fail-on critical` goes from exit 0 to exit 1 under
+  `--severity DJP-003=critical`. Applied after the threshold filter, all four
+  numbers are unchanged and the override is a relabelling of findings the
+  threshold had already decided about — decoration, exactly as the plan
+  suspected. The un-fix control for this is the one that matters: *moving* the
+  override after the filter (not adding a second pass — that was a control bug
+  first time round, and it caught nothing) fails 3 tests.
+
+  Shipped as `--severity RULE=LEVEL` (repeatable) and `[tool.djaudit.severity]`.
+  Ids are upper-cased on both paths, so `djp-003 = "low"` is not a silent
+  no-op, and an id no rule owns is refused with a `difflib` suggestion — a
+  typo'd override is otherwise a setting that does nothing forever and looks
+  identical to one working on a rule the project never triggers.
+
+  Two properties worth recording. Severity is **not** part of the fingerprint
+  (`compute(rule_id, file, snippet, occurrence)`), so an override cannot
+  invalidate a committed baseline; there is a test asserting a baseline written
+  before an override still matches every finding after it. And the count is
+  reported as `severity_overridden`, because a consumer reading `severity:
+  "low"` otherwise has no way to know the project relabelled it — an aggregate
+  dashboard would be skewed by someone else's config with nothing to show for
+  it. That field is another shape change, so `SCHEMA_VERSION` goes 3 → 4 and
+  the version 0.3.0 → 0.4.0. The schema gate named the required bump itself.
+
+### Step 7.4 — Documentation
+
+- **7.4.1** — Getting-started guide and adoption path for a legacy codebase.
+  **DONE.** `docs/getting-started.md`. The ordering is the content: the way a
+  static analyser dies on a legacy codebase is being switched on at full
+  strength on day one, printing four thousand findings, and never being run
+  again. So the guide runs look → understand one finding → baseline → CI →
+  tune, and the tuning section is ordered narrowest-first (inline suppression,
+  then path exclusion, then re-ranking, then disabling a rule).
+
+  One piece of advice in it is the sort of thing only writing the page
+  surfaces: **write the baseline at the widest thresholds you might ever use.**
+  A baseline captured at `--min-severity high` does not contain the `medium`
+  findings, so the day the threshold is lowered every one of them arrives as
+  new — the adoption path quietly sets a trap for whoever tightens it later.
+
+  `scripts/check_docs_commands.py` gates it, and gates every other page too.
+  Prose is never executed, so a renamed flag leaves the guide that recommended
+  it looking correct forever; this project has already shipped that defect
+  three times. The gate pulls every `djaudit ...` line out of every fenced
+  block in `docs/` and `README.md` and asks click whether the subcommand
+  exists, whether each long option exists on it, and whether options that need
+  a value were given one. It deliberately does not execute them — that would
+  test the examples' environment rather than the examples. It also resolves
+  every relative markdown link, since a guide pointing at a page nobody wrote
+  reads exactly like one that does not.
+
+  Verified against real drift before being trusted: run against the repository
+  as it stood, it found that click injects `--help` rather than declaring it in
+  `params`. Four un-fix controls catch — an unknown subcommand, a misspelled
+  option, an option missing its value, and a value given to a flag that takes
+  none — plus a dangling link, and a control confirming prose outside a fenced
+  block is left alone.
+- **7.4.2** — Complete rule reference, generated from `RuleMeta` so it cannot
+  drift. **DONE.**
+
+  Measured before written, and the substep as stated was already satisfied:
+  `gen_rule_docs.py --check` reported all 87 rules documented across 7 family
+  pages, zero missing, gated in CI since Phase 2. The gap was one layer down. A
+  finding names `DJP-003` and nothing else, and there was no page that maps an
+  id to its meaning — a reader had to already know which family `DJP` was and
+  open the right file. Seven pages with no index is a filesystem, not a
+  reference.
+
+  So the substep is `docs/rules/README.md`: a family table, then one row per
+  rule carrying id, title, severity, confidence and tier, each id linked to its
+  section. Severity and confidence are printed side by side with a sentence
+  saying they are independent, because the ranking is unusable if `critical`
+  reads as "certainly true". Generated by the same script, from the same
+  `RuleMeta`, so it cannot drift from the pages it indexes.
+
+  The links needed their own gate. `slug()` reimplements GitHub's anchor rules
+  by hand, and a wrong fragment still renders as a working link — it just lands
+  at the top of the page. `_check_anchors()` therefore parses the `### ` lines
+  back out of every rendered page and requires each generated anchor to match
+  one, before anything is written.
+
+  Verifying that check took three attempts, and the failures are the finding.
+  Mutating `slug()` catches nothing: `render_index` and `_check_anchors` both
+  call it, so both sides move together and stay consistent, and the staleness
+  check fires first anyway. A check whose two inputs share a producer can only
+  be exercised by changing *one* of them. The controls that work change the
+  heading template without changing the anchor construction, or compute the
+  anchor by some other means. The first of those originally surfaced as a
+  `TypeError` inside `slug`, which is a crash rather than a diagnosis, so the
+  heading parse now names the shape it expected.
+
+  Eight un-fix controls catch: the severity column showing confidence, the tier
+  column dropped, no rule rows at all, no family table, the count counting
+  families instead of rules, anchors not checked, `README.md` treated as a
+  family page, and the do-not-edit banner removed. Three earlier attempts were
+  discarded on inspection — two whose target strings were not present, so
+  nothing was mutated, and one that broke the generator's syntax, leaving the
+  committed docs correct and the tests green for the wrong reason.
+
+  Tightening the link gate to reject links to a *directory* found two more:
+  `README.md` and `docs/architecture/dataflow.md` both pointed at `docs/rules/`,
+  which renders as a file listing rather than a page.
+
+  Two unrelated defects surfaced while checking this substep in, and both are
+  worse than anything in it.
+
+  First: **the type check had been silently doing nothing for two commits.**
+  The tests written in 7.4.4 imported their gate as `from scripts import
+  check_config_doc`, while the twelve older ones insert `scripts/` on
+  `sys.path` and import bare. `scripts` is on mypy's `files` list, so mypy saw
+  the same file under two module names, reported `Source file found twice`, and
+  stopped — `errors prevented further checking` means *nothing* was typed.
+  Converting the new tests to the established idiom restored it to 363 files,
+  and it immediately reported a real error the two intervening commits had
+  shipped: `check_config_doc.py` called `.commands` on a value typed as a bare
+  `Command`. Fixing that showed this typer version vendors click as
+  `typer._click` and has no importable top-level `click`, so the narrowing is
+  an `isinstance` against `typer.core.TyperGroup`. `TestScriptsAreNamedOnce`
+  now fails if `scripts/` gains an `__init__.py` or any test imports through
+  the package path, with a presence control that the idiom it demands is the
+  one twelve files already use.
+
+  Second: **CI has not run since the phase began.** Every job on every push is
+  failing in three seconds with "The job was not started because recent account
+  payments have failed or your spending limit needs to be increased." Nothing
+  in the repository is wrong, and nothing in the repository can fix it. It does
+  mean the local gate has been the only gate, which is exactly the condition
+  under which a silently-disabled type check survives.
+- **7.4.3** — Rule authoring guide for external contributors. **DONE.**
+
+  `docs/authoring-rules.md`: the shape of a rule, what each `RuleMeta` field is
+  for, why severity and confidence are separate axes, per-finding overrides,
+  evidence kinds, what `ProjectContext` offers, what `@register` enforces, and
+  the five steps that make a rule finished rather than merely firing — planted
+  defect, control twin, reachability probe, benchmark corpus, and writing down
+  the limitation that made you lower the confidence.
+
+  A guide to writing rules is the one document whose claims are *all*
+  executable, so reviewing it would be the wrong instrument.
+  `scripts/check_authoring_doc.py` runs it: every fenced Python block is
+  compiled and executed, the example rule is registered through the real
+  `@register`, and the finished rule is run over a real project by the real
+  engine, which must report exactly one finding, on line 2, quoting the assert.
+  It also requires every `RuleMeta` field to appear in the field table, every
+  `ctx.` accessor the page names to exist on `ProjectContext`, every
+  `Severity.`/`Confidence.`/`Tier.`/`Family.`/`EvidenceKind.` member to be
+  real, and every backticked repository path to be a real path.
+
+  It earned that on first run. The guide promised `ctx.tree(path)`, an accessor
+  that has never existed — the real one is `ctx.parse(path)`. Written as prose
+  it would have read as fine to any reviewer, including me, because it is
+  exactly what the method should have been called.
+
+  Ten un-fix controls catch. One of them, reusing the shipped id `DJS-001`,
+  originally produced a traceback from inside the engine rather than a
+  diagnosis, and that was a real defect in the gate: builtin rules load
+  lazily, so at the moment the example registered, the registry was empty and
+  the collision check had nothing to compare against. Forcing `all_rules()`
+  before the snapshot turns it into a sentence. `test_the_example_does_not_leak_into_the_registry`
+  guards the other half — the gate registers a rule, and must put the registry
+  back.
+- **7.4.4** — Configuration reference: `pyproject.toml` settings, per-rule
+  severity overrides, per-path exclusions. **DONE**, and taken before 7.4.1
+  because the two pages link to each other and a link gate can only be added
+  once its targets exist; committing the guide first would have shipped a
+  dangling link with nothing to catch it.
+
+  `docs/configuration.md` is checked by `scripts/check_config_doc.py` rather
+  than reviewed, because a reference page is read for shape and not for truth
+   — nobody notices a missing row. The gate derives the settings table from
+  `config.KNOWN`, requires every subtable to be mentioned, refuses a row for a
+  key the code does not accept, and cross-checks every `--flag` the page names
+  against `djaudit run`'s real options. Run against the page as first written
+  it found two omissions immediately.
+
+  It also requires the page to still say that `live = true` and
+  `external = true` are refused. That refusal is a security property — a
+  `pyproject.toml` arrives with the repository you were asked to analyse, so a
+  file that could switch on the executing tiers would let an untrusted
+  repository arrange its own execution — and an undocumented security property
+  is one the next person removes. The control for that check had to remove
+  *both* statements of it: the page says it in prose and in an example, and
+  removing one leaves the fact stated and the gate correctly green.
 
 ---
 
@@ -8772,8 +9478,8 @@ conversation.
 | 4 | Migration safety and live tier | 6 | 28 | **Complete** (PR #7) — `DJM-001`…`DJM-010`, the live tier, and lock classification measured against a real `pg_locks` |
 | 5 | Portability and external adapters | 4 | 20 | **Complete** — `DJX-001`…`DJX-009`, two external adapters behind `--external`, 100% precision on three real targets |
 | 6 | LLM layer | 5 | 19 | **Complete** (PR #6) — **pulled forward, ran after Phase 3** |
-| 7 | Distribution | 3 | 10 | Not started |
-| | **Total** | **52** | **235** | |
+| 7 | Distribution | 4 | 13 | **Complete** — all 13 substeps. Release workflow, GitHub Action, pre-commit hooks, changelog, container image, `[tool.djaudit]` config with path exclusions and severity overrides, and four gated documentation pages. Carries schema 1 → 4 and version 0.1.0 → 0.4.0, the project's first breaking releases |
+| | **Total** | **53** | **238** | |
 
 Rule count on completion: **87 rules** across seven families — `DJS` 28,
 `DJA` 15, `DJI` 12, `DJM` 10, `DJP` 10, `DJX` 9, `DJD` 3. That is what this

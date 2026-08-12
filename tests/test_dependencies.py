@@ -98,3 +98,47 @@ class TestRuntimeDependencies:
     def test_the_allow_list_is_not_vacuous(self) -> None:
         """A test suite that allowed everything would pass all of the above."""
         assert ALLOWED_RUNTIME & top_level_imports() == ALLOWED_RUNTIME
+
+
+class TestScriptsAreNamedOnce:
+    """`scripts/` is on mypy's `files` list, so it must never also be a package.
+
+    The trigger: two test modules were written as `from scripts import x` while
+    twelve others used `sys.path` plus a bare import. mypy then saw the same
+    file under two module names, reported `Source file found twice`, and -- the
+    part that matters -- stopped. `errors prevented further checking` means the
+    whole type check silently became a no-op, and two commits went out with no
+    types checked at all. CI would have caught it; CI was blocked on billing.
+    """
+
+    def test_scripts_is_not_a_package(self) -> None:
+        assert not (REPO / "scripts" / "__init__.py").exists()
+
+    def test_no_test_imports_scripts_as_a_package(self) -> None:
+        offenders = []
+        for path in sorted((REPO / "tests").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and (node.module or "").split(".")[0] == "scripts"
+                ):
+                    offenders.append(f"{path.name}:{node.lineno}")
+                if isinstance(node, ast.Import):
+                    offenders += [
+                        f"{path.name}:{node.lineno}"
+                        for a in node.names
+                        if a.name.split(".")[0] == "scripts"
+                    ]
+        assert not offenders, (
+            f"import via sys.path instead, or mypy names the file twice: {offenders}"
+        )
+
+    def test_the_sys_path_idiom_actually_reaches_the_scripts(self) -> None:
+        """The presence control: the alternative the previous test demands works."""
+        importers = [
+            p
+            for p in sorted((REPO / "tests").rglob("*.py"))
+            if 'sys.path.insert(0, str(ROOT / "scripts"))' in p.read_text(encoding="utf-8")
+        ]
+        assert len(importers) > 10, importers

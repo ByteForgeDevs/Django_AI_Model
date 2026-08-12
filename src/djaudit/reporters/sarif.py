@@ -232,6 +232,33 @@ def _notifications(result: RunResult, index_of: dict[str, int]) -> list[dict[str
             "associatedRule": {"id": rule_id, "index": index_of[rule_id]},
         }
         notifications.append(notification)
+
+    # A degraded run checked less than a reader would assume, and fewer findings
+    # read exactly like a cleaner codebase.
+    #
+    # Levelled by whether the reader asked for the live tier, because the two
+    # cases need different reactions and a single level would misserve one of
+    # them. The live tier is off by default, so `note` is the ordinary state of
+    # affairs -- raising a warning on every static run would be an alarm that is
+    # always on, and an alarm that is always on is furniture. Asking for the live
+    # tier and not getting it is the actionable case, and it warns.
+    #
+    # Not routed through `executionSuccessful`, because the tool did succeed at
+    # everything it could reach; marking the invocation failed would say the
+    # report is unusable when it is merely narrower than it looks.
+    #
+    # No `associatedRule`: the skipped rules emitted nothing, so they have no
+    # descriptor to point at, and inventing one would put rules in the tool
+    # driver that this run never applied.
+    if result.degraded:
+        requested = result.context.live_problem is not None
+        notifications.append(
+            {
+                "level": "warning" if requested else "note",
+                "message": {"text": "; ".join(result.degraded.report())},
+                "descriptor": {"id": "djaudit/degraded"},
+            }
+        )
     return notifications
 
 

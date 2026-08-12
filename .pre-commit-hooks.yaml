@@ -1,0 +1,37 @@
+# Hooks published for `pre-commit`. See docs/pre-commit.md.
+#
+# `pass_filenames: false` is not a stylistic choice. djaudit's unit of analysis
+# is the project: it resolves the settings modules, builds a Django model graph
+# and a DRF route graph, and tracks taint across files. Handing it the changed
+# files does not narrow the audit, it breaks it -- `djaudit run` takes one
+# directory, so pre-commit's filename list arrives as "unexpected extra
+# arguments" and the hook fails on every commit for a reason that has nothing
+# to do with the code.
+#
+# The neighbouring mistake is worse because it is quiet. Pointed at a valid
+# subdirectory -- an app package rather than the project root -- djaudit finds
+# no settings module, reports nothing, and exits 0. Measured on a fixture whose
+# root yields 29 findings: its `app/` subtree alone yields 0. So the hook
+# audits the repository root and lets `--fail-on` decide the verdict.
+
+- id: djaudit
+  name: djaudit
+  description: Audit the project for Django security, authorization, ORM and migration defects.
+  entry: djaudit run
+  args: [--fail-on, high]
+  language: python
+  types: [python]
+  pass_filenames: false
+  require_serial: true
+
+# The same audit restricted to the rules that describe a way in, for
+# repositories that want a fast pre-commit signal and leave the rest to CI.
+- id: djaudit-security
+  name: djaudit (security, injection and authorization only)
+  description: Audit for Django settings-hardening, injection and API authorization defects.
+  entry: djaudit run
+  args: [--family, DJS, --family, DJI, --family, DJA, --fail-on, high]
+  language: python
+  types: [python]
+  pass_filenames: false
+  require_serial: true

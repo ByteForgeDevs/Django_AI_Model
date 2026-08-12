@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from djaudit import fingerprint as fp
@@ -17,6 +17,7 @@ from djaudit.degradation import Degradation, assess
 from djaudit.discovery import build_context
 from djaudit.gcpolicy import deferred_full_collection
 from djaudit.models import Confidence, Family, Finding, Severity, Tier
+from djaudit.pathfilter import excluded
 from djaudit.registry import Rule, select
 from djaudit.suppression import is_suppressed
 
@@ -42,7 +43,20 @@ class RunResult:
     findings: list[Finding] = field(default_factory=list)
     total_raw: int = 0
     suppressed_inline: int = 0
+    suppressed_path: int = 0
+    """How many findings an `exclude_paths` pattern hid.
+
+    Reported for the reason in this class's docstring: an exclusion that
+    quietly removes 300 findings and a clean project both print nothing.
+    """
     suppressed_baseline: int = 0
+    severity_overridden: int = 0
+    """How many findings a configured severity override relabelled.
+
+    Same reason as the counters above: a project that has quietly demoted a
+    rule to `info` and a project that never triggers it look identical in the
+    output otherwise.
+    """
     filtered_threshold: int = 0
     rules_run: int = 0
     corroborated: int = 0
@@ -116,6 +130,8 @@ def run(
     baseline: Baseline | None = None,
     context: ProjectContext | None = None,
     external: Sequence[Adapter] = (),
+    exclude_paths: tuple[str, ...] = (),
+    severity_overrides: Mapping[str, Severity] | None = None,
 ) -> RunResult:
     """Audit the project at ``root``.
 
@@ -139,6 +155,8 @@ def run(
             baseline=baseline,
             context=context,
             external=external,
+            exclude_paths=exclude_paths,
+            severity_overrides=severity_overrides,
         )
 
 
@@ -154,6 +172,8 @@ def _audit(
     baseline: Baseline | None,
     context: ProjectContext | None,
     external: Sequence[Adapter],
+    exclude_paths: tuple[str, ...],
+    severity_overrides: Mapping[str, Severity] | None,
 ) -> RunResult:
     """The audit itself. Separated so :func:`run` reads as policy, then work."""
     started = time.perf_counter()
@@ -213,6 +233,11 @@ def _audit(
         if suppressed(finding):
             result.suppressed_inline += 1
             continue
+        # After every rule has run, never before parsing: see djaudit.pathfilter
+        # for the measurement that settled this.
+        if exclude_paths and excluded(finding.location.file, exclude_paths):
+            result.suppressed_path += 1
+            continue
         kept.append(scope.apply(finding))
 
     kept = fp.assign(kept)
@@ -224,6 +249,20 @@ def _audit(
         before = len(kept)
         kept = baseline.filter(kept)
         result.suppressed_baseline = before - len(kept)
+
+    if severity_overrides:
+        # Before the threshold, not after: an override applied afterwards could
+        # only relabel findings the threshold had already decided about, which
+        # is the definition of decoration. Measured: on `orm_project`,
+        # `--min-severity high` keeps 2, raising DJP-006 keeps 3, lowering
+        # DJP-003 keeps 1. After the filter all three would be 2.
+        kept = [
+            replace(f, severity=severity_overrides[f.rule_id])
+            if f.rule_id in severity_overrides
+            else f
+            for f in kept
+        ]
+        result.severity_overridden = sum(1 for f in kept if f.rule_id in severity_overrides)
 
     above = [f for f in kept if _passes_threshold(f, min_severity, min_confidence)]
     result.filtered_threshold = len(kept) - len(above)

@@ -1,0 +1,30 @@
+# The build context is sent to the daemon before the first instruction runs, so
+# anything not excluded here is copied even though no COPY names it. The
+# benchmark corpus alone is several hundred megabytes.
+
+.git
+.github
+.venv
+venv
+benchmarks
+docs
+tests
+scripts
+schema
+*.egg-info
+build
+dist
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+*.sarif
+*.log
+.pre-commit-hooks.yaml
+action.yml
+CHANGELOG.md
+Dockerfile

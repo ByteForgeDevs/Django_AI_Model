@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 
 
 class Severity(StrEnum):

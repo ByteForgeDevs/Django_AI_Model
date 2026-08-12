@@ -6,6 +6,10 @@ on:
     # whole phase discovering breakage at pull request time.
     branches: [main, 'phase-*']
   pull_request:
+  # Called by `release.yml` so a tag runs this whole file rather than trusting
+  # that some earlier commit passed it. A tag can be moved; a run on the tagged
+  # tree cannot be.
+  workflow_call:
 
 env:
   UV_VERSION: "0.12.1"
@@ -19,7 +23,12 @@ jobs:
     name: lint, types, tests
     runs-on: ubuntu-latest
     steps:
+      # The changelog is generated from the whole commit trail, so the default
+      # depth-1 checkout would rebuild it from a single commit and report it
+      # stale on every pull request.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -118,6 +127,68 @@ jobs:
       # column being the one `REACHES_THE_NETWORK` actually holds.
       - name: adapters note matches the code
         run: uv run python scripts/check_adapters_doc.py
+
+      # Publishing is the one action here with no undo: a version on PyPI is
+      # permanent and its files immutable, and `__version__` is stamped into
+      # every report that release will ever emit. This checks the release path
+      # on every commit rather than on the tag, because the tag is the moment
+      # it is too late to find out that the workflow can be started by hand,
+      # that publishing no longer waits for this file, or that somebody added
+      # an API token to a repository whose publishing needs none.
+      - name: releases can only happen the way we say
+        run: uv run python scripts/check_release.py
+
+      # The published contract: report shape, enum vocabularies, and the
+      # fingerprint digests every downstream baseline is keyed on. The last is
+      # why this runs on every commit rather than at release time -- changing
+      # how a snippet is normalised alters no field name, breaks no test that
+      # checks fingerprints are stable, and silently invalidates every baseline
+      # committed in every repository that has adopted the tool.
+      - name: the published contract has not moved
+        run: uv run python scripts/gen_schema.py --check
+
+      # The changelog is a derived file, so the only way it can be wrong is if
+      # someone edited it by hand or forgot to regenerate it. Both read the
+      # same here: rebuild from the trail and compare.
+      - name: the changelog matches the commit trail
+        run: uv run python scripts/gen_changelog.py --check
+
+      # The composite action is a string executed on someone else's runner, so
+      # a renamed CLI flag or a mistyped input surfaces as a failure in their
+      # repository rather than ours. This checks it against the real CLI.
+      - name: the action still matches the CLI it wraps
+        run: uv run python scripts/check_action.py
+
+      # Same reasoning as the action: the hook manifest is executed inside
+      # someone else's repository by a tool that builds its own environment.
+      - name: the pre-commit hooks still match the CLI they invoke
+        run: uv run python scripts/check_pre_commit.py
+
+      # The image is built in its own job; this reads the Dockerfile as data
+      # and checks the parts a successful build would not reveal -- an
+      # entrypoint naming a command that has been renamed, a CMD auditing a
+      # directory nobody mounts into.
+      - name: the container's interface still matches the CLI
+        run: uv run python scripts/check_dockerfile.py
+
+      # Prose is never executed, so a renamed flag leaves the guide that told
+      # people to use it looking correct forever. This asks click about every
+      # command in the docs, and resolves every relative link.
+      - name: the documented commands and links still exist
+        run: uv run python scripts/check_docs_commands.py
+
+      # A reference page is read for shape, not truth: nobody notices a
+      # missing row. This derives the settings table's contents from the code
+      # that accepts them.
+      - name: the configuration reference still matches the configuration
+        run: uv run python scripts/check_config_doc.py
+
+      # The one guide whose every claim is executable, so it is executed: the
+      # example rule is registered through the real decorator and run over a
+      # real project by the real engine. Writing it, this caught the guide
+      # promising `ctx.tree()`, which has never existed.
+      - name: the rule authoring guide's example still works
+        run: uv run python scripts/check_authoring_doc.py
 
       # DJP-002 tells people to add `prefetch_related`, and that is only sound
       # for the three manager methods that read back out of the prefetch
@@ -381,3 +452,183 @@ jobs:
         with:
           name: report-${{ matrix.target.name }}
           path: report.json
+
+  action:
+    name: composite action (on a runner)
+    runs-on: ubuntu-latest
+    # The clean-tree audit below uploads a SARIF report with zero results. It
+    # creates no alerts, and it is the only way to learn that code scanning
+    # accepts the shape of what we emit.
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # `install: false` throughout: the action's default installs a pinned
+      # release from PyPI, and testing that here would test the last release
+      # rather than this commit.
+      - name: install this commit
+        run: pip install .
+
+      - name: audit a fixture that has findings
+        id: dirty
+        continue-on-error: true
+        uses: ./
+        with:
+          path: tests/fixtures/vulnerable_project
+          install: "false"
+          upload-sarif: "false"
+          sarif-file: dirty.sarif
+          min-severity: info
+          min-confidence: tentative
+
+      # The action must fail on findings, and must have written the report
+      # before doing so -- that ordering is the whole design, and it is not
+      # observable anywhere but here.
+      - name: findings failed the action, after the report was written
+        run: |
+          test "${{ steps.dirty.outcome }}" = "failure" \
+            || { echo "::error::the action passed on a project full of findings"; exit 1; }
+          test -f dirty.sarif \
+            || { echo "::error::the action failed without writing a report"; exit 1; }
+          python -c "import json,sys; r=json.load(open('dirty.sarif'))['runs'][0]['results']; \
+            sys.exit(0 if r else 'the report is empty')"
+          test "${{ steps.dirty.outputs.exit-code }}" = "1"
+
+      # near_miss_project exists to prove we do not flag things that merely
+      # look wrong, so it is genuinely clean at the default thresholds.
+      - name: audit a clean tree, and upload it for real
+        id: clean
+        uses: ./
+        with:
+          path: tests/fixtures/near_miss_project
+          install: "false"
+          sarif-file: clean.sarif
+
+      - name: a clean tree passes
+        run: test "${{ steps.clean.outputs.exit-code }}" = "0"
+
+  pre_commit:
+    name: pre-commit hooks (with the real tool)
+    runs-on: ubuntu-latest
+    steps:
+      # pre-commit clones this repository at a revision, so the checkout needs
+      # the history the consumer config points at.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install pre-commit
+        run: pip install pre-commit
+
+      # These tests are opt-in, and an opt-in that silently does nothing is
+      # exactly what it exists to prevent -- so the run is required to report
+      # no skips.
+      - name: the hooks install and run under pre-commit
+        env:
+          DJAUDIT_TEST_PRE_COMMIT: "1"
+        run: |
+          # `-q` is in addopts, so it wins over -v and no "SKIPPED" line is ever
+          # printed. The summary line is the signal that survives it.
+          uv run pytest tests/test_pre_commit.py --no-header | tee /tmp/hooks.txt
+          if grep -qE '[0-9]+ skipped' /tmp/hooks.txt; then
+            echo "::error::a pre-commit test skipped, so the hooks were not actually exercised"
+            exit 1
+          fi
+
+  container:
+    name: container image (built and run)
+    runs-on: ubuntu-latest
+    # Nothing here can be verified on a developer machine without a container
+    # runtime, and the machine this was written on has none. So this job is not
+    # a formality: it is the only evidence that the image builds at all, and
+    # the only place the entrypoint is ever executed.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: build the image
+        run: docker build -t djaudit:ci .
+
+      # A build that succeeds proves nothing about what the image does. An
+      # image whose CMD points at the wrong directory audits an empty tree,
+      # reports nothing and exits 0 -- which is indistinguishable from a clean
+      # project unless the count is compared against a known one.
+      - name: the same findings as the CLI, from the same fixture
+        run: |
+          pip install .
+          djaudit run tests/fixtures/vulnerable_project --format json -o host.json \
+            --min-severity info --min-confidence tentative || true
+          host=$(python -c "import json;print(len(json.load(open('host.json'))['findings']))")
+
+          docker run --rm -v "$PWD/tests/fixtures/vulnerable_project:/src:ro" djaudit:ci \
+            run /src --format json --min-severity info --min-confidence tentative \
+            > image.json || true
+          image=$(python -c "import json;print(len(json.load(open('image.json'))['findings']))")
+
+          echo "host=$host image=$image"
+          if [ "$host" != "$image" ]; then
+            echo "::error::the image found $image findings where the CLI found $host"
+            exit 1
+          fi
+          if [ "$image" -eq 0 ]; then
+            echo "::error::the fixture produced no findings, so this comparison proves nothing"
+            exit 1
+          fi
+
+      # The bare form is what the documentation tells people to run, and it
+      # exercises CMD rather than an argument list that replaces it.
+      - name: a bare run audits the mount and fails on findings
+        run: |
+          set +e
+          docker run --rm -v "$PWD/tests/fixtures/vulnerable_project:/src:ro" djaudit:ci
+          code=$?
+          set -e
+          if [ "$code" -ne 1 ]; then
+            echo "::error::expected exit 1 on a fixture with findings, got $code"
+            exit 1
+          fi
+
+      - name: a subcommand other than run is still reachable
+        run: docker run --rm djaudit:ci rules | grep -q DJS-001
+
+      - name: the image does not run as root
+        run: |
+          who=$(docker run --rm --entrypoint id djaudit:ci -un)
+          if [ "$who" = "root" ]; then
+            echo "::error::the image runs as root"
+            exit 1
+          fi
+          echo "runs as $who"
+
+      # The mount is documented as read-only, so prove the audit needs nothing
+      # writable in it. A rule that wrote a cache beside the source would pass
+      # every test above and fail on a user's first read-only run.
+      - name: a read-only mount is enough
+        run: |
+          set +e
+          docker run --rm -v "$PWD/tests/fixtures/orm_project:/src:ro" djaudit:ci \
+            run /src --format json > ro.json
+          code=$?
+          set -e
+          # 0 or 1 are both audits that ran. 2 is djaudit failing to run, which
+          # is what a write to a read-only mount would produce.
+          if [ "$code" -gt 1 ]; then
+            echo "::error::the audit could not run against a read-only mount (exit $code)"
+            exit 1
+          fi
+          python -c "import json; json.load(open('ro.json'))"

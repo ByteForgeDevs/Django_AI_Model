@@ -15,20 +15,23 @@ worse outcome than a red one.
 
 from __future__ import annotations
 
+import difflib
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.syntax import Syntax
 from rich.table import Table
 
 from djaudit import __version__, adapters, engine
 from djaudit.adapters import Adapter
 from djaudit.baseline import Baseline, BaselineError
+from djaudit.config import ConfigError, FileConfig, from_pyproject
 from djaudit.context import ProjectContext
 from djaudit.discovery import build_context
 from djaudit.live import consent
@@ -61,6 +64,7 @@ EXIT_OK = 0
 EXIT_FINDINGS = 1
 EXIT_ERROR = 2
 
+
 # A run with hundreds of corpus verdicts refuses hundreds of times, and the
 # refusals are all the same sentence; showing every one buries the diffs above.
 _REFUSALS_SHOWN = 5
@@ -81,12 +85,83 @@ app = typer.Typer(
 
 
 def _fail(message: str) -> None:
-    Console(stderr=True).print(f"[bold red]error:[/bold red] {message}")
+    # Escaped, not interpolated raw: a message naming a TOML table reads as
+    # `[tool.djaudit] ...`, and rich would take that for a style tag and print
+    # the sentence without the part identifying where the problem is.
+    # soft_wrap, because the message usually names a file path and rich will
+    # otherwise break it across a line -- `pyproject.tom\nl` is not something
+    # anyone can paste back into a shell.
+    Console(stderr=True).print(f"[bold red]error:[/bold red] {escape(message)}", soft_wrap=True)
     raise typer.Exit(EXIT_ERROR)
+
+
+# CLI parameter name -> `[tool.djaudit]` key, where the two differ.
+_CONFIG_FIELD = {
+    "output_format": "format",
+    "baseline_path": "baseline",
+    "exclude_path": "exclude_paths",
+    "severity_override": "severity_overrides",
+}
+
+
+def _overrides(stated: list[str] | dict[str, Severity] | None) -> dict[str, Severity]:
+    """Normalise severity overrides from either source, and refuse nonsense.
+
+    The config file hands over a parsed mapping; the command line hands over
+    `RULE=LEVEL` strings. Both end up validated against the registry here,
+    because a typo'd rule id would otherwise be a setting that silently does
+    nothing -- and a severity override that does nothing is indistinguishable
+    from one that worked on a rule the project never triggers.
+    """
+    if not stated:
+        return {}
+    pairs: dict[str, Severity] = {}
+    if isinstance(stated, dict):
+        pairs = dict(stated)
+    else:
+        for item in stated:
+            rule_id, sep, level = item.partition("=")
+            if not sep or not rule_id.strip() or not level.strip():
+                _fail(f"--severity expects RULE=LEVEL, got {item!r}")
+            try:
+                pairs[rule_id.strip().upper()] = Severity(level.strip().lower())
+            except ValueError:
+                allowed = ", ".join(s.value for s in Severity)
+                _fail(
+                    f"--severity {rule_id.strip()}: unknown severity {level.strip()!r} ({allowed})"
+                )
+    known = {rule_cls.meta.id for rule_cls in all_rules()}
+    for rule_id in pairs:
+        if rule_id not in known:
+            close = difflib.get_close_matches(rule_id, sorted(known), n=1, cutoff=0.6)
+            hint = f"; did you mean {close[0]!r}?" if close else ""
+            _fail(f"severity override names an unknown rule: {rule_id}{hint}")
+    return pairs
+
+
+def _resolve(ctx: typer.Context, settings: FileConfig, typed: dict[str, Any]) -> dict[str, Any]:
+    """The command line if it said anything, otherwise the file.
+
+    Asking click where each value came from is the whole point. For an option
+    nobody mentioned, `typed` already holds that option's default, so a merge
+    that asked "is this still the default?" could not tell an unset flag from
+    one set to the same value -- and every setting in the file would lose to a
+    default nobody typed, silently.
+    """
+    merged: dict[str, Any] = {}
+    for name, value in typed.items():
+        stated = getattr(settings, _CONFIG_FIELD.get(name, name))
+        if isinstance(stated, tuple):
+            stated = list(stated)
+        source = ctx.get_parameter_source(name)
+        spoken = source is not None and source.name != "DEFAULT"
+        merged[name] = value if stated is None or spoken else stated
+    return merged
 
 
 @app.command()
 def run(
+    cli_ctx: typer.Context,
     path: Annotated[
         Path,
         typer.Argument(help="Path to the Django project to audit."),
@@ -127,6 +202,25 @@ def run(
         list[str] | None,
         typer.Option("--ignore", help="Skip these rule ids. Repeatable."),
     ] = None,
+    severity_override: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--severity",
+            metavar="RULE=LEVEL",
+            help="Re-rank a rule, as DJP-001=low. Repeatable. Applied before "
+            "--min-severity and --fail-on, so an override can change what is "
+            "reported and what fails the build.",
+        ),
+    ] = None,
+    exclude_path: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--exclude-path",
+            help="Hide findings whose file matches this glob. Repeatable. Filters by "
+            "location only: excluded files are still parsed, because dropping them "
+            "would remove their models from the graph and silently empty the audit.",
+        ),
+    ] = None,
     baseline_path: Annotated[
         Path | None,
         typer.Option("--baseline", help="Suppress findings recorded in this baseline file."),
@@ -163,6 +257,45 @@ def run(
     if not path.is_dir():
         _fail(f"path is not a directory: {path}")
 
+    try:
+        settings = from_pyproject(path / "pyproject.toml")
+    except ConfigError as exc:
+        _fail(str(exc))
+
+    resolved = _resolve(
+        cli_ctx,
+        settings,
+        {
+            "output_format": output_format,
+            "output": output,
+            "min_severity": min_severity,
+            "min_confidence": min_confidence,
+            "fail_on": fail_on,
+            "family": family,
+            "select": select,
+            "ignore": ignore,
+            "exclude_path": exclude_path,
+            "severity_override": severity_override,
+            "baseline_path": baseline_path,
+            "live": live,
+            "external": external,
+        },
+    )
+    output_format, output = resolved["output_format"], resolved["output"]
+    min_severity, min_confidence = resolved["min_severity"], resolved["min_confidence"]
+    fail_on, family = resolved["fail_on"], resolved["family"]
+    select, ignore = resolved["select"], resolved["ignore"]
+    exclude_path = resolved["exclude_path"]
+    overrides = _overrides(resolved["severity_override"])
+    for pattern in exclude_path or ():
+        if not pattern.strip().strip("/"):
+            _fail(f"exclude path pattern is empty: {pattern!r}")
+    baseline_path, live, external = (
+        resolved["baseline_path"],
+        resolved["live"],
+        resolved["external"],
+    )
+
     baseline: Baseline | None = None
     if baseline_path is not None:
         try:
@@ -187,6 +320,8 @@ def run(
         min_confidence=Confidence.TENTATIVE if writing else min_confidence,
         baseline=None if writing else baseline,
         external=_with_external(external),
+        exclude_paths=tuple(exclude_path) if exclude_path else (),
+        severity_overrides=overrides,
     )
 
     if write_baseline is not None:
