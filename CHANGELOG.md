@@ -18,6 +18,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Added
 
+- **config:** read [tool.djaudit], and ask click who set what (9acc37cf)
 - **BREAKING** **container:** build the image from source, so a tag cannot publish other code (e3228744)
 - **pre-commit:** audit the project, because auditing the diff finds nothing (715df392)
 - **action:** upload the findings before failing the job on them (c75af97f)
