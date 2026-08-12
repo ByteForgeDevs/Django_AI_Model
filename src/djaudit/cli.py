@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import difflib
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -64,9 +64,10 @@ from djaudit.llm.suggest import render, suggest
 from djaudit.llm.triage import TriageRun, provenance_of, triage, verdicts_for
 from djaudit.llm.verify import Level, explain_rejection, verified
 from djaudit.models import Confidence, Family, Severity
+from djaudit.provenance import Verdict as ProvenanceVerdict
 from djaudit.provenance import describe
 from djaudit.registry import all_rules
-from djaudit.reporters import OutputFormat, json_reporter, sarif, terminal
+from djaudit.reporters import OutputFormat, html_reporter, json_reporter, sarif, terminal
 
 if TYPE_CHECKING:
     from djaudit.benchmark import BenchmarkReport
@@ -433,6 +434,22 @@ def _with_live(ctx: ProjectContext, granted: bool) -> ProjectContext:
     )
 
 
+_RENDERERS: dict[
+    OutputFormat, Callable[[engine.RunResult, Mapping[str, ProvenanceVerdict] | None], str]
+] = {
+    OutputFormat.JSON: json_reporter.render,
+    OutputFormat.SARIF: sarif.render,
+    OutputFormat.HTML: html_reporter.render,
+}
+"""Non-terminal renderers, by format.
+
+A mapping rather than a chain of conditionals because the two dispatch sites
+here used to read `json if fmt is JSON else sarif`, which silently rendered
+SARIF for anything that was not JSON. That is fine while there are two formats
+and a latent mis-render the moment there are three.
+"""
+
+
 def _emit(result: engine.RunResult, output_format: OutputFormat, output: Path | None) -> None:
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -447,8 +464,8 @@ def _emit(result: engine.RunResult, output_format: OutputFormat, output: Path | 
             terminal.report(result, Console(file=handle))
         return
 
-    renderer = json_reporter.render if output_format is OutputFormat.JSON else sarif.render
-    text = renderer(result)
+    renderer = _RENDERERS[output_format]
+    text = renderer(result, None)
     if output:
         output.write_text(text, encoding="utf-8")
     else:
@@ -620,8 +637,7 @@ def triage_command(
         # hold a model's opinion to a different standard than a rule's. The
         # model is named only when one actually answered.
         labels = verdicts_for(run, model=provider.name if run.consulted_a_model else "")
-        renderer = json_reporter.render if output_format is OutputFormat.JSON else sarif.render
-        sys.stdout.write(renderer(result, labels))
+        sys.stdout.write(_RENDERERS[output_format](result, labels))
         raise typer.Exit(EXIT_OK)
 
     console = Console()
