@@ -19,9 +19,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from djaudit.astutils import StarImport, star_imports
+from djaudit.astutils import StarImport, import_bindings, star_imports
 from djaudit.context import ProjectContext, SettingsModule
-from djaudit.discovery import dotted_path, resolve_dotted
+from djaudit.discovery import (
+    dotted_path,
+    resolve_dotted,
+    resolve_relative,
+)
 from djaudit.evaluator import (
     Evaluator,
     Scope,
@@ -153,7 +157,7 @@ class _Operation:
     args: tuple[ast.expr, ...] = ()
 
 
-def _operations(tree: ast.Module, scope: Scope) -> Iterator[_Operation]:
+def _operations(body: list[ast.stmt], scope: Scope) -> Iterator[_Operation]:
     """Assignments and in-place mutations of module-level names, in order.
 
     Branches are evaluated as the walk proceeds rather than all being taken.
@@ -192,7 +196,7 @@ def _operations(tree: ast.Module, scope: Scope) -> Iterator[_Operation]:
             elif isinstance(stmt, ast.With):
                 yield from visit(stmt.body, conditional)
 
-    yield from visit(tree.body, False)
+    yield from visit(body, False)
 
 
 def _visit_if(
@@ -301,27 +305,13 @@ def resolve_settings(ctx: ProjectContext, module: SettingsModule) -> SettingsVie
         scope.functions.update(collect_functions(tree))
         scope.env_objects.update(collect_env_objects(tree, scope.imports))
 
-        dotted = dotted_path(ctx.root, path)
-        for operation in _operations(tree, scope):
-            value = _apply(operation, scope)
-            if value is None:
-                continue
-            if operation.conditional:
-                # The assignment may not run, so the earlier value survives as
-                # an alternative rather than being replaced by this one.
-                value = _either(scope.names.get(operation.name), value)
-            scope.names[operation.name] = value
-            if operation.name.isupper():
-                definitions.setdefault(operation.name, []).append(
-                    Definition(
-                        name=operation.name,
-                        value=value,
-                        module=path,
-                        dotted=dotted,
-                        node=operation.node,
-                        conditional=operation.conditional,
-                    )
-                )
+        _record(_operations(tree.body, scope), scope, definitions, path, ctx)
+
+    # A `django-configurations` class body is the same ordered-override problem
+    # as the star chain, one level down, so it runs through the same machinery
+    # with the same scope -- the module's names are visible inside the class.
+    for body_path, node in _configuration_bodies(ctx, module):
+        _record(_operations(node.body, scope), scope, definitions, body_path, ctx)
 
     return SettingsView(
         module=module,
@@ -472,6 +462,106 @@ def _mutate(operation: _Operation, scope: Scope, evaluator: Evaluator) -> Value 
 
     tainted = current.env_dependent or any(argument.env_dependent for argument in arguments)
     return Value.of(updated, env_dependent=tainted)
+
+
+def _record(
+    operations: Iterator[_Operation],
+    scope: Scope,
+    definitions: dict[str, list[Definition]],
+    path: Path,
+    ctx: ProjectContext,
+) -> None:
+    """Apply operations in order, recording every setting they define."""
+    dotted = dotted_path(ctx.root, path)
+    for operation in operations:
+        value = _apply(operation, scope)
+        if value is None:
+            continue
+        if operation.conditional:
+            # The assignment may not run, so the earlier value survives as
+            # an alternative rather than being replaced by this one.
+            value = _either(scope.names.get(operation.name), value)
+        scope.names[operation.name] = value
+        if operation.name.isupper():
+            definitions.setdefault(operation.name, []).append(
+                Definition(
+                    name=operation.name,
+                    value=value,
+                    module=path,
+                    dotted=dotted,
+                    node=operation.node,
+                    conditional=operation.conditional,
+                )
+            )
+
+
+def _configuration_bodies(
+    ctx: ProjectContext, module: SettingsModule
+) -> list[tuple[Path, ast.ClassDef]]:
+    """Class bodies for ``module.configuration_class``, base first.
+
+    Bases are followed across files, because splitting the base class into its
+    own module and importing it is a shape the documentation shows, and a
+    resolver that only looked in one file would read the subclass's overrides
+    against no defaults at all.
+    """
+    if not module.configuration_class:
+        return []
+
+    ordered: list[tuple[Path, ast.ClassDef]] = []
+    seen: set[tuple[Path, str]] = set()
+
+    def walk(path: Path, name: str) -> None:
+        key = (path, name)
+        if key in seen:
+            return
+        seen.add(key)
+        tree = ctx.parse(path)
+        if tree is None:
+            return
+        # Looked up by name in the file rather than through the index, because
+        # a base class may live in a module that is not itself settings-shaped
+        # and so is not indexed -- readthedocs.org inherits through three of
+        # them. The class to start from was already decided by discovery.
+        table = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+        node = table.get(name)
+        if node is None:
+            return
+        # Reversed, because the leftmost base wins and therefore has to be
+        # applied last of the bases -- and the class itself last of all.
+        for base in reversed(node.bases):
+            target = _base_location(ctx, path, tree, base, table)
+            if target is not None:
+                walk(*target)
+        ordered.append((path, node))
+
+    walk(module.path, module.configuration_class)
+    return ordered
+
+
+def _settings_files(ctx: ProjectContext) -> list[Path]:
+    """Files that could hold a configuration class, for cross-file resolution."""
+    return sorted({module.path for module in ctx.settings_modules})
+
+
+def _base_location(
+    ctx: ProjectContext,
+    path: Path,
+    tree: ast.Module,
+    base: ast.expr,
+    table: dict[str, ast.ClassDef],
+) -> tuple[Path, str] | None:
+    """Where a base class is defined, following an import if it is not local."""
+    if not isinstance(base, ast.Name):
+        return None
+    if base.id in table:
+        return path, base.id
+    origin = import_bindings(tree).get(base.id)
+    if origin is None or "." not in origin:
+        return None
+    module_name, _, class_name = origin.rpartition(".")
+    target = resolve_relative(ctx.root, path, module_name)
+    return (target, class_name) if target is not None else None
 
 
 def _inheritance_chain(ctx: ProjectContext, module: SettingsModule) -> list[Path]:

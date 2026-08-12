@@ -387,6 +387,94 @@ PORTABILITY_UNFIXES: tuple[Unfix, ...] = (
     ),
 )
 
+CONFIGURATIONS = ROOT / "tests/fixtures/configurations_project"
+CSETTINGS = CONFIGURATIONS / "config/settings.py"
+
+# Every control in this fixture shares one file with the defects it guards,
+# because that is the shape the library imposes: the environments are classes,
+# not modules. So each is pinned by line, and the first un-fix is a single
+# rename that has to turn five silent lines into five findings at once.
+CONFIGURATIONS_UNFIXES: tuple[Unfix, ...] = (
+    (
+        "DJS-001",
+        "rename Dev so its name no longer reads as development",
+        CSETTINGS,
+        "class Dev(Base):",
+        "class Prod2(Base):",
+    ),
+    (
+        "DJS-013",
+        "rename Dev, and the wildcard host stops being a development wildcard",
+        CSETTINGS,
+        "class Dev(Base):",
+        "class Prod2(Base):",
+    ),
+    (
+        "DJS-009",
+        "rename Dev, and the insecure session cookie stops being local-only",
+        CSETTINGS,
+        "class Dev(Base):",
+        "class Prod2(Base):",
+    ),
+    (
+        "DJS-010",
+        "rename Dev, and the insecure CSRF cookie stops being local-only",
+        CSETTINGS,
+        "class Dev(Base):",
+        "class Prod2(Base):",
+    ),
+    (
+        "DJS-007",
+        "rename Dev, and the disabled HSTS stops being local-only",
+        CSETTINGS,
+        "class Dev(Base):",
+        "class Prod2(Base):",
+    ),
+    (
+        "DJS-003",
+        "give the base secret a shipped default instead of requiring one",
+        CSETTINGS,
+        "SECRET_KEY = values.SecretValue()",
+        'SECRET_KEY = values.Value("django-insecure-base-fallback")',
+    ),
+    (
+        "DJS-006",
+        "flip the environment-supplied SSL redirect default",
+        CSETTINGS,
+        "SECURE_SSL_REDIRECT = values.BooleanValue(True)",
+        "SECURE_SSL_REDIRECT = values.BooleanValue(False)",
+    ),
+    (
+        "DJS-020",
+        "stop the class body defining password validators at all",
+        CSETTINGS,
+        "AUTH_PASSWORD_VALIDATORS = [",
+        "UNUSED_PASSWORD_VALIDATORS = [",
+    ),
+    (
+        "DJS-004",
+        "write the database password as a literal in the nested dict",
+        CSETTINGS,
+        'values.SecretValue(environ_name="DATABASE_PASSWORD")',
+        '"hunter2"',
+    ),
+    (
+        "DJS-021",
+        "drop CONN_MAX_AGE from the dict nested in the class body",
+        CSETTINGS,
+        '"CONN_MAX_AGE": 60,',
+        '"CONN_MAX_AGE_UNSET": 60,',
+    ),
+    (
+        "DJS-022",
+        "weaken sslmode in the options dict nested two deep in the class body",
+        CSETTINGS,
+        '"sslmode": "verify-full"',
+        '"sslmode": "prefer"',
+    ),
+)
+
+
 FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...], str], ...] = (
     ("orm_project", ORM, ORM_UNFIXES, "controls.py"),
     ("injection_project", INJECTION, INJECTION_UNFIXES, "controls.py"),
@@ -396,6 +484,9 @@ FIXTURES: tuple[tuple[str, Path, tuple[Unfix, ...], str], ...] = (
     # Nor can a settings module or a models module, so this fixture keeps the
     # controls in a whole app too: `warehouse` is `catalog` written portably.
     ("portability_project", PORTABILITY, PORTABILITY_UNFIXES, "warehouse/"),
+    # And a configuration class cannot be a separate file at all, so every
+    # control here is pinned by line in the one settings module.
+    ("configurations_project", CONFIGURATIONS, CONFIGURATIONS_UNFIXES, "\x00never"),
 )
 
 

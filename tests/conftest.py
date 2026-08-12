@@ -34,6 +34,11 @@ def env_settings_project() -> Path:
 
 
 @pytest.fixture
+def configurations_project() -> Path:
+    return FIXTURES / "configurations_project"
+
+
+@pytest.fixture
 def near_miss_project() -> Path:
     return FIXTURES / "near_miss_project"
 

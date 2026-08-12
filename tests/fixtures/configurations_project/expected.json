@@ -1,0 +1,83 @@
+{
+  "description": "Settings held in class bodies, which is what django-configurations does and what djaudit could not read at all until this fixture existed -- the whole DJS family went quiet and the run exited having audited nothing. Two claims are under test. The first is that a class body resolves as completely as a module does: inheritance overrides in the right direction (Prod's SECRET_KEY beats Base's), nested dict literals resolve (DATABASES, and OPTIONS inside it), and values.X(default) is understood as an environment read with a shipped default rather than as an opaque call. The second is the one that decides whether this is usable: a class per environment is a module per environment, so the severity grading that keeps DEBUG = True quiet in development.py has to keep it quiet in class Dev. That is why the controls outnumber the defects. Dev holds five lines that are individually reported as critical or high inside Prod, and every one of them must stay silent purely because of what the class is called -- renaming Dev is a single edit that turns all five into findings, which is how they are proven to be aimed at something. The other controls guard the idioms this library exists to provide: SecretValue() is the correct way to hold a secret and must never read as a hardcoded one, and BooleanValue(True) is a shipped-safe default that must not be downgraded to unknown merely because the environment can override it. A tool that fires on those fires on the projects that got this right.",
+  "expected": [
+    {
+      "rule_id": "DJS-003",
+      "file": "config/settings.py",
+      "line": 124,
+      "severity": "critical",
+      "confidence": "firm"
+    },
+    {
+      "rule_id": "DJS-009",
+      "file": "config/settings.py",
+      "line": 127,
+      "severity": "high",
+      "confidence": "certain"
+    },
+    {
+      "rule_id": "DJS-007",
+      "file": "config/settings.py",
+      "line": 130,
+      "severity": "low",
+      "confidence": "firm"
+    }
+  ],
+  "must_not_report": [
+    {
+      "rule_id": "DJS-001",
+      "file": "config/settings.py",
+      "line": 110
+    },
+    {
+      "rule_id": "DJS-013",
+      "file": "config/settings.py",
+      "line": 111
+    },
+    {
+      "rule_id": "DJS-009",
+      "file": "config/settings.py",
+      "line": 112
+    },
+    {
+      "rule_id": "DJS-010",
+      "file": "config/settings.py",
+      "line": 113
+    },
+    {
+      "rule_id": "DJS-007",
+      "file": "config/settings.py",
+      "line": 114
+    },
+    {
+      "rule_id": "DJS-003",
+      "file": "config/settings.py",
+      "line": 20
+    },
+    {
+      "rule_id": "DJS-006",
+      "file": "config/settings.py",
+      "line": 75
+    },
+    {
+      "rule_id": "DJS-020",
+      "file": "config/settings.py",
+      "line": 1
+    },
+    {
+      "rule_id": "DJS-004",
+      "file": "config/settings.py",
+      "line": 55
+    },
+    {
+      "rule_id": "DJS-021",
+      "file": "config/settings.py",
+      "line": 51
+    },
+    {
+      "rule_id": "DJS-022",
+      "file": "config/settings.py",
+      "line": 59
+    }
+  ]
+}

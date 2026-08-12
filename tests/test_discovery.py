@@ -237,7 +237,8 @@ class TestDiagnostics:
     def test_a_normal_project_is_quiet(self, vulnerable_project):
         assert build_context(vulnerable_project).diagnostics == ()
 
-    def test_class_based_settings_are_named_not_ignored(self, tmp_path):
+    def test_a_configurations_class_is_read_rather_than_reported(self, tmp_path):
+        """The diagnostic was the floor, not the goal: these are now resolved."""
         root = self.build(
             tmp_path,
             {
@@ -248,6 +249,21 @@ class TestDiagnostics:
                     "    SECRET_KEY = 'x'\n"
                     "    INSTALLED_APPS = []\n"
                     "    DEBUG = True\n"
+                ),
+            },
+        )
+        ctx = build_context(root)
+        assert [m.dotted for m in ctx.settings_modules] == ["conf.settings.Base"]
+        assert [d.code for d in ctx.diagnostics] == []
+
+    def test_a_hand_rolled_settings_class_is_still_named_not_ignored(self, tmp_path):
+        """Only `Configuration` subclasses are resolved; the rest must still say so."""
+        root = self.build(
+            tmp_path,
+            {
+                "manage.py": "import os\n",
+                "conf/settings.py": (
+                    "class Base:\n    SECRET_KEY = 'x'\n    INSTALLED_APPS = []\n    DEBUG = True\n"
                 ),
             },
         )

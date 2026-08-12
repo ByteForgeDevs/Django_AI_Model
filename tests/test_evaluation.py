@@ -180,20 +180,17 @@ class TestIncompleteRuns:
     two scoring commands did not, so whether CI noticed depended on which
     command it called.
 
-    The shape used here is django-configurations: settings assigned in a class
-    body, which djaudit detects but cannot yet read. That is not hypothetical
-    -- it is how a readthedocs-shaped project looks to us today, and Substep
-    1.10.2 is the deferred work to support it.
+    The shape used here is a class body djaudit can detect but not attribute to
+    a settings module: a plain class with no recognised base and no call
+    applying it to this module. Class bodies that *are* attributable resolve
+    since Substep 1.10.2, so the unreadable case is now the narrower one -- but
+    it still exists, and this is what it must cost.
     """
 
     def class_configured(self, tmp_path, manifest):
         (tmp_path / "manage.py").write_text("import os\n")
         (tmp_path / "settings.py").write_text(
-            "from configurations import Configuration\n\n\n"
-            "class Dev(Configuration):\n"
-            "    DEBUG = True\n"
-            "    SECRET_KEY = 'hunter2'\n"
-            "    ALLOWED_HOSTS = ['*']\n"
+            "class Dev:\n    DEBUG = True\n    SECRET_KEY = 'hunter2'\n    ALLOWED_HOSTS = ['*']\n"
         )
         (tmp_path / "expected.json").write_text(json.dumps(manifest))
         return tmp_path

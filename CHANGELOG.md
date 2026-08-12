@@ -20,6 +20,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Added
 
+- **settings:** resolve settings declared in a class body (5ad33349)
 - **BREAKING** **config:** override rule severity before the threshold, not after (eace456f)
 - **BREAKING** **config:** exclude paths by filtering findings, not by skipping files (0493c244)
 - **config:** read [tool.djaudit], and ask click who set what (9acc37cf)
@@ -221,6 +222,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Documentation
 
+- **configurations:** describe the shape, not the library (947e31c7)
 - **plan:** mark phase 7 complete (aa4aebc6)
 - **rules:** document how to write a rule, by running the example (3d264183)
 - **rules:** index every rule, and verify the anchors actually land (8311a710)

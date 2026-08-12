@@ -9,10 +9,15 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from djaudit.astutils import literal, module_assignments, star_import_targets
+from djaudit.configurations import (
+    ConfigurationModule,
+    build_index,
+    class_name_tokens,
+)
 from djaudit.context import Diagnostic, ProjectContext, SettingsModule, SettingsRole
 
 EXCLUDED_DIR_NAMES = frozenset(
@@ -281,30 +286,103 @@ def discover_settings_modules(
                 break
 
     entry_path = resolve_dotted(ctx.root, entrypoint) if entrypoint else None
-    return tuple(
-        sorted(
-            (
+    index = configuration_index(ctx, candidates)
+    modules: list[SettingsModule] = []
+    for path in candidates:
+        classes = index.get(path)
+        is_entry = entry_path is not None and path == entry_path
+        if classes:
+            modules.extend(_class_modules(ctx, path, classes, is_entrypoint=is_entry))
+        elif path in confirmed:
+            modules.append(
                 SettingsModule(
                     path=path,
                     dotted=dotted_path(ctx.root, path),
                     role=classify_settings_role(path, ctx.root),
-                    is_entrypoint=(entry_path is not None and path == entry_path),
+                    is_entrypoint=is_entry,
                 )
-                for path in confirmed
-            ),
-            key=lambda m: m.dotted,
-        )
+            )
+    return tuple(sorted(modules, key=lambda m: m.dotted))
+
+
+def configuration_index(
+    ctx: ProjectContext, paths: Iterable[Path]
+) -> dict[Path, ConfigurationModule]:
+    """Every ``django-configurations`` class in ``paths``, resolved across files."""
+    trees = {path: tree for path in paths for tree in (ctx.parse(path),) if tree is not None}
+    return build_index(
+        trees,
+        lambda importer, name: resolve_relative(ctx.root, importer, name),
+        SETTINGS_MARKERS,
     )
+
+
+def resolve_relative(root: Path, importer: Path, module_name: str) -> Path | None:
+    """A dotted or relative module name as a file, relative to the importer."""
+    if not module_name.startswith("."):
+        return resolve_dotted(root, module_name)
+    level = len(module_name) - len(module_name.lstrip("."))
+    package = importer.parent
+    for _ in range(level - 1):
+        package = package.parent
+    remainder = module_name.lstrip(".")
+    return resolve_dotted(package, remainder) if remainder else None
+
+
+def _class_modules(
+    ctx: ProjectContext,
+    path: Path,
+    classes: ConfigurationModule,
+    *,
+    is_entrypoint: bool,
+) -> Iterator[SettingsModule]:
+    """One settings module per ``Configuration`` subclass in ``path``.
+
+    Which class runs is decided at deploy time by ``DJANGO_CONFIGURATION``, so
+    there is no single answer to audit and picking one would mean guessing
+    which of them production uses. Auditing all of them is both complete and
+    already-solved: a class per environment is a module per environment, and
+    the role grading that keeps ``DEBUG = True`` quiet in ``dev.py`` keeps it
+    quiet in ``class Dev`` for exactly the same reason.
+    """
+    dotted = dotted_path(ctx.root, path)
+    for name, entry in classes.classes.items():
+        if not entry.defines_settings:
+            continue
+        yield SettingsModule(
+            path=path,
+            dotted=f"{dotted}.{name}",
+            role=classify_configuration_role(name, path, ctx.root),
+            is_entrypoint=is_entrypoint and name in classes.leaves,
+            configuration_class=name,
+        )
+
+
+def classify_configuration_role(name: str, path: Path, root: Path | None = None) -> SettingsRole:
+    """Infer a configuration class's role from its name, then from its file's.
+
+    The class name is the more specific signal and wins when it says anything:
+    ``class Dev`` inside ``settings.py`` is development however the file is
+    named. When the name is silent the file decides, which keeps a lone
+    ``class Settings(Configuration)`` in ``settings.py`` graded as primary
+    rather than dropping to ``UNKNOWN``.
+    """
+    tokens = class_name_tokens(name)
+    for role, keywords in _ROLE_KEYWORDS:
+        if tokens & keywords:
+            return role
+    return classify_settings_role(path, root)
 
 
 def _class_settings_markers(ctx: ProjectContext, path: Path) -> tuple[str, ...]:
     """Settings assigned inside a class body rather than at module level.
 
-    ``django-configurations`` (and a few hand-rolled equivalents) puts the whole
-    configuration in class attributes, so ``module_assignments`` sees an empty
-    module and the file is never confirmed as settings. Detecting the shape does
-    not analyse it, but it turns "found nothing" into "found something I cannot
-    read yet", which is the difference between a silent pass and a useful one.
+    ``django-configurations`` subclasses are resolved properly and never reach
+    here, so what is left is the hand-rolled equivalent: a plain class whose
+    attributes some project-specific loader copies onto a settings module.
+    Detecting the shape does not analyse it, but it turns "found nothing" into
+    "found something I cannot read", which is the difference between a silent
+    pass and a useful one.
     """
     tree = ctx.parse(path)
     if tree is None:
@@ -352,11 +430,12 @@ def diagnose_settings(ctx: ProjectContext, files: tuple[Path, ...]) -> tuple[Dia
                 message="No settings module could be read: this project keeps its settings "
                 "in class attributes.",
                 detail=f"{ctx.rel(path)} assigns {', '.join(markers[:3])} inside a class "
-                f"body{others}, which is how django-configurations works. djaudit only "
-                "reads module-level assignments today, so every DJS rule was skipped and "
-                "this result says nothing about the project's security. Support is "
-                "planned; until then, audit the module that django-configurations "
-                "generates, or set DJANGO_SETTINGS_MODULE to a plain settings module.",
+                f"body{others}, but the class does not derive from django-configurations' "
+                "`Configuration`, which is the class-based shape djaudit resolves. A "
+                "hand-rolled settings class is read by something project-specific that "
+                "djaudit cannot see, so every DJS rule was skipped and this result says "
+                "nothing about the project's security. Point DJANGO_SETTINGS_MODULE at "
+                "the module that class is applied to, or subclass `Configuration`.",
             ),
         )
 
