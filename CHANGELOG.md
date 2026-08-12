@@ -220,6 +220,9 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Documentation
 
+- **rules:** index every rule, and verify the anchors actually land (8311a710)
+- **guide:** write the adoption path, and gate every command in it (3761a5ed)
+- **config:** derive the configuration reference's contents from the code (cde7ffe5)
 - **plan:** record the release-loop defects and correct the phase 7 status (b26abb49)
 - **plan:** build the configuration Phase 7 assumed it could document (8a95c618)
 - **adapters:** write down what we take from other tools, and gate it (b149e7a9)
