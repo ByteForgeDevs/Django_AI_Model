@@ -153,6 +153,17 @@ def from_pyproject(path: Path) -> LLMConfig:
 
     env_var = table.get("api_key_env", "")
     cache = table.get("cache_dir")
+
+    # A base_url that is read but not honoured is worse than one that is
+    # rejected: someone pointing djaudit at a self-hosted endpoint would have
+    # their source sent to the public vendor instead, and nothing would say so.
+    extras: dict[str, str] = {}
+    base_url = str(table.get("base_url", "")).strip()
+    if base_url:
+        if not base_url.startswith(("http://", "https://")):
+            raise ConfigError(f"{path}: base_url must be an http or https URL, got {base_url!r}")
+        extras["base_url"] = base_url
+
     return LLMConfig(
         # A config file may describe a provider without turning one on. Only an
         # explicit `enabled = true` -- or the CLI flag -- takes this offline
@@ -164,6 +175,7 @@ def from_pyproject(path: Path) -> LLMConfig:
         cache_dir=Path(str(cache)) if cache else DEFAULT_CACHE_DIR,
         max_tokens=int(table.get("max_tokens", 0)),
         max_calls=int(table.get("max_calls", 0)),
+        extras=extras,
     )
 
 
