@@ -1453,6 +1453,17 @@ safe. Phase 1 could not be called complete while it was possible, so the phase
 reopens for two substeps: refuse to be silent first, then remove the reason for
 the silence.
 
+**Correction, recorded when 1.10.2 was implemented.** The diagnosis above is
+wrong in its particulars. readthedocs.org does *not* use
+`django-configurations`. It hand-rolls the same idea: `readthedocs/core/settings.py`
+defines a `Settings` class whose `load_settings(cls, module_name)` classmethod
+copies every member where `member.isupper()` onto the named module — the same
+semantics the library implements with a metaclass. Building 1.10.2 to the
+letter of the wording above would have shipped `django-configurations` support
+and left the project that motivated the step exactly as silent as before. The
+substep was therefore implemented against the *shape* — a class body that
+becomes a settings module — with the library as one recognised case of it.
+
 - **1.10.1** — Incomplete-analysis diagnostics: a `Diagnostic` channel on `ProjectContext`, separate from findings, reported by the terminal and JSON reporters and exiting `2` when analysis could not cover the project.
 
   **Done.** Deliberately not a finding. A finding is subject to baselines,
@@ -1471,7 +1482,45 @@ the silence.
   settings is worse than a red one. readthedocs.org now exits 2 and names
   `dockerfiles/settings/build.py`; the three benchmark targets are unaffected.
 
-- **1.10.2** — `django-configurations` support: resolve settings declared as class attributes, including inheritance across `Configuration` subclasses and the `values.Value` family, so class-configured projects are audited rather than merely reported as unreadable.
+- **1.10.2** — Class-body settings support: resolve settings declared as class attributes, including inheritance across `Configuration` subclasses and the `values.Value` family, so class-configured projects are audited rather than merely reported as unreadable.
+
+  **Done.** Built on two structural analogies rather than a second resolver:
+  class inheritance *is* the `from .base import *` chain one level down, so the
+  existing `Scope` and its precedence rules apply unchanged; and a class per
+  environment *is* a module per environment, so each class becomes its own
+  `SettingsModule` (`config.settings.Prod`) and the existing `SettingsRole`
+  grading decides which of them a production-only rule may speak about. The
+  `values.Value` family resolves as env-dependent values with literal defaults,
+  which is what `os.environ.get(name, default)` already was — so confidence
+  grading came for free. Reading the library's source settled two rules that
+  guessing would have got backwards: `Value.setup()` *raises* when
+  `environ_required` is set and the variable is absent, making any default
+  written beside it dead code; and `SecretValue` refuses a default outright,
+  so a `SecretValue` `SECRET_KEY` is the correct pattern and must never resolve
+  to a literal.
+
+  Recognition is structural, not a list of base classes. A module-level
+  `X.method(__name__)` call is direct evidence that class becomes this settings
+  module, which covers every project that rolled its own loader as well as the
+  library. Class discovery is a project-wide fixpoint rather than a per-file
+  scan, because a base class is routinely in another file, and it propagates in
+  both directions: down from a known base to its subclasses, and up from an
+  applied leaf to the bases it inherits from — readthedocs' hardcoded
+  `SECRET_KEY` is three files above the class actually applied. A class is only
+  promoted to a settings module if it or something it inherits from assigns a
+  real setting; without that guard an empty loader base is audited as a settings
+  module and every security setting Django expects is reported missing, which
+  measured as two false positives on readthedocs.
+
+  **Measured.** readthedocs.org, the project this step exists for: **0 findings
+  and a blocking diagnostic before, 7 `DJS` findings and no diagnostic after** —
+  `SECRET_KEY = "replace-this-please"`, `DEBUG = True`, `ALLOWED_HOSTS = ["*"]`,
+  a hardcoded AWS secret default, and two genuinely absent cookie flags. All
+  seven verified by hand against the source; precision 100%. A dedicated
+  `configurations_project` fixture evaluates 100% precision and recall, the
+  fixture-controls probe rose from 40 to 51 proven load-bearing controls, and
+  healthchecks, netbox and pretix are unchanged at 100% precision with zero
+  regressions.
 
 ---
 
@@ -2737,10 +2786,9 @@ inefficiency. It is **done** — one shared scan, slowest target 8.40s → 6.34s
 and the CI timing gate the risk register spent Phase 2 describing as though it
 existed now exists. Dataflow is built on that, with a gate already watching it.
 
-Substep 1.10.2 (`django-configurations`) is still deferred. A class-configured
-project now fails loudly rather than scoring as clean, which is the floor
-rather than the fix: every `DJS` rule is still skipped on such a project, and
-`DJP` and `DJI` will be too.
+Substep 1.10.2 (class-body settings) was still deferred at this point: a
+class-configured project failed loudly rather than scoring as clean, which was
+the floor rather than the fix. It has since been completed — see Step 1.10.
 
 **Exit criteria.** N+1 detection demonstrated with a measured false-positive
 rate; injection rules triaged on both benchmarks.
@@ -9472,7 +9520,7 @@ codebase the honest answer involves exclusions.
 | Phase | Title | Steps | Substeps | Status |
 |---|---|---|---|---|
 | 0 | Engine skeleton | 10 | 28 | **Complete** (PR #1) |
-| 1 | Settings and deployment hardening | 11 | 57 | **Complete** except `1.10.2` — `DJS-001`…`DJS-027`, 100% precision on three real targets |
+| 1 | Settings and deployment hardening | 11 | 57 | **Complete** — `DJS-001`…`DJS-027`, 100% precision on three real targets, class-body settings resolved |
 | 2 | Model graph and DRF authorization | 7 | 37 | **Complete** (PR #3) — `DJA-001`…`DJA-015`, `DJD-001`…`DJD-003`, 100% precision on three real targets |
 | 3 | Performance and injection | 6 | 36 | **Complete** (PR #5) — `DJP-001`…`DJP-010`, `DJI-001`…`DJI-012`, 100% precision on three real targets |
 | 4 | Migration safety and live tier | 6 | 28 | **Complete** (PR #7) — `DJM-001`…`DJM-010`, the live tier, and lock classification measured against a real `pg_locks` |

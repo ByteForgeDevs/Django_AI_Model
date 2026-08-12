@@ -61,6 +61,15 @@ class SettingsModule:
     is_entrypoint: bool = False
     """True when ``DJANGO_SETTINGS_MODULE`` points here."""
 
+    configuration_class: str = ""
+    """The ``django-configurations`` class this module stands for, if any.
+
+    Set when the settings live in a class body rather than at module level. The
+    same file yields one :class:`SettingsModule` per class, because a class per
+    environment is the same thing as a module per environment and has to be
+    graded the same way.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class Diagnostic:

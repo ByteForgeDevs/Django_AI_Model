@@ -611,6 +611,8 @@ class Evaluator:
             return self._environment_lookup(node, depth)
         if path in _DECOUPLE_PATHS:
             return self._decouple_config(node, depth)
+        if path in _CONFIGURATIONS_VALUE_PATHS:
+            return self._configurations_value(node, path, depth)
 
         if isinstance(node.func, ast.Name):
             if node.func.id == "getattr" and "getattr" not in self.scope.names:
@@ -752,6 +754,48 @@ class Evaluator:
             return Value.of(_DECOUPLE_CASTS[cast](default.literal), env_dependent=True)
         except Exception:  # target code: any failure means 'we cannot tell'
             return Value.unknown("configuration cast failed", env_dependent=True)
+
+    def _configurations_value(self, node: ast.Call, path: str, depth: int) -> Value:
+        """``values.BooleanValue(False)`` -- a default plus an environment read.
+
+        Semantics taken from `configurations/values.py`: the first positional
+        argument is the default, `environ=False` opts out of reading the
+        environment at all, and `SecretValue` refuses a default by raising, so
+        it always means "required, from the environment". That last one matters
+        beyond arithmetic -- a `SecretValue` SECRET_KEY is the *correct*
+        pattern, and resolving it to a literal would report it as hardcoded.
+        """
+        name = path.rsplit(".", 1)[1]
+        environ = self._keyword(node, "environ", depth)
+        reads_environment = not (environ is not None and environ.is_literal and not environ.literal)
+
+        if name in _CONFIGURATIONS_REQUIRED or (
+            reads_environment and self._is_true(self._keyword(node, "environ_required", depth))
+        ):
+            # `setup()` raises rather than falling back, so a default written
+            # alongside `environ_required` is dead -- the value is always the
+            # environment's. Resolving to the default here would report a
+            # placeholder as though it were what production runs.
+            return Value.unknown("environment variable is required", env_dependent=True)
+
+        default = self._default_argument(node, 0, depth)
+        if default is None:
+            # `Value()` with no default really is None, and stays None unless
+            # the environment supplies something.
+            return Value.of(None, env_dependent=reads_environment)
+        if not default.is_literal:
+            return Value.unknown("unresolvable configuration default", env_dependent=True)
+        return Value.of(default.literal, env_dependent=reads_environment)
+
+    @staticmethod
+    def _is_true(value: Value | None) -> bool:
+        return value is not None and value.is_literal and bool(value.literal)
+
+    def _keyword(self, node: ast.Call, name: str, depth: int) -> Value | None:
+        for keyword in node.keywords:
+            if keyword.arg == name:
+                return self._eval(keyword.value, depth + 1)
+        return None
 
     def _cast_name(self, node: ast.Call, depth: int) -> str | None:
         for keyword in node.keywords:
@@ -966,6 +1010,49 @@ _ENVIRON_DEFAULT_POSITION = {
 _ENVIRON_OPAQUE_METHODS = frozenset({"db", "db_url", "cache", "cache_url", "url", "path"})
 
 _DECOUPLE_PATHS = frozenset({"decouple.config", "decouple.AutoConfig"})
+
+# `django-configurations` exposes one class per type, all of which take the
+# default as their first argument and read `DJANGO_<NAME>` unless told
+# otherwise, so they all resolve the same way.
+_CONFIGURATIONS_VALUE_NAMES = frozenset(
+    {
+        "Value",
+        "BooleanValue",
+        "IntegerValue",
+        "PositiveIntegerValue",
+        "FloatValue",
+        "DecimalValue",
+        "SequenceValue",
+        "ListValue",
+        "TupleValue",
+        "SingleNestedSequenceValue",
+        "SingleNestedListValue",
+        "SingleNestedTupleValue",
+        "BackendsValue",
+        "SetValue",
+        "DictValue",
+        "EmailValue",
+        "URLValue",
+        "IPValue",
+        "RegexValue",
+        "PathValue",
+        "SecretValue",
+        "EmailURLValue",
+        "DatabaseURLValue",
+        "CacheURLValue",
+        "SearchURLValue",
+    }
+)
+
+_CONFIGURATIONS_VALUE_PATHS = frozenset(
+    path
+    for name in _CONFIGURATIONS_VALUE_NAMES
+    for path in (f"configurations.values.{name}", f"values.{name}")
+)
+
+# `SecretValue.__init__` sets `environ_required` and raises outright if handed
+# a default, so one is never a hardcoded secret however it is written.
+_CONFIGURATIONS_REQUIRED = frozenset({"SecretValue"})
 
 _TRUE_STRINGS = frozenset({"y", "yes", "t", "true", "on", "1"})
 _FALSE_STRINGS = frozenset({"n", "no", "f", "false", "off", "0"})

@@ -256,6 +256,8 @@ jobs:
             --summary "$GITHUB_STEP_SUMMARY"
           uv run djaudit eval tests/fixtures/portability_project \
             --summary "$GITHUB_STEP_SUMMARY"
+          uv run djaudit eval tests/fixtures/configurations_project \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       # The manifest above proves the controls are silent. It cannot prove they
       # are reachable, and a control the rule never looks at is silent for the

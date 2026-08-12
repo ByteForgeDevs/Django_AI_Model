@@ -72,10 +72,7 @@ class TestExitCodes:
         root = tmp_path / "proj"
         (root / "conf").mkdir(parents=True)
         (root / "manage.py").write_text("import os\n")
-        (root / "conf" / "settings.py").write_text(
-            "from configurations import Configuration\n\n"
-            "class Base(Configuration):\n    SECRET_KEY = 'x'\n"
-        )
+        (root / "conf" / "settings.py").write_text("class Base:\n    SECRET_KEY = 'x'\n")
         result = runner.invoke(app, ["run", str(root)])
         assert result.exit_code == EXIT_ERROR
         assert "incomplete" in result.output
@@ -292,8 +289,7 @@ class TestScoringCommandsRefuseAnIncompleteRun:
         (root / "conf").mkdir(parents=True)
         (root / "manage.py").write_text("import os\n")
         (root / "conf" / "settings.py").write_text(
-            "from configurations import Configuration\n\n"
-            "class Base(Configuration):\n    SECRET_KEY = 'x'\n    DEBUG = True\n"
+            "class Base:\n    SECRET_KEY = 'x'\n    DEBUG = True\n"
         )
         return root
 
@@ -485,8 +481,7 @@ class TestTriageCommand:
         (root / "conf").mkdir(parents=True)
         (root / "manage.py").write_text("import os\n")
         (root / "conf" / "settings.py").write_text(
-            "from configurations import Configuration\n\n"
-            "class Base(Configuration):\n    SECRET_KEY = 'x'\n    DEBUG = True\n"
+            "class Base:\n    SECRET_KEY = 'x'\n    DEBUG = True\n"
         )
 
         result = runner.invoke(app, ["triage", str(root)])
