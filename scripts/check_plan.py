@@ -53,7 +53,7 @@ PLAN = ROOT / "docs" / "PROJECT_PLAN.md"
 
 SUBSTEP = re.compile(r"^- \*\*(\d+)\.(\d+)\.(\d+)\*\*", re.M)
 STEP = re.compile(r"^### Step (\d+)\.(\d+)", re.M)
-ROW = re.compile(r"^\| (\d) \| ([^|]*?) \| (\d+) \| (\d+) \| ([^|]*?) \|", re.M)
+ROW = re.compile(r"^\| (\d+) \| ([^|]*?) \| (\d+) \| (\d+) \| ([^|]*?) \|", re.M)
 TOTAL = re.compile(r"\*\*Total\*\* \| \*\*(\d+)\*\* \| \*\*(\d+)\*\*")
 RULE = re.compile(r"\b(DJ[SIAPMXD])-(\d{3})\b")
 CLAIMED_RULES = re.compile(r"`(DJ[SIAPMXD])` (\d+)")

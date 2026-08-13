@@ -64,6 +64,49 @@ self-hosted model, a gateway, a proxy, or a local server:
 base_url = "http://127.0.0.1:8000/v1"
 ```
 
+### Against a model on your own machine
+
+No API key, no account, no per-token cost. Pull a coding model and point at it:
+
+```console
+$ ollama pull qwen2.5-coder:7b
+```
+
+```toml
+[tool.djaudit.llm]
+enabled    = true
+provider   = "openai"                       # the wire format, not the company
+model      = "qwen2.5-coder:7b"
+base_url   = "http://127.0.0.1:11434/v1"
+max_tokens = 6000
+```
+
+Note the absent `api_key_env`. djaudit normally refuses to run without one —
+that rule is there to stop your source being posted to a remote host by a
+misconfiguration nobody noticed — but a model on **loopback** is exempt,
+because there is no egress to guard and no local runtime issues a key. The
+exemption covers a literal loopback address or the exact name `localhost` and
+nothing else: `10.0.0.5` is someone else's machine and still needs a key, and
+hostnames are not resolved.
+
+**Expect it to be slow.** Measured on eight CPU cores with no GPU, qwen2.5-coder
+7B runs at about **2.6 tokens/second**, so a single answer of a few hundred
+lines takes minutes and a full generate-audit-repair loop takes tens of them.
+Loopback endpoints get a 900-second timeout for that reason, and `timeout` is
+settable if your hardware disagrees. A GPU changes this by one to two orders of
+magnitude.
+
+Quality is the other trade. A 7B model writes plausible Django and makes
+mistakes a frontier model would not — which is precisely why the audit runs
+against its output rather than the model's own opinion of it. Observed on a
+real run: correct models, correct fields, and one extra closing bracket.
+
+A reply whose Python does not parse is sent back to be corrected, twice,
+before the run is refused. Unparseable code is never written either way; the
+retry only decides whether one stray character discards an otherwise correct
+app. A suppression comment is *not* retried — that is not an accident, and
+asking again only invites a subtler attempt.
+
 Without configuration the command reports why and generates nothing. It does
 not fall back to a stub or write an empty app.
 
