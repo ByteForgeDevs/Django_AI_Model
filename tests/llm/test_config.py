@@ -7,6 +7,7 @@ out repository and a CI run must all be offline until somebody asks otherwise.
 from __future__ import annotations
 
 import textwrap
+from dataclasses import replace
 
 import pytest
 
@@ -284,3 +285,63 @@ class TestTheEndpointIsWhereYouSaidItWas:
             "model = 'm'\napi_key_env = 'K'\nbase_url = '  '\n",
         )
         assert "base_url" not in from_pyproject(path).extras
+
+
+class TestAModelOnThisMachineNeedsNoKey:
+    """The credential requirement is about egress, not authentication.
+
+    It exists so that source code cannot be posted to a remote host by a
+    misconfiguration nobody noticed. A model listening on loopback is not a
+    remote host, and none of the local runtimes issue a key, so applying the
+    rule literally locked djaudit out of every model a user can actually run
+    for free while leaving the threat it guards against untouched.
+    """
+
+    def _local(self, url):
+        return LLMConfig(offline=False, provider="openai", extras={"base_url": url})
+
+    def test_a_loopback_model_is_usable_without_a_credential(self):
+        usable, why = self._local("http://127.0.0.1:11434/v1").usable
+        assert usable is True
+        assert why == ""
+
+    def test_localhost_by_name_counts(self):
+        assert self._local("http://localhost:8000/v1").usable[0] is True
+
+    def test_ipv6_loopback_counts(self):
+        assert self._local("http://[::1]:11434/v1").usable[0] is True
+
+    def test_the_whole_127_block_counts(self):
+        assert self._local("http://127.0.0.53:11434/v1").usable[0] is True
+
+    # The controls. Each of these is the reason the feature is narrow, and
+    # each would pass if `local` were implemented as "did they set a base_url".
+
+    def test_a_remote_url_still_demands_a_credential(self):
+        usable, why = self._local("https://api.openai.com/v1").usable
+        assert usable is False
+        assert "needs a credential" in why
+
+    def test_a_private_address_is_not_loopback(self):
+        """10.0.0.5 is someone else's machine. Reachable is not local."""
+        assert self._local("http://10.0.0.5:11434/v1").usable[0] is False
+
+    def test_a_name_that_merely_contains_localhost_is_not_loopback(self):
+        assert self._local("https://localhost.evil.com/v1").usable[0] is False
+
+    def test_a_host_that_would_resolve_to_loopback_is_not_trusted(self):
+        """Names are not resolved. What DNS answers here is not necessarily
+        what it answers at request time, and the safe direction for that
+        uncertainty is to keep asking for a key.
+        """
+        assert self._local("http://localtest.me/v1").usable[0] is False
+
+    def test_no_base_url_at_all_still_demands_a_credential(self):
+        assert LLMConfig(offline=False, provider="openai").usable[0] is False
+
+    def test_offline_still_wins_over_loopback(self):
+        """Local models do not silently switch the tool on. Offline by
+        default is a promise about network calls, not about who is paying.
+        """
+        config = replace(self._local("http://127.0.0.1:11434/v1"), offline=True)
+        assert config.usable[0] is False

@@ -674,14 +674,16 @@ def _build_provider(config: llm_config.LLMConfig) -> Provider:
     if not allowed:
         return NullProvider(reason)
 
-    # config.usable has already established the credential is present.
-    assert config.credential is not None
+    # A credential may legitimately be absent here: `usable` permits a keyless
+    # config when the model is on loopback, and `build` accepts None for that
+    # case. Anything else has already been turned away above.
     try:
         inner: Provider = http.build(
             vendor=config.provider,
             model=config.model,
             credential=config.credential,
             base_url=config.extras.get("base_url", ""),
+            timeout=config.timeout,
         )
     except ValueError as exc:
         return NullProvider(str(exc))

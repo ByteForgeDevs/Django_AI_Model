@@ -44,7 +44,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from djaudit.llm.config import Credential
+from djaudit.llm.config import Credential, is_loopback
 from djaudit.llm.provider import (
     Answer,
     Declined,
@@ -63,6 +63,15 @@ DEFAULT_MAX_TOKENS = 8192
 # connection does not look like a hung tool.
 DEFAULT_TIMEOUT = 120.0
 
+# What a model on this machine gets instead. Measured, not guessed: qwen2.5-
+# coder:7b on eight CPU cores with no GPU produced 703 tokens in 268 seconds,
+# or 2.6 tokens per second. A vendor answers a request like that in under ten
+# seconds, so the same number cannot serve both -- 120s against local hardware
+# times out mid-sentence and is then retried twice, turning one slow answer
+# into a six-minute failure. This allows roughly 2,000 tokens at the measured
+# rate, and anyone with a GPU or a smaller model is simply never near it.
+LOCAL_TIMEOUT = 900.0
+
 # Retries are for the transient classes only. A 400 means the request was
 # wrong and will be wrong again; retrying it wastes the budget and the wait.
 RETRYABLE = frozenset({408, 409, 429, 500, 502, 503, 504})
@@ -76,6 +85,11 @@ MAX_BACKOFF = 30.0
 VENDORS = ("openai", "anthropic")
 
 ANTHROPIC_VERSION = "2023-06-01"
+
+# The two spellings of the same cap. See Endpoint.token_field for why both
+# have to exist and why neither can be sent to the other side.
+NEW_TOKEN_FIELD = "max_completion_tokens"
+OLD_TOKEN_FIELD = "max_tokens"
 
 # The tool Anthropic is told to call. The name is arbitrary and never leaves
 # this module; it exists because Anthropic constrains output shape through
@@ -138,13 +152,23 @@ def _backoff(attempt: int) -> float:
     return min(MAX_BACKOFF, 2.0**attempt)
 
 
-def _openai_payload(prompt: Prompt, model: str, max_tokens: int) -> dict[str, Any]:
+def _openai_payload(
+    prompt: Prompt, model: str, max_tokens: int, token_field: str = NEW_TOKEN_FIELD
+) -> dict[str, Any]:
     """The chat-completions shape, with structured output turned on.
 
     ``strict`` asks the vendor to enforce the schema during decoding, which
     turns a shape violation into a vendor-side error rather than an invalid
     reply. It is not relied on: ``ResponseSchema.validate`` runs on the result
     regardless, because a courtesy from a remote service is not a guarantee.
+
+    ``token_field`` exists because the two spellings of the token cap are not
+    interchangeable and the disagreement is silent. Measured against ollama
+    0.6: ``max_completion_tokens`` is accepted, ignored, and answered with
+    ``finish_reason: stop`` after 647 tokens against a cap of 5, while
+    ``max_tokens`` stops at 5 with ``finish_reason: length``. An ignored cap
+    does not raise, so the failure is not a crash but an unbounded generation
+    and a budget that quietly does nothing.
     """
     return {
         "model": model,
@@ -152,7 +176,7 @@ def _openai_payload(prompt: Prompt, model: str, max_tokens: int) -> dict[str, An
             {"role": "system", "content": prompt.system},
             {"role": "user", "content": prompt.user},
         ],
-        "max_completion_tokens": max_tokens,
+        token_field: max_tokens,
         "response_format": {
             "type": "json_schema",
             "json_schema": {
@@ -245,11 +269,38 @@ class Endpoint:
             raise ValueError(f"base_url must be http or https, got {self.base_url!r}")
 
     @property
+    def token_field(self) -> str:
+        """Which spelling of the token cap this endpoint actually obeys.
+
+        OpenAI renamed ``max_tokens`` to ``max_completion_tokens`` and rejects
+        the old name on its reasoning models, while the local servers people
+        run -- ollama, llama.cpp, LM Studio -- implement the original chat
+        API and ignore the new name without complaint. Neither side errors on
+        the spelling it does not know, so guessing wrong produces no diagnostic
+        at all: remotely a rejected request, locally a cap that does nothing.
+
+        Keyed on loopback rather than asked of the user, because "which of two
+        near-identical parameter names does your inference server honour" is
+        not a question anyone should have to answer to run a model.
+        """
+        return OLD_TOKEN_FIELD if is_loopback(self.base_url) else NEW_TOKEN_FIELD
+
+    @property
     def url(self) -> str:
         base = self.base_url.rstrip("/")
         return f"{base}/messages" if self.vendor == "anthropic" else f"{base}/chat/completions"
 
-    def headers(self, key: str) -> dict[str, str]:
+    def headers(self, key: str | None) -> dict[str, str]:
+        """The auth header, or none at all when there is no key.
+
+        An absent header is not the same as an empty one: a local server that
+        ignores auth accepts both, but sending ``Authorization: Bearer None``
+        to a vendor produces a 401 whose message is about a malformed token
+        rather than about a missing one, which sends the reader looking for a
+        key that is wrong rather than for a key that was never set.
+        """
+        if key is None:
+            return {}
         if self.vendor == "anthropic":
             return {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION}
         return {"Authorization": f"Bearer {key}"}
@@ -257,7 +308,7 @@ class Endpoint:
     def payload(self, prompt: Prompt, model: str, max_tokens: int) -> dict[str, Any]:
         if self.vendor == "anthropic":
             return _anthropic_payload(prompt, model, max_tokens)
-        return _openai_payload(prompt, model, max_tokens)
+        return _openai_payload(prompt, model, max_tokens, self.token_field)
 
     def parse(self, body: dict[str, Any]) -> tuple[object, Usage]:
         if self.vendor == "anthropic":
@@ -282,7 +333,7 @@ class HTTPProvider:
 
     endpoint: Endpoint
     model: str
-    credential: Credential
+    credential: Credential | None
     max_tokens: int = DEFAULT_MAX_TOKENS
     timeout: float = DEFAULT_TIMEOUT
     poster: Callable[[str, dict[str, Any], dict[str, str], float], tuple[int, str]] = field(
@@ -295,9 +346,11 @@ class HTTPProvider:
         return f"{self.endpoint.vendor}:{self.model}"
 
     def ask(self, prompt: Prompt) -> Reply:
-        key = self.credential.resolve()
-        if key is None:
-            return Declined(f"${self.credential.env_var} is not set in the environment")
+        key: str | None = None
+        if self.credential is not None:
+            key = self.credential.resolve()
+            if key is None:
+                return Declined(f"${self.credential.env_var} is not set in the environment")
 
         headers = self.endpoint.headers(key)
 
@@ -316,7 +369,7 @@ class HTTPProvider:
         self,
         prompt: Prompt,
         headers: dict[str, str],
-        key: str,
+        key: str | None,
     ) -> Answer | tuple[str, bool]:
         """One call. Returns an answer, or a reason and whether to try again.
 
@@ -361,11 +414,22 @@ class HTTPProvider:
 def build(
     vendor: str,
     model: str,
-    credential: Credential,
+    credential: Credential | None = None,
     base_url: str = "",
+    timeout: float = 0.0,
 ) -> HTTPProvider:
-    """Assemble a provider for a vendor, or raise if it is not one we speak."""
+    """Assemble a provider for a vendor, or raise if it is not one we speak.
+
+    ``credential`` is optional only because a model on loopback has no key to
+    give. `LLMConfig.usable` is what decides whether that is acceptable; this
+    function does not re-litigate it.
+
+    ``timeout`` of zero means "pick one for me", which resolves by where the
+    model is rather than to a single constant. See `LOCAL_TIMEOUT`.
+    """
     if vendor not in VENDORS:
         raise ValueError(f"unknown provider {vendor!r}; expected one of {', '.join(VENDORS)}")
     endpoint = Endpoint(vendor=vendor, base_url=base_url or DEFAULT_BASE[vendor])
-    return HTTPProvider(endpoint=endpoint, model=model, credential=credential)
+    if timeout <= 0:
+        timeout = LOCAL_TIMEOUT if is_loopback(endpoint.base_url) else DEFAULT_TIMEOUT
+    return HTTPProvider(endpoint=endpoint, model=model, credential=credential, timeout=timeout)

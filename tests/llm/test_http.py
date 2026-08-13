@@ -14,6 +14,7 @@ while doing so would deserve to be uninstalled.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -21,6 +22,8 @@ import pytest
 from djaudit.llm.config import Credential
 from djaudit.llm.http import (
     DEFAULT_BASE,
+    DEFAULT_TIMEOUT,
+    LOCAL_TIMEOUT,
     MAX_ATTEMPTS,
     Endpoint,
     HTTPProvider,
@@ -345,3 +348,125 @@ class TestBuilding:
         """Credential already enforces this; asserted here because build() is the door."""
         with pytest.raises(Exception, match="looks like a key"):
             build("openai", "m", Credential("sk-ant-0123456789abcdefghij"))
+
+
+class TestTheTokenCapReachesTheServerUnderTheNameItObeys:
+    """Two spellings of one parameter, and neither side complains about the
+    other's. Measured against ollama 0.6 on 2025-06: a cap of 5 sent as
+    ``max_completion_tokens`` produced 647 tokens and ``finish_reason: stop``,
+    while the same cap as ``max_tokens`` produced 5 and ``length``.
+
+    So the wrong name is not a crash. It is a budget that silently does
+    nothing, which is the kind of defect that gets blamed on the model.
+    """
+
+    def _payload(self, url):
+        endpoint = Endpoint(vendor="openai", base_url=url)
+        return endpoint.payload(PROMPT, model="m", max_tokens=64)
+
+    def test_a_local_server_is_sent_the_name_it_honours(self):
+        payload = self._payload("http://127.0.0.1:11434/v1")
+        assert payload["max_tokens"] == 64
+        assert "max_completion_tokens" not in payload
+
+    def test_a_vendor_is_sent_the_current_name(self):
+        """The control for the test above. OpenAI rejects the old name on its
+        reasoning models, so this is not a free 'send both' situation.
+        """
+        payload = self._payload("https://api.openai.com/v1")
+        assert payload["max_completion_tokens"] == 64
+        assert "max_tokens" not in payload
+
+    def test_exactly_one_spelling_is_ever_sent(self):
+        for url in ("http://127.0.0.1:11434/v1", "https://api.openai.com/v1"):
+            payload = self._payload(url)
+            present = {"max_tokens", "max_completion_tokens"} & set(payload)
+            assert len(present) == 1, f"{url} sent {present}"
+
+    def test_the_cap_is_never_silently_dropped(self):
+        """Guards the failure mode directly: whatever it is called, the number
+        the caller asked for is in the request.
+        """
+        for url in ("http://127.0.0.1:11434/v1", "https://api.openai.com/v1"):
+            assert 64 in self._payload(url).values()
+
+    def test_anthropic_is_unaffected(self):
+        payload = Endpoint(vendor="anthropic", base_url="https://api.anthropic.com/v1").payload(
+            PROMPT, model="m", max_tokens=64
+        )
+        assert payload["max_tokens"] == 64
+
+
+class TestAKeylessProviderTalksToALocalModel:
+    """None of ollama, llama.cpp or LM Studio issues an API key, so a keyless
+    path is what makes a local model reachable at all.
+    """
+
+    def _local(self, credential):
+        recorder = Recorder((200, openai_body({"verdict": "yes", "why": "b"})))
+        built = HTTPProvider(
+            endpoint=Endpoint(vendor="openai", base_url="http://127.0.0.1:11434/v1"),
+            model="m",
+            credential=credential,
+            poster=recorder,
+            sleeper=Clock(),
+        )
+        return built.ask(PROMPT), recorder
+
+    def test_it_answers_with_no_credential_at_all(self):
+        reply, _ = self._local(None)
+        assert isinstance(reply, Answer)
+
+    def test_no_authorization_header_is_sent_when_there_is_no_key(self):
+        """An absent header, not an empty or literal-None one. A server that
+        parses `Bearer None` reports a malformed token, which sends the reader
+        hunting for a wrong key rather than a missing one.
+        """
+        _, recorder = self._local(None)
+        assert "Authorization" not in recorder.calls[0]["headers"]
+
+    def test_a_credential_is_still_sent_when_there_is_one(self, key):
+        """The control. Removing the header unconditionally would pass the
+        test above and silently unauthenticate every vendor call.
+        """
+        _, recorder = self._local(Credential("TEST_KEY"))
+        assert recorder.calls[0]["headers"]["Authorization"] == f"Bearer {key}"
+
+    def test_a_configured_but_unset_credential_still_declines(self, monkeypatch):
+        """Absent by design and absent by accident are different. Only the
+        first is allowed to proceed silently.
+        """
+        monkeypatch.delenv("TEST_KEY", raising=False)
+        reply, _ = self._local(Credential("TEST_KEY"))
+        assert isinstance(reply, Declined)
+
+
+class TestHowLongToWaitDependsOnWhereTheModelIs:
+    """A vendor answers in seconds; a 7B model on CPU does not. Measured at
+    2.6 tokens/second, so one 2,000-token answer is about thirteen minutes.
+    Against the vendor default of 120s that is a timeout, two retries, and a
+    six-minute failure in place of one slow success.
+    """
+
+    def test_a_local_model_gets_the_patient_timeout(self):
+        assert build(vendor="openai", model="m", base_url="http://127.0.0.1:11434/v1").timeout == (
+            LOCAL_TIMEOUT
+        )
+
+    def test_a_vendor_keeps_the_short_one(self):
+        """The control: local patience must not become everyone's patience,
+        or a hung vendor call blocks a CI job for fifteen minutes.
+        """
+        built = build(vendor="openai", model="m", credential=Credential("TEST_KEY"))
+        assert built.timeout == DEFAULT_TIMEOUT
+
+    def test_an_explicit_timeout_beats_both_defaults(self):
+        for url in ("http://127.0.0.1:11434/v1", "https://api.openai.com/v1"):
+            assert build(vendor="openai", model="m", base_url=url, timeout=7.5).timeout == 7.5
+
+    def test_the_chosen_timeout_reaches_the_socket(self):
+        """The number is only worth setting if it is the one actually used."""
+        recorder = Recorder((200, openai_body({"verdict": "yes", "why": "b"})))
+        built = build(vendor="openai", model="m", base_url="http://127.0.0.1:11434/v1")
+        replace(built, poster=recorder, sleeper=Clock()).ask(PROMPT)
+        assert recorder.calls[0]["timeout"] == LOCAL_TIMEOUT

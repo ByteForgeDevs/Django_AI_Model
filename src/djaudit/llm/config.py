@@ -14,12 +14,14 @@ machine because an environment variable happened to be set in CI.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 DEFAULT_CACHE_DIR = Path(".djaudit-cache") / "llm"
 
@@ -40,6 +42,34 @@ KEY_SHAPED = re.compile(
 
 class ConfigError(Exception):
     """A configuration this tool will not run with."""
+
+
+def is_loopback(base_url: str) -> bool:
+    """Whether this URL can only reach a server on this machine.
+
+    The credential requirement exists to stop source code leaving a machine
+    unnoticed, so it is about egress rather than about authentication. A model
+    served on loopback has no egress to guard: ollama, llama.cpp, vLLM and LM
+    Studio all listen locally and none of them issue an API key, so demanding
+    one would mean djaudit could talk to a vendor but not to the model running
+    on the user's own laptop.
+
+    Deliberately strict about what counts. Only a literal loopback address or
+    the exact name ``localhost`` qualifies, and every other host -- including
+    a private address like ``10.0.0.5`` and any name that merely happens to
+    resolve to 127.0.0.1 -- still needs a credential. Names are not resolved:
+    a resolver answer is a runtime fact that can differ from the one seen here,
+    and the safe direction for that uncertainty is to keep asking for a key.
+    """
+    host = urlparse(base_url.strip()).hostname
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +118,13 @@ class LLMConfig:
     cache_dir: Path = DEFAULT_CACHE_DIR
     max_tokens: int = 0
     max_calls: int = 0
+    timeout: float = 0.0
     extras: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def local(self) -> bool:
+        """Whether this config points at a model on this machine."""
+        return is_loopback(self.extras.get("base_url", ""))
 
     @property
     def usable(self) -> tuple[bool, str]:
@@ -104,6 +140,8 @@ class LLMConfig:
         if self.provider in {"", "null"}:
             return False, "no provider configured"
         if self.credential is None:
+            if self.local:
+                return True, ""
             return False, f"provider {self.provider!r} needs a credential and none is configured"
         if not self.credential.present:
             return False, f"${self.credential.env_var} is not set in the environment"
@@ -175,6 +213,7 @@ def from_pyproject(path: Path) -> LLMConfig:
         cache_dir=Path(str(cache)) if cache else DEFAULT_CACHE_DIR,
         max_tokens=int(table.get("max_tokens", 0)),
         max_calls=int(table.get("max_calls", 0)),
+        timeout=float(table.get("timeout", 0.0)),
         extras=extras,
     )
 
