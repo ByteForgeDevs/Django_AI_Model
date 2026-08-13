@@ -29,7 +29,7 @@ from djaudit.generate import (
     surface_of,
     write_app,
 )
-from djaudit.generate.loop import in_app, summarise
+from djaudit.generate.loop import MAX_SYNTAX_REPAIRS, in_app, summarise
 from djaudit.generate.scaffold import SCHEMA, WRITABLE
 from djaudit.llm.provider import Answer, Declined, Prompt, Reply, SchemaViolationError
 
@@ -515,3 +515,59 @@ class TestReportingToTheModel:
 
     def test_an_empty_summary_says_so_rather_than_being_blank(self):
         assert summarise([], "shop") == "no findings in the generated app"
+
+
+BROKEN = {**CLEAN, "models_py": "class Order(models.Model:\n"}
+
+
+class TestAStrayParenthesisDoesNotDiscardTheApp:
+    """Measured against a real 7B model on loopback: the reply was idiomatic
+    Django with one extra closing bracket on the ForeignKey line, and the run
+    was refused entirely. A syntax error is the most repairable defect there
+    is, and the repair machinery was already sitting there unused.
+
+    The safety property is unchanged throughout: unparseable code is never
+    written. What changes is whether the loop asks before giving up.
+    """
+
+    def test_a_broken_first_reply_is_sent_back_rather_than_refused(self, project: Path):
+        result, _ = drive(spec_for(project), BROKEN, CLEAN)
+        assert result.outcome is Outcome.CLEAN
+
+    def test_the_model_is_told_what_was_wrong_with_it(self, project: Path):
+        """A repair prompt that does not name the error is a re-roll."""
+        _, provider = drive(spec_for(project), BROKEN, CLEAN)
+        assert "models.py does not parse" in provider.prompts[1].user
+
+    def test_the_broken_source_is_sent_back_with_the_error(self, project: Path):
+        """Fixing it requires seeing it."""
+        _, provider = drive(spec_for(project), BROKEN, CLEAN)
+        assert "class Order(models.Model:" in provider.prompts[1].user
+
+    # The controls. Retrying forever is a worse failure than refusing.
+
+    def test_a_model_that_never_recovers_is_still_refused(self, project: Path):
+        result, _ = drive(spec_for(project), BROKEN, BROKEN, BROKEN, BROKEN)
+        assert result.outcome is Outcome.UNPARSEABLE
+
+    def test_the_retry_budget_is_bounded(self, project: Path):
+        """Three asks: the first attempt and two repairs. Not four, and not
+        one per audit iteration -- a budget that renews is not a budget.
+        """
+        _, provider = drive(spec_for(project), *([BROKEN] * 6))
+        assert len(provider.prompts) == MAX_SYNTAX_REPAIRS + 1
+
+    def test_a_refused_run_is_still_never_written(self, project: Path):
+        result, _ = drive(spec_for(project), BROKEN, BROKEN, BROKEN)
+        with pytest.raises(ValueError, match="not written"):
+            commit(result)
+
+    def test_a_suppression_is_not_retried(self, project: Path):
+        """The other refusal is not an accident. Asking a model that just
+        tried to silence the auditor to try again invites a subtler attempt,
+        so only a syntax error gets a second chance.
+        """
+        cheating = {**CLEAN, "views_py": CLEAN["views_py"] + "# djaudit: ignore\n"}
+        result, provider = drive(spec_for(project), cheating, CLEAN)
+        assert result.outcome is Outcome.SUPPRESSED
+        assert len(provider.prompts) == 1

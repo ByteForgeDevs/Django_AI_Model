@@ -211,16 +211,69 @@ findings.
 **Consequence:** themes are a reading aid, not a work list. The ranked view is
 the work list.
 
+## Running a model on your own machine
+
+The layer talks to any server that speaks the OpenAI chat-completions shape,
+which includes ollama, llama.cpp's server, vLLM and LM Studio. Point `base_url`
+at it and leave the key out:
+
+```toml
+[tool.djaudit.llm]
+enabled   = true
+provider  = "openai"
+model     = "qwen2.5-coder:7b"
+base_url  = "http://127.0.0.1:11434/v1"
+max_tokens = 6000
+```
+
+Three things differ from a vendor, and each was a defect before it was a
+documented difference.
+
+**No credential is required, but only on loopback.** `LLMConfig.usable`
+normally refuses to run without a configured key. That rule exists to stop
+source code being posted to a remote host by a misconfiguration nobody
+noticed — it is about egress, not about authentication. A model on loopback
+has no egress to guard and no local runtime issues a key, so applying the rule
+literally locked the tool out of every model a user can run for free while
+leaving the threat it guards against untouched. The exemption is deliberately
+narrow: a literal loopback address or the exact name `localhost`. A private
+address like `10.0.0.5` is someone else's machine and still needs a key, and
+hostnames are **not** resolved, because what DNS answers here need not be what
+it answers at request time.
+
+**The token cap is spelled differently.** OpenAI renamed `max_tokens` to
+`max_completion_tokens`; local servers implement the original name and ignore
+the new one *without complaining*. Measured against ollama 0.6: a cap of 5 sent
+as `max_completion_tokens` returned 647 tokens and `finish_reason: stop`, while
+the same cap as `max_tokens` returned 5 and `length`. The wrong name is not an
+error, it is a budget that silently does nothing. `Endpoint.token_field` picks
+the spelling from the address.
+
+**It is much slower, and the default timeout assumed otherwise.** qwen2.5-coder
+7B on eight CPU cores with no GPU was measured at **2.6 tokens/second** — 703
+tokens in 268 seconds. The vendor-shaped default of 120 seconds times out
+mid-answer and then retries twice, turning one slow success into a six-minute
+failure. Loopback endpoints therefore get 900 seconds instead, and `timeout`
+is settable in the config table for anyone whose hardware disagrees.
+
+Structured output does work: ollama honoured `response_format: json_schema`
+with `strict: true` and returned schema-valid JSON.
+
 ## What has not been checked
 
 Stated plainly, because the sections above would otherwise imply more coverage
 than exists:
 
-- `ResponseSchema.as_json_schema()` renders to the dialect OpenAI's structured
-  outputs and Anthropic's tool inputs both document. It has been checked
-  against those **documents**, not against a live endpoint. No adapter exists.
+- `ResponseSchema.as_json_schema()` has now been exercised against a **live**
+  OpenAI-compatible endpoint (ollama), which accepted the strict json_schema
+  request and answered within it. It has still never been sent to OpenAI or
+  Anthropic themselves; for those two it is checked against their published
+  documents only.
 - The corpus prior has been measured on three projects. Three is enough to
   refute "any rule can be settled" and not enough to claim generality.
-- Everything here runs offline. The layer's behaviour under a *slow* or
-  *partially failing* real provider is modelled by `NullProvider` and the
-  hostile provider, which is not the same as having seen one.
+- A real provider has now been driven end to end, but a *local* one. Its
+  failure modes are not a vendor's: no rate limits, no 429s, no quota
+  exhaustion, no server-side content filtering. Those paths are still modelled
+  by `NullProvider` and the hostile provider rather than observed.
+- The generated code has been audited by the 87 rules, which is a statement
+  about the defects those rules cover and not about whether the app is good.

@@ -63,6 +63,15 @@ from djaudit.models import Confidence, Finding, Severity
 # attempts is not one call away from success.
 DEFAULT_MAX_ITERATIONS = 4
 
+# How many times a reply that does not parse may be sent back before the run
+# is refused. A syntax error is the most repairable defect there is -- the
+# observed ones were a single stray parenthesis and a class left without a
+# body -- and refusing the whole run for one is throwing away an app that is
+# otherwise correct. It is bounded low because a model that cannot produce
+# parseable Python twice is not about to on the third try, and every attempt
+# costs a full generation.
+MAX_SYNTAX_REPAIRS = 2
+
 # The markers a model might reach for to silence a rule instead of fixing it.
 SUPPRESSIONS = ("djaudit: ignore", "djaudit:ignore", "noqa: DJ", "# type: ignore[djaudit")
 
@@ -230,6 +239,11 @@ class Loop:
         files = dict(_content(reply))
         with TemporaryDirectory(prefix="djaudit-generate-") as tmp:
             for number in range(1, self.max_iterations + 1):
+                files, stop = self._parseable(files, repair)
+                if stop is not None:
+                    result.outcome, result.reason = stop
+                    return result
+
                 stop = self._check(files)
                 if stop is not None:
                     result.outcome, result.reason = stop
@@ -276,6 +290,41 @@ class Loop:
                 files = dict(_content(nxt))
 
         return result
+
+    def _parseable(
+        self,
+        files: dict[str, str],
+        repair: Callable[[dict[str, str], str], Prompt],
+    ) -> tuple[dict[str, str], tuple[Outcome, str] | None]:
+        """Send a reply that does not parse back to be fixed, within a budget.
+
+        Nothing about the safety property changes: unparseable code is still
+        never written, and a run that cannot be repaired still ends in
+        `UNPARSEABLE`. What changes is that one stray parenthesis no longer
+        discards an otherwise correct app.
+
+        Only a syntax error is retried. A suppression comment is left to
+        `_check`, because that is not an accident the model can be asked to
+        correct -- it is the degenerate optimum the loop exists to refuse, and
+        asking again only invites a subtler way of taking it.
+
+        The error text is passed through the ordinary repair prompt rather
+        than a bespoke one, so the model receives it exactly as it receives a
+        finding: with every file resent and the specification restated.
+        """
+        for attempt in range(MAX_SYNTAX_REPAIRS + 1):
+            broken = _syntax_error(files)
+            if not broken:
+                return files, None
+            if attempt == MAX_SYNTAX_REPAIRS:
+                return files, (Outcome.UNPARSEABLE, broken)
+
+            self._say(f"{broken}; asking for a correction")
+            reply = self.provider.ask(repair(files, f"{broken}\n  FIX: return valid Python."))
+            if isinstance(reply, Declined):
+                return files, (Outcome.UNPARSEABLE, f"{broken} (the model stopped answering)")
+            files = dict(_content(reply))
+        return files, None
 
     def _check(self, files: dict[str, str]) -> tuple[Outcome, str] | None:
         """The two hard refusals, before anything touches a filesystem."""
