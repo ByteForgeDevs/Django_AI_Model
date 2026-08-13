@@ -20,6 +20,8 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Added
 
+- **generate:** send a syntax error back before discarding the app (c19a1876)
+- **llm:** reach a model running on the user's own machine (449a6cfa)
 - **reporters:** render findings as one self-contained HTML file (16dd2d35)
 - **generate:** write a Django app, audit it, repair it, and refuse the shortcuts (f2f9f627)
 - **llm:** a real HTTP provider, so the seam built in Phase 6 has something behind it (53f54830)
@@ -226,6 +228,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Documentation
 
+- **plan:** Phase 10, and a gate that stopped counting at nine (91b24278)
 - **html:** propagate --format html through the reference pages (a0fbd2c2)
 - **report:** document the HTML report and what it admits (8bc2fb1c)
 - tell people how to actually run this, and stop pointing them at a 404 (c74d4bb0)
