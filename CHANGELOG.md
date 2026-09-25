@@ -20,6 +20,7 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Added
 
+- **reporters:** render findings as one self-contained HTML file (16dd2d35)
 - **generate:** write a Django app, audit it, repair it, and refuse the shortcuts (f2f9f627)
 - **llm:** a real HTTP provider, so the seam built in Phase 6 has something behind it (53f54830)
 - **mcp:** serve djaudit to coding agents over the Model Context Protocol (92e05a42)
@@ -225,6 +226,8 @@ fingerprints, and therefore to any baseline you have committed.
 
 ### Documentation
 
+- **html:** propagate --format html through the reference pages (a0fbd2c2)
+- **report:** document the HTML report and what it admits (8bc2fb1c)
 - tell people how to actually run this, and stop pointing them at a 404 (c74d4bb0)
 - **generate:** what the loop refuses, and what "clean" does not prove (4c263bf9)
 - **configurations:** describe the shape, not the library (947e31c7)

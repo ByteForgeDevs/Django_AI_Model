@@ -44,7 +44,7 @@ is refused by name with the spelling it should have had.
 | `ignore` | list of rule ids | none | `--ignore` |
 | `exclude_paths` | list of glob patterns | none | `--exclude-path` |
 | `baseline` | path | none | `--baseline` |
-| `format` | `"terminal"`, `"json"`, `"sarif"` | `"terminal"` | `--format` |
+| `format` | `"terminal"`, `"json"`, `"sarif"`, `"html"` | `"terminal"` | `--format` |
 | `output` | path | stdout | `-o` / `--output` |
 
 Rule ids are upper-cased on both paths, so `ignore = ["djp-001"]` works.

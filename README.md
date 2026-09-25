@@ -167,7 +167,16 @@ uv run djaudit run /path/to/project --fail-on high
 
 # machine-readable
 uv run djaudit run /path/to/project --format json --output findings.json
+
+# for someone who does not use a terminal: one self-contained file, opens with a double-click
+uv run djaudit run /path/to/project --format html --output report.html
 ```
+
+The HTML report renders the same payload as `--format json`, so the two cannot
+disagree about a run. It filters by family, severity and confidence in the
+page, fetches nothing when opened, and surfaces the caveats — what the
+threshold hid, what failed to parse, which rules crashed. See
+[`docs/report.md`](docs/report.md).
 
 Every finding prints a `fingerprint`. Pass one back to `explain` to get the
 full rationale, the remediation, and what else in that file is wrong for the
@@ -250,6 +259,9 @@ uv run djaudit run /path/to/django/project
 
 # CI: SARIF for GitHub code scanning
 uv run djaudit run . --format sarif --output djaudit.sarif
+
+# A report to send someone: no checkout, no terminal, no network
+uv run djaudit run . --format html --output report.html
 
 # Adopting on an existing codebase: accept today's findings, fail only on new ones
 uv run djaudit run . --write-baseline .djaudit-baseline.json

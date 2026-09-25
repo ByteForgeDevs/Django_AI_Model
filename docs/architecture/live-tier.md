@@ -49,9 +49,9 @@ answer is a tool that gets run with `yes |` in front of it — which converts a
 safety feature into a line of boilerplate that everybody copies and nobody
 reads.
 
-The notice goes to **stderr**. `--format json` and `--format sarif` write
-machine input to stdout, and a security notice that corrupts the document it is
-warning you about would be its own small joke.
+The notice goes to **stderr**. `--format json`, `--format sarif` and
+`--format html` all write a document to stdout, and a security notice that
+corrupts the document it is warning you about would be its own small joke.
 
 A live tier that cannot start is not a reason to abandon the audit. `Consent`
 carries the failure as data rather than raising, the static tier runs its full

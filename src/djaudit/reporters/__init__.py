@@ -9,6 +9,7 @@ class OutputFormat(StrEnum):
     TERMINAL = "terminal"
     JSON = "json"
     SARIF = "sarif"
+    HTML = "html"
 
 
 __all__ = ["OutputFormat"]

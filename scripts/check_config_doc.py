@@ -14,6 +14,14 @@ security property nobody wrote down is one the next person removes.
 
 It also checks the flag column, since `--exclude-path` being documented as
 `--exclude` is the same defect wearing a different hat.
+
+And it checks the *values* column for the keys whose values are a closed set.
+That was added after the page spent a release telling readers `format` accepted
+`"terminal"`, `"json"` and `"sarif"` — true when written, and wrong the moment a
+fourth reporter landed. Every check above passed while it was wrong, because
+they all read the key and none of them read the row. A missing value is worse
+than a missing key: a missing key is invisible, whereas a documented list reads
+as exhaustive, so the reader concludes the format they wanted does not exist.
 """
 
 from __future__ import annotations
@@ -29,12 +37,25 @@ import typer.main
 
 from djaudit.cli import app
 from djaudit.config import EXECUTING, KNOWN, SUBTABLES
+from djaudit.models import Confidence, Family, Severity
+from djaudit.reporters import OutputFormat
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "docs" / "configuration.md"
 # A key named in the settings table, as `| `min_severity` | ...`
 ROW = re.compile(r"^\|\s*`([a-z_]+)`\s*\|", re.MULTILINE)
 FLAG = re.compile(r"`(--[a-z-]+)`")
+# The whole row, so the values cell can be read rather than just the key.
+CELLS = re.compile(r"^\|\s*`([a-z_]+)`\s*\|([^|]*)\|", re.MULTILINE)
+
+# Keys whose values are a closed set the code owns. Anything not listed here
+# takes a path, a glob or a rule id, and has no enumeration to fall out of date.
+CLOSED: dict[str, list[str]] = {
+    "format": [member.value for member in OutputFormat],
+    "min_severity": [member.value for member in Severity],
+    "min_confidence": [member.value for member in Confidence],
+    "family": [member.value for member in Family],
+}
 
 
 def _group() -> typer.core.TyperGroup:
@@ -88,6 +109,21 @@ def check() -> int:
         if flag not in options:
             problems.append(f"the page names {flag}, which `djaudit run` does not have")
 
+    values = dict(CELLS.findall(text))
+    for key, allowed in sorted(CLOSED.items()):
+        cell = values.get(key)
+        if cell is None:
+            continue  # the missing-key checks above already cover this
+        listed = set(re.findall(r"`\"?([A-Za-z_]+)\"?`", cell))
+        for value in allowed:
+            if value not in listed:
+                problems.append(
+                    f"{key!r} accepts {value!r}, and the values column omits it — "
+                    f"a documented list reads as exhaustive"
+                )
+        for value in sorted(listed - set(allowed)):
+            problems.append(f"the values column offers {key} = {value!r}, which the code rejects")
+
     if problems:
         print("::error::the configuration reference does not match the configuration:")
         for problem in problems:
@@ -96,7 +132,8 @@ def check() -> int:
 
     print(
         f"configuration reference current: {len(documented)} keys · "
-        f"{len(SUBTABLES)} subtables · {len(EXECUTING)} refusals documented"
+        f"{len(SUBTABLES)} subtables · {len(EXECUTING)} refusals documented · "
+        f"{sum(len(v) for v in CLOSED.values())} enumerated values"
     )
     return 0
 

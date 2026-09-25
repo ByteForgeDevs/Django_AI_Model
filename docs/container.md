@@ -76,6 +76,19 @@ path confined to `originalUriBaseIds`. A report produced at `/src` therefore
 uploads to code scanning with the same paths as one produced on the host — the
 container's directory layout does not leak into the annotations.
 
+The same applies to `--format html`, which is the usual reason to reach for the
+container: it produces a report for somebody who has neither a checkout nor a
+Python toolchain, and the image means you do not need one either.
+
+```console
+$ docker run --rm -v "$PWD:/src:ro" ghcr.io/byteforgedevs/djaudit:0.4.0 \
+    run /src --format html > report.html
+```
+
+The file is self-contained and offline, so it survives leaving the container
+with nothing to resolve — no CDN, no webfont, no asset directory to copy out
+alongside it.
+
 ### Exit codes
 
 Unchanged from the CLI, and they are the container's exit code:

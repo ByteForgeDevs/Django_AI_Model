@@ -103,5 +103,11 @@ Stated plainly, because a gate people over-trust is worse than no gate.
   does not describe it.
 - **The terminal reporter.** Human-readable output is deliberately not a
   contract. Parse the JSON.
+- **The HTML report's layout.** Same reasoning as the terminal reporter, and
+  for the same reason: it is for a person. Headings, classes and styling may
+  change in any release. The JSON embedded in it at `id="djaudit-payload"` is
+  a different matter — it is the `--format json` payload byte for byte, so it
+  *is* covered by `SCHEMA_VERSION`, and a report can be re-processed later with
+  the same guarantees as the JSON file it was rendered beside.
 - **Python and Django support windows.** Dropping a version is breaking and
   governed by `__version__` alone; there is no gate for it.
